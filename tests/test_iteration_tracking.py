@@ -13,6 +13,7 @@ from svztagent.core.manifest import (
     resolve_submitted_job_id,
     write_manifest,
 )
+from svztagent.core.errors import ConfigError
 from svztagent.core.state import RunLifecycleState
 from svztagent.hpc.fake import FakeFileTransferAdapter, FakeRemoteExecAdapter, FakeSchedulerAdapter
 from svztagent.hpc.interfaces import CommandResult, ExecutionMode
@@ -115,6 +116,69 @@ def test_advance_tune_iteration_max_iter_failure(sample_config_files):
     assert result.action == "max_iter_failed"
     updated = read_manifest(paths.manifest)
     assert updated.tuning_iteration_tracker.status == "failed_max_iter"
+
+
+def test_advance_tune_iteration_allows_raising_max_iterations(sample_config_files):
+    paths, _ctx = init_run_workspace(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-iter-raise-cap",
+    )
+    manifest = read_manifest(paths.manifest)
+    manifest.tuning_iteration_tracker.max_iterations = 1
+    manifest = mark_iteration_decision(manifest, iteration=1, decision="not_close")
+    write_manifest(manifest, paths.manifest)
+
+    result = advance_tune_iteration(
+        workspace_root=sample_config_files,
+        run_id="run-iter-raise-cap",
+        max_iterations=2,
+        execute=False,
+    )
+
+    assert result.action == "advanced_no_submit"
+    assert result.next_iteration == 2
+    updated = read_manifest(paths.manifest)
+    assert updated.tuning_iteration_tracker.current_iteration == 2
+    assert updated.tuning_iteration_tracker.max_iterations == 2
+
+
+def test_advance_tune_iteration_rejects_nonpositive_max_iterations(sample_config_files):
+    paths, _ctx = init_run_workspace(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-iter-lower-cap",
+    )
+
+    with pytest.raises(ConfigError, match="max_iterations must be >= 1"):
+        advance_tune_iteration(
+            workspace_root=sample_config_files,
+            run_id="run-iter-lower-cap",
+            max_iterations=0,
+            execute=False,
+        )
+
+
+def test_advance_tune_iteration_rejects_max_below_current_iteration(sample_config_files):
+    paths, _ctx = init_run_workspace(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-iter-below-current-cap",
+    )
+    manifest = read_manifest(paths.manifest)
+    manifest.tuning_iteration_tracker.current_iteration = 2
+    write_manifest(manifest, paths.manifest)
+
+    with pytest.raises(ConfigError, match="cannot be lower than the current iteration"):
+        advance_tune_iteration(
+            workspace_root=sample_config_files,
+            run_id="run-iter-below-current-cap",
+            max_iterations=1,
+            execute=False,
+        )
 
 
 def test_advance_tune_iteration_needs_review_pauses_without_submit(sample_config_files):

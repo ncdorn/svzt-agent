@@ -9,6 +9,8 @@ from typing import Any
 import yaml
 
 from svztagent.config.models import (
+    AdaptationDefaults,
+    AdaptationModelConfig,
     ClusterConfig,
     ImpedanceTuningConfig,
     Iteration1SeedConfig,
@@ -21,6 +23,13 @@ from svztagent.config.models import (
 )
 from svztagent.core.errors import ConfigError
 from svztagent.core.paths import validate_remote_patient_read_path
+
+
+_REPOSITORY_DISCOVERY_ORDER: dict[str, tuple[str, ...]] = {
+    "svzt_agent": ("../svzt-agent",),
+    "svZeroDTrees": ("../svZeroDTrees",),
+    "svZeroDSolver": ("../../svZeroDSolver", "../svZeroDSolver"),
+}
 
 
 def detect_workspace_root(workspace_root: str | Path | None = None) -> Path:
@@ -80,6 +89,10 @@ def load_workspace_config(workspace_root: str | Path) -> WorkspaceConfig:
     clusters_raw = _load_yaml(root / "config" / "clusters.yaml")
     patients_raw = _load_yaml(root / "config" / "patients.yaml")
     defaults_raw = _load_yaml(root / "config" / "defaults.yaml")
+    repositories_path = root / "config" / "repositories.yaml"
+    repositories_raw: dict[str, Any] = {}
+    if repositories_path.exists():
+        repositories_raw = _load_yaml(repositories_path)
 
     if "clusters" not in clusters_raw:
         raise ConfigError("config/clusters.yaml must define top-level key 'clusters'")
@@ -87,6 +100,10 @@ def load_workspace_config(workspace_root: str | Path) -> WorkspaceConfig:
         raise ConfigError("config/patients.yaml must define top-level key 'patients'")
     if "defaults" not in defaults_raw:
         raise ConfigError("config/defaults.yaml must define top-level key 'defaults'")
+    if repositories_raw and "repositories" not in repositories_raw:
+        raise ConfigError(
+            "config/repositories.yaml must define top-level key 'repositories'"
+        )
 
     try:
         return WorkspaceConfig.model_validate(
@@ -94,10 +111,48 @@ def load_workspace_config(workspace_root: str | Path) -> WorkspaceConfig:
                 "clusters": clusters_raw["clusters"],
                 "patients": patients_raw["patients"],
                 "defaults": defaults_raw["defaults"],
+                "repositories": repositories_raw.get("repositories", {}),
             }
         )
     except Exception as exc:
         raise ConfigError(f"Workspace config validation failed: {exc}") from exc
+
+
+def _resolve_local_repo_path(workspace_root: Path, configured_path: str) -> Path:
+    candidate = Path(configured_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = workspace_root / candidate
+    return candidate.resolve()
+
+
+def resolve_repository_locations(
+    config: WorkspaceConfig,
+    workspace_root: str | Path,
+) -> dict[str, str | None]:
+    root = Path(workspace_root).expanduser().resolve()
+    configured = config.repositories.model_dump(mode="json", exclude_none=True)
+    resolved: dict[str, str | None] = {}
+
+    for repo_key, discovery_candidates in _REPOSITORY_DISCOVERY_ORDER.items():
+        configured_path = configured.get(repo_key)
+        if configured_path is not None:
+            candidate = _resolve_local_repo_path(root, configured_path)
+            if not candidate.exists():
+                raise ConfigError(
+                    f"Configured repository path for '{repo_key}' does not exist: {candidate}"
+                )
+            resolved[repo_key] = str(candidate)
+            continue
+
+        discovered = None
+        for relative_path in discovery_candidates:
+            candidate = _resolve_local_repo_path(root, relative_path)
+            if candidate.exists():
+                discovered = candidate
+                break
+        resolved[repo_key] = str(discovered) if discovered is not None else None
+
+    return resolved
 
 
 def resolve_cluster(config: WorkspaceConfig, cluster_name: str) -> ClusterConfig:
@@ -194,6 +249,30 @@ def _resolve_patient_impedance_config(
             merged["tune_space"] = override_payload.pop("tune_space")
         merged.update(override_payload)
     return ImpedanceTuningConfig.model_validate(merged)
+
+
+def _resolve_patient_adaptation_config(
+    config: WorkspaceConfig,
+    patient: PatientConfig,
+) -> AdaptationDefaults:
+    merged = config.defaults.adaptation.model_dump(mode="json")
+    override = patient.adaptation
+    if override is not None:
+        override_payload = override.model_dump(mode="json", exclude_none=True)
+        if "parameter_sets" in override_payload:
+            merged["parameter_sets"] = override_payload.pop("parameter_sets")
+        if "models" in override_payload:
+            model_overrides = override_payload.pop("models")
+            merged_models = dict(merged.get("models") or {})
+            for key, value in model_overrides.items():
+                if value is None:
+                    continue
+                base_model = dict(merged_models.get(key) or {})
+                base_model.update(value)
+                merged_models[key] = base_model
+            merged["models"] = merged_models
+        merged.update(override_payload)
+    return AdaptationDefaults.model_validate(merged)
 
 
 def _resolve_patient_mesh_scale_factor(
@@ -296,6 +375,7 @@ def resolve_patient_alias(
         patient_assets=patient_assets,
         threed=_resolve_patient_threed_config(config, patient),
         impedance=_resolve_patient_impedance_config(config, patient),
+        adaptation=_resolve_patient_adaptation_config(config, patient),
         mesh_scale_factor=_resolve_patient_mesh_scale_factor(config, patient),
         data_policy=patient.data_policy,
         patient_data_root=cluster.remote_roots.patient_data_root,

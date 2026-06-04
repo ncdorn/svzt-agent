@@ -5,9 +5,11 @@
 - The next major architectural change is workflow decomposition, not a new framework. `tune_trees.py` should become a workflow package with explicit modules for context, planning, staging, rendering, execution, status, fetch, advance, watch, and shared workflow-local types.
 - Keep canonical lifecycle/state-machine behavior in `svztagent.core.state`, `svztagent.core.transitions`, and `svztagent.core.manifest`.
 - Keep domain computation and scientific tuning/evaluation logic in upstream repos; `svzt-agent` should only stage inputs, invoke bounded contracts, and ingest deterministic artifacts.
+- Keep repository discovery and provenance handling layout-agnostic so `svzt-agent` can run from installed packages or sibling checkouts under `ppas-dev/`.
 
 ## Operator UX
 - Improve `status` so the operator can quickly see lifecycle state, active iteration, child-job state, best-known stage, latest decision, and likely recovery action.
+- Keep explicit sibling workflows (`preop select`, `run postop`, `run adapt`) inspectable and rerunnable per stage/model rather than hiding adaptation behind postop submission.
 - Improve `watch` summaries so terminal output clearly distinguishes scheduler failure, workflow review pause, convergence, and max-iteration exhaustion.
 - Make dry-run output easier to read by separating plan summary, path safety summary, command previews, and expected artifact contract.
 - Keep CLI changes minimal and high-value; favor clearer output and a few explicit subcommands over adding many new flags.

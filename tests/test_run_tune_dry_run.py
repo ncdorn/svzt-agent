@@ -1,9 +1,23 @@
 from __future__ import annotations
 
+from pathlib import Path
+import shutil
+
 from svztagent.core.manifest import read_manifest, record_lifecycle_transition, write_manifest
 from svztagent.core.state import RunLifecycleState
 from svztagent.hpc.interfaces import ExecutionMode
 from svztagent.workflows.tune_trees import _iteration_impedance_config, run_tune_trees
+
+
+def _switch_to_sibling_repo_layout(workspace: Path) -> dict[str, Path]:
+    shutil.rmtree(workspace / "repos")
+    sibling_root = workspace.parent
+    paths = {}
+    for name in ("svzt-agent", "svZeroDTrees", "svZeroDSolver"):
+        path = sibling_root / name
+        path.mkdir(parents=True, exist_ok=True)
+        paths[name] = path
+    return paths
 
 
 def test_iteration_impedance_config_nonzero_diameter_scale_disables_mean_assignment():
@@ -42,6 +56,36 @@ def test_run_tune_dry_run_updates_manifest_and_previews(sample_config_files):
     )
     assert manifest.execution.plan_path.endswith("/run-dry-001/execution_plan.yaml")
     assert manifest.jobs[0]["mode"] == "dry_run"
+
+
+def test_run_tune_dry_run_supports_sibling_repo_layout_without_changing_run_contract(
+    sample_config_files,
+):
+    sibling_paths = _switch_to_sibling_repo_layout(sample_config_files)
+
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-dry-sibling-layout",
+        mode=ExecutionMode.DRY_RUN,
+    )
+
+    manifest = read_manifest(
+        sample_config_files / "runs" / "run-dry-sibling-layout" / "manifest.yaml"
+    )
+    expected_runs_root = (sample_config_files / "remote_runs").as_posix()
+    expected_remote_run_dir = f"{expected_runs_root}/run-dry-sibling-layout"
+
+    assert manifest.repos["svzt_agent"] == str(sibling_paths["svzt-agent"].resolve())
+    assert manifest.repos["svZeroDTrees"] == str(sibling_paths["svZeroDTrees"].resolve())
+    assert manifest.repos["svZeroDSolver"] == str(sibling_paths["svZeroDSolver"].resolve())
+    assert manifest.local_paths.run_dir.endswith("/runs/run-dry-sibling-layout")
+    assert manifest.local_paths.iterations.endswith("/runs/run-dry-sibling-layout/iterations")
+    assert manifest.remote["runs_root"] == expected_runs_root
+    assert manifest.remote["remote_run_dir"] == expected_remote_run_dir
+    assert manifest.execution.remote_run_dir == expected_remote_run_dir
+    assert result.remote_run_dir == expected_remote_run_dir
 
 
 def test_run_tune_iter_dry_run_can_skip_zerod_tuning(sample_config_files):

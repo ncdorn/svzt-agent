@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import json
+from typing import Literal
 
 import yaml
 
@@ -19,6 +20,8 @@ from svztagent.hpc.interfaces import (
     SchedulerAdapter,
     SyncDirection,
 )
+from svztagent.hpc.slurm import SlurmSchedulerAdapter, SlurmSubmitOptions
+from svztagent.workflows.paraview_viz import _resolve_viz_config, submit_preop_paraview_viz
 from svztagent.workflows.tune_trees import _build_default_adapters
 
 
@@ -34,12 +37,77 @@ class PostprocessSubmissionResult:
     command_previews: list[list[str]]
 
 
+def _postprocess_workers_from_config(
+    config,
+) -> int | Literal["auto"]:
+    return config.defaults.postprocess.resistance_map.workers
+
+
+def _parse_positive_int(value: object) -> int | None:
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned or cleaned.startswith("<") and cleaned.endswith(">"):
+            return None
+        try:
+            parsed = int(cleaned)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _resolved_postprocess_worker_count(
+    config,
+    *,
+    fallback_cpus: int | None = None,
+) -> int:
+    workers = _postprocess_workers_from_config(config)
+    if workers != "auto":
+        return int(workers)
+    parsed_fallback = _parse_positive_int(fallback_cpus)
+    if parsed_fallback is not None:
+        return parsed_fallback
+    parsed_scheduler_cpus = _parse_positive_int(config.defaults.scheduler.cpus)
+    if parsed_scheduler_cpus is not None:
+        return parsed_scheduler_cpus
+    return 4
+
+
+def _build_postprocess_scheduler_adapter(
+    *,
+    cluster,
+    config,
+    remote_exec: RemoteExecAdapter,
+    run_id: str,
+    cpus_per_task: int | None,
+    mem: str | None,
+) -> SchedulerAdapter:
+    cpus = config.defaults.scheduler.cpus
+    if cpus_per_task is not None:
+        cpus = str(cpus_per_task)
+    submit_mem = mem if mem is not None else config.defaults.scheduler.mem
+    return SlurmSchedulerAdapter(
+        remote_exec=remote_exec,
+        runs_root=cluster.remote_roots.runs_root,
+        submit_options=SlurmSubmitOptions(
+            job_name=run_id,
+            account=config.defaults.scheduler.account,
+            partition=config.defaults.scheduler.partition,
+            wall_time=config.defaults.scheduler.wall_time,
+            mem=submit_mem,
+            cpus=cpus,
+        ),
+    )
+
+
 def _load_stage_target_payload(
     workspace_root: Path,
     *,
     patient_alias: str,
     stage: str,
-) -> dict[str, float] | None:
+) -> dict[str, object] | None:
     path = workspace_root / "config" / "clinical_targets.yaml"
     if not path.exists():
         return None
@@ -56,7 +124,7 @@ def _load_stage_target_payload(
     if not isinstance(mpa_pressure, list) or len(mpa_pressure) < 3 or rpa_split is None:
         return None
     return {
-        "mpa_p": [float(mpa_pressure[0]), float(mpa_pressure[1]), float(mpa_pressure[2])],
+        "mpa_pressure": [float(mpa_pressure[0]), float(mpa_pressure[1]), float(mpa_pressure[2])],
         "rpa_split": float(rpa_split),
     }
 
@@ -81,18 +149,60 @@ fi
 """
 
 
+def _render_postprocess_slurm_header(
+    *,
+    remote_root: str,
+    remote_logs_dir: str,
+    cpus_per_task: int | None = None,
+    mem: str | None = None,
+    account: str | None = None,
+    partition: str | None = None,
+    wall_time_hours: int | None = None,
+    nodes: int | None = None,
+    ntasks_per_node: int | None = None,
+) -> str:
+    header = [
+        f"#SBATCH --chdir={remote_root}",
+        f"#SBATCH --output={remote_logs_dir}/slurm-%j.out",
+        f"#SBATCH --error={remote_logs_dir}/%x_%j.error",
+    ]
+    if account:
+        header.append(f"#SBATCH --account={account}")
+    if partition:
+        header.append(f"#SBATCH --partition={partition}")
+    if wall_time_hours is not None:
+        header.append(f"#SBATCH --time={wall_time_hours}:00:00")
+    if nodes is not None:
+        header.append(f"#SBATCH --nodes={nodes}")
+    if ntasks_per_node is not None:
+        header.append(f"#SBATCH --ntasks-per-node={ntasks_per_node}")
+    if cpus_per_task is not None:
+        header.append(f"#SBATCH --cpus-per-task={cpus_per_task}")
+    if mem is not None:
+        header.append(f"#SBATCH --mem={mem}")
+    return "\n".join(header)
+
+
 def _render_postprocess_script(
     *,
     config,
     cluster,
+    remote_root: str,
+    remote_logs_dir: str,
     simulation_dir: str,
     output_dir: str,
     centerline: str,
     svslicer_path: str,
     stage: str,
-    clinical_targets_payload: dict[str, float] | None,
+    clinical_targets_payload: dict[str, object] | None,
     fallback_clinical_targets_csv: str | None = None,
     inflow_csv: str | None = None,
+    resistance_map_workers: int | Literal["auto"] | None = None,
+    cpus_per_task: int | None = None,
+    mem: str | None = None,
+    account: str | None = None,
+    partition: str | None = None,
+    wall_time_hours: int | None = None,
 ) -> str:
     clinical_targets_expr = (
         json.dumps(clinical_targets_payload, sort_keys=True)
@@ -100,7 +210,17 @@ def _render_postprocess_script(
         else ("None" if fallback_clinical_targets_csv is None else json.dumps(fallback_clinical_targets_csv))
     )
     inflow_expr = "None" if inflow_csv is None else json.dumps(inflow_csv)
+    slurm_header = _render_postprocess_slurm_header(
+        remote_root=remote_root,
+        remote_logs_dir=remote_logs_dir,
+        cpus_per_task=cpus_per_task,
+        mem=mem,
+        account=account,
+        partition=partition,
+        wall_time_hours=wall_time_hours,
+    )
     return f"""#!/usr/bin/env bash
+{slurm_header}
 set -euo pipefail
 
 {_python_bootstrap(config)}
@@ -113,17 +233,32 @@ import json
 
 from svzerodtrees.post_processing import run_pulmonary_threed_postprocess_suite
 
-result = run_pulmonary_threed_postprocess_suite(
-    simulation_dir={json.dumps(simulation_dir)},
-    output_dir={json.dumps(output_dir)},
-    centerline={json.dumps(centerline)},
-    stage={json.dumps(stage)},
-    svslicer_path={json.dumps(svslicer_path)},
-    clinical_targets={clinical_targets_expr},
-    inflow_csv={inflow_expr},
-)
-Path({json.dumps(str(PurePosixPath(output_dir) / "postprocess_submission.json"))}).write_text(
-    json.dumps(result, indent=2, sort_keys=True),
+submission_path = Path({json.dumps(str(PurePosixPath(output_dir) / "postprocess_submission.json"))})
+metadata_path = Path({json.dumps(str(PurePosixPath(output_dir) / "postprocess_suite_metadata.json"))})
+try:
+    result = run_pulmonary_threed_postprocess_suite(
+        simulation_dir={json.dumps(simulation_dir)},
+        output_dir={json.dumps(output_dir)},
+        centerline={json.dumps(centerline)},
+        stage={json.dumps(stage)},
+        svslicer_path={json.dumps(svslicer_path)},
+        clinical_targets={clinical_targets_expr},
+        inflow_csv={inflow_expr},
+        resistance_map_workers={json.dumps(resistance_map_workers)},
+    )
+except Exception as exc:
+    payload = {{
+        "status": "failed",
+        "error": {{
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }},
+        "metadata_json": str(metadata_path) if metadata_path.exists() else None,
+    }}
+    submission_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    raise
+submission_path.write_text(
+    json.dumps({{"status": "completed", "result": result}}, indent=2, sort_keys=True),
     encoding="utf-8",
 )
 PY
@@ -155,6 +290,57 @@ def _selected_preop_remote_layout(remote_run_dir: str, iteration: int) -> dict[s
     }
 
 
+def _submit_paraview_viz_if_configured(
+    *,
+    cluster,
+    config,
+    patient_alias: str,
+    root: Path,
+    validated_run_id: str,
+    iteration: int,
+    transfer_adapter: FileTransferAdapter,
+    remote_exec_adapter: RemoteExecAdapter,
+) -> None:
+    """Submit a paraview viz job alongside postprocess if pvpython and cycle_duration_s are set.
+
+    Runs in parallel with the postprocess job (no SLURM dependency) since both operate
+    directly on the raw VTU simulation files. Silently skips with a message if either
+    prerequisite is missing rather than raising.
+    """
+    if cluster.executables.pvpython_path is None:
+        print("[postprocess] ParaView viz skipped: pvpython_path not set in clusters.yaml")
+        return
+
+    patient_cfg = next((p for p in config.patients if p.alias == patient_alias), None)
+    patient_override = (
+        patient_cfg.postprocess.paraview_viz
+        if patient_cfg is not None and patient_cfg.postprocess is not None
+        else None
+    )
+    viz_cfg = _resolve_viz_config(config.defaults.postprocess.paraview_viz, patient_override)
+
+    if viz_cfg.cycle_duration_s is None:
+        print(
+            "[postprocess] ParaView viz skipped: set cycle_duration_s in "
+            f"patients.yaml under {patient_alias!r} → postprocess.paraview_viz"
+        )
+        return
+
+    try:
+        pviz_result = submit_preop_paraview_viz(
+            workspace_root=root,
+            run_id=validated_run_id,
+            iteration=iteration,
+            cycle_duration_s=viz_cfg.cycle_duration_s,
+            transfer_adapter=transfer_adapter,
+            scheduler_adapter=None,  # pviz builds its own with mem=32G, cpus=1
+            remote_exec_adapter=remote_exec_adapter,
+        )
+        print(f"[postprocess] Also submitted ParaView viz job {pviz_result.submitted_job_id}")
+    except Exception as exc:
+        print(f"[postprocess] Warning: ParaView viz submission failed: {exc}")
+
+
 def submit_selected_preop_postprocess(
     *,
     workspace_root: str | Path,
@@ -184,6 +370,11 @@ def submit_selected_preop_postprocess(
     patient_alias = str(manifest.patient.get("alias"))
     clinical_targets_payload = _load_stage_target_payload(root, patient_alias=patient_alias, stage="preop")
     svzerodtrees_paths = manifest.remote.get("svzerodtrees_paths", {})
+    resistance_map_workers = _resolved_postprocess_worker_count(config)
+    cpus_per_task = resistance_map_workers
+    mem = None
+    if cpus_per_task > 1:
+        mem = config.defaults.postprocess.resistance_map.selected_preop_mem
     fallback_csv = svzerodtrees_paths.get("clinical_targets")
     centerline = svzerodtrees_paths.get("centerlines")
     inflow_csv = svzerodtrees_paths.get("inflow")
@@ -194,6 +385,8 @@ def submit_selected_preop_postprocess(
     script_body = _render_postprocess_script(
         config=config,
         cluster=cluster,
+        remote_root=remote_layout["remote_root"],
+        remote_logs_dir=remote_layout["remote_logs_dir"],
         simulation_dir=simulation_dir,
         output_dir=remote_layout["remote_results_dir"],
         centerline=str(centerline),
@@ -202,6 +395,9 @@ def submit_selected_preop_postprocess(
         clinical_targets_payload=clinical_targets_payload,
         fallback_clinical_targets_csv=str(fallback_csv) if fallback_csv else None,
         inflow_csv=str(inflow_csv) if inflow_csv else None,
+        resistance_map_workers=resistance_map_workers,
+        cpus_per_task=cpus_per_task,
+        mem=mem,
     )
     local_layout["job_script"].write_text(script_body, encoding="utf-8")
 
@@ -213,8 +409,16 @@ def submit_selected_preop_postprocess(
             mode=ExecutionMode.EXECUTE,
         )
         transfer_adapter = transfer_adapter or default_transfer
-        scheduler_adapter = scheduler_adapter or default_scheduler
         remote_exec_adapter = remote_exec_adapter or default_remote
+        if scheduler_adapter is None:
+            scheduler_adapter = _build_postprocess_scheduler_adapter(
+                cluster=cluster,
+                config=config,
+                remote_exec=remote_exec_adapter,
+                run_id=validated_run_id,
+                cpus_per_task=cpus_per_task,
+                mem=mem,
+            )
 
     command_results = [
         transfer_adapter.ensure_remote_dir(remote_layout["remote_root"]),
@@ -247,6 +451,20 @@ def submit_selected_preop_postprocess(
         note="Selected preop postprocess submitted",
     )
     write_manifest(manifest, local_paths.manifest)
+
+    # Submit ParaView viz job in parallel (independent of postprocess, same VTU files).
+    # Requires pvpython_path in clusters.yaml and cycle_duration_s in the patient's
+    # postprocess.paraview_viz config block.
+    _submit_paraview_viz_if_configured(
+        cluster=cluster,
+        config=config,
+        patient_alias=patient_alias,
+        root=root,
+        validated_run_id=validated_run_id,
+        iteration=iteration,
+        transfer_adapter=transfer_adapter,
+        remote_exec_adapter=remote_exec_adapter,
+    )
 
     return PostprocessSubmissionResult(
         run_id=validated_run_id,

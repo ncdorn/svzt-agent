@@ -133,6 +133,7 @@ class StatusQueryResult:
     raw_state: str | None
     normalized_state: NormalizedRunState
     source: str
+    active_workflow: str = "tune"
     current_iteration: int = 1
     max_iterations: int = 1
     tracker_status: str = "active"
@@ -149,6 +150,11 @@ class StatusQueryResult:
     postop_job_id: str | None = None
     postop_job_state_raw: str | None = None
     postop_job_state_normalized: NormalizedRunState | None = None
+    adaptation_model: str | None = None
+    adaptation_parameter_set: str | None = None
+    adaptation_job_id: str | None = None
+    adaptation_job_state_raw: str | None = None
+    adaptation_job_state_normalized: NormalizedRunState | None = None
     failure_error_log_path: str | None = None
     failure_error_log_tail: str | None = None
 
@@ -312,6 +318,12 @@ def _current_iteration_record(manifest):
         (record for record in tracker.iterations if record.iteration == tracker.current_iteration),
         None,
     )
+
+
+def _latest_adaptation_run(manifest):
+    if not getattr(manifest, "adaptation_runs", None):
+        return None
+    return manifest.adaptation_runs[-1]
 
 
 def _resolve_iteration_progress_remote_dir(*, manifest, cluster, run_id: str, iteration: int) -> str:
@@ -1875,6 +1887,88 @@ def query_run_status(
 
     tracker = updated.tuning_iteration_tracker
     current_iteration = tracker.current_iteration
+    latest_adaptation = _latest_adaptation_run(updated)
+    if latest_adaptation is not None and latest_adaptation.scheduler_job_id == job_id:
+        state_label = poll_result.normalized_state.value
+        detail = (
+            f"Adaptation {latest_adaptation.model} using parameter set "
+            f"{latest_adaptation.parameter_set} is {state_label}."
+        )
+        if poll_result.normalized_state == RunLifecycleState.COMPLETED:
+            detail = (
+                f"Adaptation {latest_adaptation.model} completed. "
+                f"Comparison artifact: {latest_adaptation.comparison_path or '<pending>'}."
+            )
+        elif poll_result.normalized_state in {RunLifecycleState.FAILED, RunLifecycleState.CANCELLED}:
+            detail = (
+                f"Adaptation {latest_adaptation.model} ended with "
+                f"{poll_result.normalized_state.value}."
+            )
+        failure_error_log_path = None
+        failure_error_log_tail = None
+        if poll_result.normalized_state in {RunLifecycleState.FAILED, RunLifecycleState.CANCELLED}:
+            failure_error_log_path, failure_error_log_tail = _resolve_failure_error_log(
+                run_id=validated_run_id,
+                job_id=job_id,
+                local_paths=local_paths,
+                manifest=updated,
+                transfer_adapter=transfer_adapter,
+            )
+        return StatusQueryResult(
+            run_id=validated_run_id,
+            job_id=job_id,
+            raw_state=poll_result.raw_state,
+            normalized_state=poll_result.normalized_state,
+            source=poll_result.scheduler_source,
+            active_workflow="adapt",
+            current_iteration=current_iteration,
+            max_iterations=tracker.max_iterations,
+            tracker_status=tracker.status,
+            stage_key="adaptation",
+            stage_label="Adaptation workflow",
+            stage_detail=detail,
+            decision=None,
+            needs_review_reason=None,
+            progress_source="manifest",
+            progress_warnings=[],
+            adaptation_model=latest_adaptation.model,
+            adaptation_parameter_set=latest_adaptation.parameter_set,
+            adaptation_job_id=latest_adaptation.scheduler_job_id,
+            adaptation_job_state_raw=poll_result.raw_state,
+            adaptation_job_state_normalized=poll_result.normalized_state,
+            failure_error_log_path=failure_error_log_path,
+            failure_error_log_tail=failure_error_log_tail,
+        )
+
+    if updated.postop_run is not None and updated.postop_run.postop_job_id == job_id:
+        detail = f"Explicit postop simulation is {poll_result.normalized_state.value}."
+        if poll_result.normalized_state == RunLifecycleState.COMPLETED:
+            detail = (
+                "Explicit postop simulation completed. "
+                f"Remote dir: {updated.postop_run.remote_dir}."
+            )
+        return StatusQueryResult(
+            run_id=validated_run_id,
+            job_id=job_id,
+            raw_state=poll_result.raw_state,
+            normalized_state=poll_result.normalized_state,
+            source=poll_result.scheduler_source,
+            active_workflow="postop",
+            current_iteration=current_iteration,
+            max_iterations=tracker.max_iterations,
+            tracker_status=tracker.status,
+            stage_key="postop",
+            stage_label="Explicit postop workflow",
+            stage_detail=detail,
+            decision=None,
+            needs_review_reason=None,
+            progress_source="manifest",
+            progress_warnings=[],
+            postop_job_id=updated.postop_run.postop_job_id,
+            postop_job_state_raw=poll_result.raw_state,
+            postop_job_state_normalized=poll_result.normalized_state,
+        )
+
     progress = _load_iteration_progress_artifacts(
         run_id=validated_run_id,
         iteration=current_iteration,
@@ -2309,6 +2403,15 @@ def _missing_expected_artifacts(*, local_pull_root: Path, manifest) -> list[str]
         )
         if not log_files and not result_files:
             missing.append(f"iterations/{iter_name}/logs_or_results")
+
+    for record in getattr(manifest, "adaptation_runs", []) or []:
+        model_dir = local_pull_root / "adaptation" / f"from-{iteration_dir_name(int(record.source_preop_iteration))}" / str(record.model).lower()
+        results_dir = model_dir / "results"
+        if not results_dir.exists():
+            missing.append(str(results_dir.relative_to(local_pull_root)))
+            continue
+        if not any(path.is_file() for path in results_dir.rglob("*")):
+            missing.append(str(results_dir.relative_to(local_pull_root)))
     return missing
 
 
@@ -2380,6 +2483,39 @@ def fetch_run_artifacts(
             )
         )
 
+    for record in getattr(manifest, "adaptation_runs", []) or []:
+        remote_adapt_dir = str(record.remote_dir or "").strip()
+        if not remote_adapt_dir:
+            continue
+        local_adapt_root = (
+            local_pull_root
+            / "adaptation"
+            / f"from-{iteration_dir_name(int(record.source_preop_iteration))}"
+            / str(record.model).lower()
+        )
+        local_adapt_logs = local_adapt_root / "logs"
+        local_adapt_results = local_adapt_root / "results"
+        local_adapt_logs.mkdir(parents=True, exist_ok=True)
+        local_adapt_results.mkdir(parents=True, exist_ok=True)
+        sync_results.append(
+            transfer_adapter.sync(
+                local_dir=str(local_adapt_logs),
+                remote_dir=str(PurePosixPath(remote_adapt_dir) / "logs"),
+                include=[],
+                exclude=[],
+                direction=SyncDirection.PULL,
+            )
+        )
+        sync_results.append(
+            transfer_adapter.sync(
+                local_dir=str(local_adapt_results),
+                remote_dir=str(PurePosixPath(remote_adapt_dir) / "results"),
+                include=[],
+                exclude=[],
+                direction=SyncDirection.PULL,
+            )
+        )
+
     executed_pull = any(not result.dry_run for result in sync_results)
     fetched_files = _gather_fetched_files(local_pull_root)
     fetched_artifacts = fetched_files or pull_patterns
@@ -2423,6 +2559,7 @@ def advance_tune_iteration(
     workspace_root: str | Path,
     run_id: str,
     *,
+    max_iterations: int | None = None,
     execute: bool = False,
     transfer_adapter: FileTransferAdapter | None = None,
     scheduler_adapter: SchedulerAdapter | None = None,
@@ -2433,6 +2570,22 @@ def advance_tune_iteration(
     local_paths, manifest, _config, _cluster = _resolve_cluster_for_run(root, validated_run_id)
 
     tracker = manifest.tuning_iteration_tracker
+    if max_iterations is not None:
+        if max_iterations < 1:
+            raise ConfigError("max_iterations must be >= 1")
+        if max_iterations < tracker.current_iteration:
+            raise ConfigError(
+                "max_iterations cannot be lower than the current iteration "
+                f"({tracker.current_iteration})"
+            )
+        if max_iterations != tracker.max_iterations:
+            tracker.max_iterations = max_iterations
+            if manifest.progress_tracker is not None and manifest.progress_tracker.iterations is not None:
+                manifest.progress_tracker.iterations["max"] = max_iterations
+                manifest.progress_tracker.updated_at = utc_now_iso()
+            manifest.updated_at = utc_now_iso()
+            write_manifest(manifest, local_paths.manifest)
+
     current_iteration = tracker.current_iteration
     current_record = next(
         (rec for rec in tracker.iterations if rec.iteration == current_iteration),

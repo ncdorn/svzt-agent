@@ -25,6 +25,7 @@ MANIFEST
 venv/
 env/
 ENV/
+.vendor_runtime/
 
 .pytest_cache/
 .coverage

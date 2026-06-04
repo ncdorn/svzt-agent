@@ -88,6 +88,11 @@ Reports the decision (`converged` / `not_close` / `needs_review`), current itera
 svzt advance-iter --run-id <run-id> --execute
 ```
 
+If the run hit the default 5-iteration cap but you want to keep going, raise it explicitly when advancing:
+```bash
+svzt advance-iter --run-id <run-id> --max-iterations 8 --execute
+```
+
 **If `converged`** — record the converged preop iteration, then submit postop explicitly:
 ```bash
 svzt preop select --run-id <run-id> --iteration <n> --reason "best tuned preop"
@@ -98,6 +103,15 @@ svzt run postop --run-id <run-id> --execute
 `svzt preop select` now also submits a selected-preop postprocess job that
 generates `mpa_pressure_vs_time.csv/png`, flow-split comparison artifacts, and
 resistance-map outputs under `iterations/iter-XX/results/postprocess/`.
+Scheduler logs for that job are written under
+`iterations/iter-XX/postprocess/logs/`. The job also writes
+`postprocess_submission.json` and `postprocess_suite_metadata.json` so partial
+artifact generation and failure context are preserved. Resistance-map frame
+mapping now supports bounded parallelism controlled by
+`defaults.postprocess.resistance_map.workers`. Selected-preop jobs request
+matching `--cpus-per-task`, resolving `auto` against the selected-preop
+allocation, and when more than one worker is requested they also request
+`defaults.postprocess.resistance_map.selected_preop_mem`.
 
 **If `needs_review` due to a driver timeout** — the `svzt status` output prints a tip. Force-advance to the next iteration:
 ```bash
@@ -126,6 +140,29 @@ Fetches whatever `defaults.artifacts.pull` specifies in the workspace YAML — t
 Selected-preop and explicit postop postprocess outputs are written under the run
 tree at `iterations/iter-XX/results/postprocess/` and
 `postop/from-iter-XX/results/postprocess/`.
+Their Slurm stdout/stderr logs live under `iterations/iter-XX/postprocess/logs/`
+and `postop/from-iter-XX/logs/`.
+Explicit postop runs receive the same resistance-map worker setting, resolving
+`auto` against the single-node child postprocess allocation using the resolved
+3D `procs_per_node`, but they do not modify the enclosing postop solver job
+resource request.
+
+## Build the finalized CFD results JSON
+
+Once the selected-preop and explicit-postop postprocess artifacts are present
+locally, normalize the run-scoped structured output:
+
+```bash
+svzt postprocess cfd-results --run-id <run-id>
+```
+
+Useful flags:
+- `--source-json <path>` to migrate an older/manual JSON into the new template while refreshing run-derived fields
+- `--overwrite` to replace an existing `runs/<run_id>/cfd-results.json`
+- `--template <path>` or `--output <path>` for one-off migrations
+
+The command reads local run artifacts only. If the needed postprocess files are
+still remote, fetch or sync them first.
 
 ---
 

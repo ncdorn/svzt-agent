@@ -30,8 +30,9 @@ class RemoteRoots(BaseModel):
 class ClusterExecutables(BaseModel):
     svfsiplus_path: str
     svslicer_path: str | None = None
+    pvpython_path: str | None = None
 
-    @field_validator("svfsiplus_path", "svslicer_path")
+    @field_validator("svfsiplus_path", "svslicer_path", "pvpython_path")
     @classmethod
     def _must_be_absolute(cls, value: str | None) -> str | None:
         if value is None:
@@ -51,6 +52,47 @@ class ClusterConfig(BaseModel):
     notes: str | None = None
 
 
+class PatientParaViewVizOverride(BaseModel):
+    """Patient-specific camera overrides merged on top of defaults.postprocess.paraview_viz.
+
+    Only set what differs per patient (typically camera_offset_dir + camera_view_up).
+    All other ParaView settings (mem, wall_time_hours, image_resolution, field names)
+    fall through to the global defaults.
+
+    cycle_duration_s: cardiac cycle duration in seconds (period of the inflow waveform).
+        Required for the paraview viz to identify the last cardiac cycle in the simulation.
+        When set, the viz job is submitted automatically alongside postprocess jobs.
+    """
+
+    camera_offset_dir: list[float] | None = None
+    camera_view_up: list[float] | None = None
+    image_resolution: list[int] | None = None
+    wall_time_hours: int | None = None
+    mem: str | None = None
+    cpus: int | None = None
+    cycle_duration_s: float | None = None
+
+    @field_validator("camera_offset_dir", "camera_view_up")
+    @classmethod
+    def _vec3(cls, value: list[float] | None) -> list[float] | None:
+        if value is not None and len(value) != 3:
+            raise ValueError("must be a 3-element list")
+        return value
+
+    @field_validator("image_resolution")
+    @classmethod
+    def _res(cls, value: list[int] | None) -> list[int] | None:
+        if value is not None and (len(value) != 2 or any(v <= 0 for v in value)):
+            raise ValueError("image_resolution must be [width, height] with positive integers")
+        return value
+
+
+class PatientPostprocessOverrides(BaseModel):
+    """Patient-level postprocess block, mirroring defaults.postprocess structure."""
+
+    paraview_viz: PatientParaViewVizOverride | None = None
+
+
 class PatientConfig(BaseModel):
     alias: str
     remote_path: str
@@ -58,6 +100,8 @@ class PatientConfig(BaseModel):
     data_policy: Literal["read_only", "mutable"] = "read_only"
     mesh_scale_factor: float | None = None
     tuning: "PatientTuningOverrides | None" = None
+    adaptation: "PatientAdaptationOverrides | None" = None
+    postprocess: PatientPostprocessOverrides | None = None
     notes: str | None = None
 
     @field_validator("remote_path", "permanent_remote_path")
@@ -134,6 +178,92 @@ class MonitoringDefaults(BaseModel):
         if value < 5:
             raise ValueError("poll_interval_seconds must be >= 5")
         return value
+
+
+class ResistanceMapPostprocessConfig(BaseModel):
+    workers: Literal["auto"] | int = "auto"
+    selected_preop_mem: str = "64G"
+
+    @field_validator("workers", mode="before")
+    @classmethod
+    def _normalize_workers(cls, value: object) -> Literal["auto"] | int:
+        if value is None:
+            return "auto"
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned == "auto":
+                return "auto"
+            try:
+                value = int(cleaned)
+            except ValueError as exc:
+                raise ValueError("workers must be 'auto' or a positive integer") from exc
+        if isinstance(value, int):
+            if value <= 0:
+                raise ValueError("workers must be > 0")
+            return value
+        raise ValueError("workers must be 'auto' or a positive integer")
+
+    @field_validator("selected_preop_mem")
+    @classmethod
+    def _selected_preop_mem_nonempty(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("selected_preop_mem cannot be empty")
+        return cleaned
+
+
+class ParaViewVizConfig(BaseModel):
+    image_resolution: list[int] = Field(default_factory=lambda: [1920, 1080])
+    camera_offset_dir: list[float] = Field(default_factory=lambda: [1.0, -1.0, 1.0])
+    # Optional explicit view-up vector.  When null the script auto-selects Z-up
+    # (or Y-up when camera_offset_dir is nearly vertical).  Set this after reading
+    # the value from the ParaView GUI Python Shell: GetActiveCamera().GetViewUp()
+    camera_view_up: list[float] | None = None
+    pressure_field: str = "Pressure"
+    velocity_field: str = "Velocity"
+    wss_field: str = "WSS"
+    displacement_field: str = "Displacement"
+    wall_time_hours: int = 2
+    mem: str = "32G"
+    cpus: int = 1
+    # Cardiac cycle duration in seconds. Set per-patient in postprocess.paraview_viz.
+    # When present, the viz job is submitted automatically alongside postprocess jobs.
+    cycle_duration_s: float | None = None
+
+    @field_validator("image_resolution")
+    @classmethod
+    def _image_resolution_valid(cls, value: list[int]) -> list[int]:
+        if len(value) != 2 or any(v <= 0 for v in value):
+            raise ValueError("image_resolution must be [width, height] with positive integers")
+        return value
+
+    @field_validator("camera_offset_dir")
+    @classmethod
+    def _camera_dir_valid(cls, value: list[float]) -> list[float]:
+        if len(value) != 3:
+            raise ValueError("camera_offset_dir must be a 3-element list")
+        return value
+
+    @field_validator("camera_view_up")
+    @classmethod
+    def _camera_view_up_valid(cls, value: list[float] | None) -> list[float] | None:
+        if value is not None and len(value) != 3:
+            raise ValueError("camera_view_up must be a 3-element list or null")
+        return value
+
+    @field_validator("wall_time_hours", "cpus")
+    @classmethod
+    def _positive_int(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("value must be > 0")
+        return value
+
+
+class PostprocessDefaults(BaseModel):
+    resistance_map: ResistanceMapPostprocessConfig = Field(
+        default_factory=ResistanceMapPostprocessConfig
+    )
+    paraview_viz: ParaViewVizConfig = Field(default_factory=ParaViewVizConfig)
 
 
 class Iteration1SeedConfig(BaseModel):
@@ -511,6 +641,90 @@ class PatientTuningOverrides(BaseModel):
     impedance: PatientImpedanceOverrides | None = None
 
 
+class AdaptationModelConfig(BaseModel):
+    iterations: int | None = None
+    wss_gain: float | None = None
+    ims_gain: float | None = None
+    compliance_gain: float | None = None
+    k_arr: list[float] | None = None
+    terminal_resistance: float | None = None
+
+    @field_validator("iterations")
+    @classmethod
+    def _iterations_positive(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+        if value <= 0:
+            raise ValueError("iterations must be > 0")
+        return value
+
+    @field_validator("k_arr")
+    @classmethod
+    def _validate_k_arr(cls, value: list[float] | None) -> list[float] | None:
+        if value is None:
+            return value
+        if len(value) != 4:
+            raise ValueError("k_arr must contain exactly 4 values")
+        return [float(item) for item in value]
+
+
+class AdaptationModelsConfig(BaseModel):
+    m1: AdaptationModelConfig = Field(default_factory=AdaptationModelConfig)
+    m2: AdaptationModelConfig = Field(
+        default_factory=lambda: AdaptationModelConfig(
+            iterations=1,
+            wss_gain=1.0,
+            ims_gain=1.0,
+            compliance_gain=1.0,
+        )
+    )
+    m3: AdaptationModelConfig = Field(
+        default_factory=lambda: AdaptationModelConfig(
+            iterations=1,
+            k_arr=[1.0, 1.0, 1.0, 1.0],
+        )
+    )
+
+
+class AdaptationParameterSet(BaseModel):
+    m1: AdaptationModelConfig | None = None
+    m2: AdaptationModelConfig | None = None
+    m3: AdaptationModelConfig | None = None
+
+
+class AdaptationDefaults(BaseModel):
+    default_model: Literal["M1", "M2", "M3"] = "M2"
+    territory_scheme: Literal["lpa_rpa"] = "lpa_rpa"
+    target_stage: Literal["postop"] = "postop"
+    parameter_policy: Literal["global_fixed"] = "global_fixed"
+    parameter_sets: dict[str, AdaptationParameterSet] = Field(default_factory=dict)
+    models: AdaptationModelsConfig = Field(default_factory=AdaptationModelsConfig)
+
+
+class PatientAdaptationModelOverrides(BaseModel):
+    iterations: int | None = None
+    wss_gain: float | None = None
+    ims_gain: float | None = None
+    compliance_gain: float | None = None
+    k_arr: list[float] | None = None
+    terminal_resistance: float | None = None
+
+
+class PatientAdaptationModelsOverrides(BaseModel):
+    m1: PatientAdaptationModelOverrides | None = None
+    m2: PatientAdaptationModelOverrides | None = None
+    m3: PatientAdaptationModelOverrides | None = None
+
+
+class PatientAdaptationOverrides(BaseModel):
+    default_model: Literal["M1", "M2", "M3"] | None = None
+    territory_scheme: Literal["lpa_rpa"] | None = None
+    target_stage: Literal["postop"] | None = None
+    parameter_policy: Literal["global_fixed"] | None = None
+    parameter_sets: dict[str, AdaptationParameterSet] | None = None
+    models: PatientAdaptationModelsOverrides | None = None
+
+
 class PatientDataLayoutDefaults(BaseModel):
     clinical_targets_csv: str = "clinical_targets.csv"
     centerlines_vtp: str = "centerlines.vtp"
@@ -551,8 +765,10 @@ class DefaultsConfig(BaseModel):
     execution: ExecutionDefaults = Field(default_factory=ExecutionDefaults)
     validation: ValidationDefaults = Field(default_factory=ValidationDefaults)
     monitoring: MonitoringDefaults = Field(default_factory=MonitoringDefaults)
+    postprocess: PostprocessDefaults = Field(default_factory=PostprocessDefaults)
     mesh_scale_factor: float = 1.0
     tuning: TuningDefaults = Field(default_factory=TuningDefaults)
+    adaptation: AdaptationDefaults = Field(default_factory=AdaptationDefaults)
     patient_data_layout: PatientDataLayoutDefaults = Field(
         default_factory=PatientDataLayoutDefaults
     )
@@ -565,10 +781,27 @@ class DefaultsConfig(BaseModel):
         return value
 
 
+class RepositoryLocationsConfig(BaseModel):
+    svzt_agent: str | None = None
+    svZeroDTrees: str | None = None
+    svZeroDSolver: str | None = None
+
+    @field_validator("svzt_agent", "svZeroDTrees", "svZeroDSolver")
+    @classmethod
+    def _repository_path_nonempty(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("repository path cannot be empty")
+        return cleaned
+
+
 class WorkspaceConfig(BaseModel):
     clusters: list[ClusterConfig]
     patients: list[PatientConfig]
     defaults: DefaultsConfig
+    repositories: RepositoryLocationsConfig = Field(default_factory=RepositoryLocationsConfig)
 
 
 class PatientAssetPaths(BaseModel):
@@ -591,6 +824,7 @@ class ResolvedPatient(BaseModel):
     patient_assets: PatientAssetPaths | None = None
     threed: ThreedTuningConfig
     impedance: ImpedanceTuningConfig
+    adaptation: AdaptationDefaults
     mesh_scale_factor: float
     data_policy: str
     patient_data_root: str

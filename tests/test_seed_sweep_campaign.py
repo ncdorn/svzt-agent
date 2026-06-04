@@ -2,11 +2,23 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import shutil
 
 import yaml
 
 from svztagent.campaigns import seed_sweep
 from svztagent.hpc.interfaces import ExecutionMode
+
+
+def _switch_to_sibling_repo_layout(workspace: Path) -> dict[str, Path]:
+    shutil.rmtree(workspace / "repos")
+    sibling_root = workspace.parent
+    paths = {}
+    for name in ("svzt-agent", "svZeroDTrees", "svZeroDSolver"):
+        path = sibling_root / name
+        path.mkdir(parents=True, exist_ok=True)
+        paths[name] = path
+    return paths
 
 
 def _add_campaign_patients(workspace: Path) -> None:
@@ -235,3 +247,48 @@ def test_seed_sweep_summary_and_slides(sample_config_files, monkeypatch, tmp_pat
     )
     assert slides.exists()
     assert slides.suffix == ".pptx"
+
+
+def test_seed_sweep_campaign_run_supports_sibling_repo_layout(
+    sample_config_files, monkeypatch, tmp_path
+):
+    sibling_paths = _switch_to_sibling_repo_layout(sample_config_files)
+    _add_campaign_patients(sample_config_files)
+    learned_root = tmp_path / "learned"
+    for alias in ("TST-STAN-1", "TST-STAN-5"):
+        path = learned_root / alias / "baseline_0d_learned.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"boundary_conditions": []}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        seed_sweep,
+        "learned_model_path",
+        lambda patient: learned_root / patient / "baseline_0d_learned.json",
+    )
+    monkeypatch.setattr(seed_sweep, "_prepare_rri_seed", _fake_prepare_rri_seed)
+
+    manifest = seed_sweep.plan_seed_sweep_campaign(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        campaign_id="seed-sweep-sibling-layout",
+    )
+    child_workspace = Path(manifest["child_runs"][0]["child_workspace"])
+    repositories_yaml = yaml.safe_load(
+        (child_workspace / "config" / "repositories.yaml").read_text(encoding="utf-8")
+    )
+    assert repositories_yaml["repositories"]["svzt_agent"] == str(
+        sibling_paths["svzt-agent"].resolve()
+    )
+    assert repositories_yaml["repositories"]["svZeroDTrees"] == str(
+        sibling_paths["svZeroDTrees"].resolve()
+    )
+    assert repositories_yaml["repositories"]["svZeroDSolver"] == str(
+        sibling_paths["svZeroDSolver"].resolve()
+    )
+
+    result = seed_sweep.run_seed_sweep_campaign(
+        workspace_root=sample_config_files,
+        campaign_id="seed-sweep-sibling-layout",
+        mode=ExecutionMode.DRY_RUN,
+    )
+    assert len(result["last_run_results"]) == 3

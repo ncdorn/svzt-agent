@@ -56,6 +56,7 @@ clusters:
     executables:
       svfsiplus_path: "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
       svslicer_path: "/home/users/ndorn/bin/svslicer"
+      pvpython_path: "/home/groups/amarsden/ParaView-5.13.3-osmesa-MPI-Linux-Python3.10-x86_64/bin/pvpython"
     remote_roots:
       patient_data_root: "{patient_data_root.as_posix()}"
       permanent_data_root: "{permanent_data_root.as_posix()}"
@@ -96,6 +97,12 @@ defaults:
     env_activation_hooks:
       - "source ~/.bashrc"
       - "conda activate svz"
+  postprocess:
+    resistance_map:
+      workers: "auto"
+      selected_preop_mem: "64G"
+    paraview_viz:
+      cycle_duration_s: 0.8
   mesh_scale_factor: 1.0
   validation:
     require_dry_run_before_execute: true

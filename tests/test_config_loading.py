@@ -40,6 +40,8 @@ def test_load_workspace_config_success(sample_config_files):
     assert config.defaults.tuning.impedance.tune_space.tied[0].name == "comp.rpa.k2"
     assert config.defaults.tuning.impedance.use_mean is True
     assert config.defaults.execution.python_executable == "python3"
+    assert config.defaults.postprocess.resistance_map.workers == "auto"
+    assert config.defaults.postprocess.resistance_map.selected_preop_mem == "64G"
 
 
 def test_load_workspace_config_supports_patient_seed_override(sample_config_files):
@@ -372,6 +374,40 @@ defaults:
     )
 
     with pytest.raises(ConfigError, match="bound strings"):
+        load_workspace_config(sample_config_files)
+
+
+def test_load_workspace_config_supports_postprocess_defaults(sample_config_files):
+    (sample_config_files / "config" / "defaults.yaml").write_text(
+        """
+defaults:
+  postprocess:
+    resistance_map:
+      workers: 3
+      selected_preop_mem: "96G"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_workspace_config(sample_config_files)
+    assert config.defaults.postprocess.resistance_map.workers == 3
+    assert config.defaults.postprocess.resistance_map.selected_preop_mem == "96G"
+
+
+def test_invalid_postprocess_workers_fail_validation(sample_config_files):
+    (sample_config_files / "config" / "defaults.yaml").write_text(
+        """
+defaults:
+  postprocess:
+    resistance_map:
+      workers: 0
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="workers"):
         load_workspace_config(sample_config_files)
 
 

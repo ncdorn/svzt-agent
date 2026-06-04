@@ -1,18 +1,52 @@
 # Execution Mode
 
 ## Commands
+- `svzt init-workspace [<path>] [--force]`
+- `svzt config validate`
+- `svzt doctor`
 - `svzt run tune --cluster <name> --patient <alias> [--run-id <id>] [--execute]`
 - `svzt run tune-iter --cluster <name> --patient <alias> --run-id <id> [--iteration <n>] [--execute]`
 - `svzt preop select --run-id <id> --iteration <n> [--reason <text>]`
 - `svzt run postop --run-id <id> [--dry-run|--execute]`
+- `svzt run adapt --run-id <id> --model M1|M2|M3 [--parameter-set <name>] [--dry-run|--execute]`
+- `svzt postprocess cfd-results --run-id <id> [--source-json <path>] [--template <path>] [--output <path>] [--overwrite]`
 - `svzt campaign seed-sweep plan --cluster <name> [--campaign-id <id>] [--patients <alias> ...]`
 - `svzt campaign seed-sweep run <campaign-id> [--dry-run|--execute]`
 - `svzt campaign seed-sweep summarize <campaign-id>`
 - `svzt campaign seed-sweep slides <campaign-id>`
-- `svzt advance-iter --run-id <id> [--execute]`
+- `svzt campaign adapt-benchmark plan [--campaign-id <id>] [--run-ids <run-id> ...] [--models M1 M2 M3] [--parameter-set <name>] [--benchmark-mode predict|retrospective_fit]`
+- `svzt campaign adapt-benchmark run <campaign-id> [--dry-run|--execute]`
+- `svzt campaign adapt-benchmark summarize <campaign-id>`
+- `svzt advance-iter --run-id <id> [--max-iterations <n>] [--execute]`
 - `svzt watch <run-id> [--auto-advance] [--poll-interval-seconds <n>] [--timeout-seconds <n>] [--max-polls <n>] [--fetch-on-complete]`
 - `svzt status <run-id>`
 - `svzt fetch <run-id> [--dry-run]`
+
+## Workspace Repository Locations
+- Core workspace config remains:
+  - `config/clusters.yaml`
+  - `config/patients.yaml`
+  - `config/defaults.yaml`
+- Optional local checkout overrides live in `config/repositories.yaml`:
+  - `repositories.svzt_agent`
+  - `repositories.svZeroDTrees`
+  - `repositories.svZeroDSolver`
+- Relative paths are resolved from the workspace root.
+- If `config/repositories.yaml` is absent, `svzt-agent` auto-discovers sibling
+  checkouts and otherwise records no local repo checkout paths.
+- If a repository path is configured explicitly, it must exist locally.
+
+## Workspace Bootstrap And Validation
+- `svzt init-workspace` creates a new local workspace root with example config
+  files for `clusters.yaml`, `patients.yaml`, `defaults.yaml`,
+  `clinical_targets.yaml`, and `repositories.yaml`.
+- The command also creates `runs/`, `mirrors/`, and `templates/` directories so
+  a new workspace starts with the expected local structure.
+- `svzt config validate` validates the required YAML config, reports cluster and
+  patient counts, and resolves the repository-location contract.
+- `svzt doctor` runs the same config validation and additionally reports
+  workspace warnings such as missing optional config files or absent local repo
+  checkouts.
 
 ## Iteration-1 Seed Configuration
 - Configure iteration-1 seed once in YAML:
@@ -70,8 +104,67 @@
 - Set `patients[].tuning.threed.tissue_support.enabled: false` when overriding a patient to `wall_model: rigid`.
 - Spatial Robin support uses `tissue_support.type: spatial` with `spatial_values_file_path` pointing to a VTP file containing `Stiffness` and `Damping` arrays.
 
+## Postprocess Configuration
+- Configure workflow-owned resistance-map postprocess defaults in YAML:
+  - `defaults.postprocess.resistance_map.workers`
+  - `defaults.postprocess.resistance_map.selected_preop_mem`
+- `workers` accepts:
+  - `auto`: resolve to the full single-node postprocess allocation that
+    `svzt-agent` requests for the job. Selected-preop prefers a numeric
+    `defaults.scheduler.cpus`; explicit postop prefers the resolved 3D
+    `procs_per_node`. When neither is numeric, it falls back to `4`.
+  - positive integer: request that exact number of frame-mapping workers
+- `selected_preop_mem` applies only to the standalone selected-preop postprocess
+  Slurm job submitted by `svzt preop select`. It does not change the explicit
+  postop solver job resources.
+
+## Run-Scoped CFD Results JSON
+- `svzt postprocess cfd-results` builds a finalized run-scoped CFD results JSON from the current template, an optional existing/source JSON, and the run's local selected-preop plus postop postprocess artifacts.
+- Default template path: `<workspace_root>/data/cfd-results/cfd-results-template.json`
+- Default output path: `<workspace_root>/runs/<run_id>/cfd-results.json`
+- Merge order:
+  - start from the template shape exactly
+  - overlay matching fields from the source JSON to preserve curated/manual values
+  - overwrite run-derived fields from local evidence
+  - drop legacy keys that are not present in the template
+- The command prefers systolic resistance-map artifacts when available and falls back to mean resistance summaries when selected-preop systolic outputs are missing.
+- When postop postprocess artifacts are still missing, the command preserves any curated measured fields from the source JSON and carries forward the best available manifest-backed run status instead of clearing the state back to `pending`.
+- This command is local normalization only. Remote generation and artifact fetch remain separate workflow/operator steps.
+
+## Adaptation Configuration
+- Configure adaptation defaults in YAML:
+  - `defaults.adaptation`
+  - optional `patients[].adaptation` override
+- Supported production-facing selectors:
+  - `default_model`: `M1|M2|M3`
+  - `territory_scheme`: currently `lpa_rpa`
+  - `target_stage`: currently `postop`
+  - `parameter_policy`: currently `global_fixed`
+  - `models.m1`, `models.m2`, `models.m3`
+  - optional named `parameter_sets`
+- `M1` is stabilized WSS-only structured-tree adaptation with frozen thickness.
+- `M2` is territory-level homeostatic WSS + pressure/IMS structured-tree adaptation.
+- `M3` wraps the higher-complexity CWSS+IMS ODE model behind the same workflow contract.
+- ParaView visualization follows the same stage-scoped artifact contract across
+  selected pre-op, explicit post-op, and adaptation:
+  - selected pre-op submits a sibling ParaView job immediately after the
+    selected-preop quantitative postprocess job
+  - explicit post-op manager submits a child ParaView job after the postop CMM
+    job reaches `COMPLETED`
+  - adaptation manager submits a child ParaView job after the adapted CMM job
+    reaches `COMPLETED`
+- Manager-owned ParaView jobs are submit-only. The parent postop/adaptation
+  manager does not wait for ParaView completion.
+- When enabled, ParaView outputs land under the stage results root:
+  - `iterations/iter-XX/results/paraview_viz/`
+  - `postop/from-iter-XX/results/paraview_viz/`
+  - `adaptation/from-iter-XX/<model>/results/paraview_viz/`
+- Manager-owned child submissions also write
+  `results/paraview_viz/paraview_viz_submission.json` with the owner job id,
+  child job id, script path, output dir, and submission timestamp.
+
 ## Dry-run vs execute
-- Default for `svzt run tune` and `svzt run postop` is dry-run.
+- Default for `svzt run tune`, `svzt run postop`, and `svzt run adapt` is dry-run.
 - Dry-run validates plan/safety rules, renders script, and prints command previews.
 - `--execute` enables remote directory creation, rsync transfers, and `sbatch` submission.
 
@@ -120,6 +213,7 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
   - the solver `.o*` file shows successful timestep progress, with no fatal solver error in the corresponding `.e*` file
 - A preop iteration is considered successfully running once the submitted 3D solver is printing successful timestep progress. Later clinical comparison, `not_close`/`converged` decisions, and postop submission are separate workflow outcomes.
 - `svzt advance-iter` advances run state after a `not_close` decision and can submit the next iteration (`--execute`).
+- `svzt advance-iter --max-iterations <n>` raises the manifest's iteration cap before advancing. This is the supported way to continue past the default cap of 5 on an existing run.
 - `svzt advance-iter` returns a pause action for `needs_review` and does not submit a new iteration job.
 - `svzt preop select` records `converged_preop_iteration` in the manifest. The
   selected iteration can be a formally converged iteration or an operator-promoted
@@ -127,7 +221,15 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
 - `svzt preop select` now also stages and submits a selected-preop postprocess
   job that writes normalized artifacts under
   `runs/<run_id>/iterations/iter-XX/results/postprocess/` on the cluster and
-  records `selected_preop_postprocess` in the manifest.
+  records `selected_preop_postprocess` in the manifest. Its Slurm stdout/stderr
+  now live under `runs/<run_id>/iterations/iter-XX/postprocess/logs/`, and the
+  job writes `postprocess_submission.json` plus
+  `postprocess_suite_metadata.json` for success/failure evidence. The generated
+  resistance-map step now supports bounded frame-level parallelism through
+  `defaults.postprocess.resistance_map.workers`; selected-preop jobs request
+  matching `--cpus-per-task`, resolving `auto` against the selected-preop
+  allocation, and when more than one worker is requested they also request
+  `defaults.postprocess.resistance_map.selected_preop_mem`.
 - `svzt run postop` consumes `converged_preop_iteration`, writes a postop plan
   under `runs/<run_id>/postop/from-iter-XX/`, and stages/submits the postop job
   under `<runs_root>/<run_id>/postop/from-iter-XX/`. If `--execute` is the first
@@ -135,13 +237,66 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
 - Explicit postop runs now execute the upstream `svZeroDTrees` pulmonary 3D
   postprocess suite after solver completion and write normalized artifacts under
   `<runs_root>/<run_id>/postop/from-iter-XX/results/postprocess/`. The cluster
-  config must provide `executables.svslicer_path`.
+  config must provide `executables.svslicer_path`. Postop postprocess Slurm
+  stdout/stderr live under `<runs_root>/<run_id>/postop/from-iter-XX/logs/`,
+  and the job writes `postop_submission.json` plus
+  `results/postprocess/postprocess_suite_metadata.json`. The postop postprocess
+  step receives the same resistance-map worker setting, resolving `auto`
+  against the single-node child postprocess allocation using the resolved 3D
+  `procs_per_node`. The enclosing explicit postop wrapper now requests the same
+  Slurm resources as the resolved
+  `threed` config, so the final postop transient solve uses the same wall
+  model, material properties, tissue support, timestep controls, node/task
+  topology, and canonical `svzerod_3Dcoupling.json` selection as the
+  corresponding preop stage. Before the postop transient inputs are written,
+  the wrapper also rewrites the copied tuned 0D config and copied
+  `svzerod_3Dcoupling.json` to the full patient inflow waveform so dirichlet
+  `simulation/inflow.flow` is generated from the 3D-scale inflow rather than
+  the reduced-order tuning inflow. Inside the explicit postop wrapper, the generated
+  `simulation/run_solver.sh` is executed in-place so its `srun` launch path and
+  module environment are preserved without submitting a nested Slurm job. For
+  deformable postop runs, explicit postop also generates a fresh run-scoped
+  postop-mesh prestress field before the final transient solve, unless that
+  postop workspace already contains a completed prestress result to reuse; the
+  nested prestress stage is normalized to a single-rank run while leaving the
+  final transient resources unchanged.
+- `svzt run adapt` is a separate explicit workflow. It requires both
+  `converged_preop_iteration` and `postop_run`, writes a plan under
+  `runs/<run_id>/adaptation/from-iter-XX/<model>/`, and stages/submits the
+  adaptation manager job under
+  `<runs_root>/<run_id>/adaptation/from-iter-XX/<model>/`.
+- Explicit adaptation uses the same patient inflow source-of-truth contract as
+  preop/postop 3D. Before adapted transient inputs are written, the workflow
+  rewrites the copied adapted 0D config and copied adapted
+  `svzerod_3Dcoupling.json` to the full patient waveform and then generates
+  `simulation/inflow.flow` from that 3D-scale inflow. It never rescales inflow
+  from reduced-order adaptation outputs.
+- `svzt run adapt --model M1|M2|M3` records one `adaptation_runs[]` entry per
+  submission, so multiple adaptation models can be run against the same source
+  postop case without overwriting each other.
+- The adaptation manager runs reduced-order adaptation first, writes:
+  - `results/adaptation_summary.json`
+  - `results/adaptation_metrics.json`
+  - `results/adapted_svzerod_3Dcoupling.json`
+  - `results/baseline_vs_adapted_comparison.json`
+  - `results/reduced_pa_flow_split_convergence.csv` for `M1`
+  - `results/reduced_pa_flow_split_convergence.png` for `M1`
+  then runs one adapted 3D solve on the postop mesh and inline postprocess for
+  both postop baseline and adapted prediction.
 - `svzt status <run-id>` now combines parent scheduler state with iteration progress artifacts:
   - prints the active iteration and tracker status
   - reports the best-known stage within the active iteration (`0D` tuning, preop `3D`, post-preop analysis, postop `3D`, or terminal branch outcome)
   - polls child preop/postop jobs when their job IDs are present in iteration
     artifacts or explicit postop manifest records
+  - prefers the latest explicit adaptation job when `adaptation_runs[]` exist,
+    and reports the active adaptation model/parameter-set in CLI output
   - performs a targeted pull of `iteration_driver_log.json`, `iteration_decision.json`, and `iteration_metrics.json` for the active iteration when those artifacts are not already available locally
+- `svzt fetch <run-id>` now also pulls adaptation logs/results under
+  `pulled_outputs/adaptation/from-iter-XX/<model>/`.
+- `svzt campaign adapt-benchmark` plans/runs/summarizes cohort comparisons by
+  replaying `svzt run adapt` across completed postop runs and writing
+  `adapt_benchmark_summary.json/csv` under
+  `runs/campaigns/<campaign-id>/`.
 - `svzt watch --auto-advance` composes monitor + decision pull + iteration advance/submit:
   - after each completed iteration, pulls:
     - remote: `<runs_root>/<run_id>/iterations/iter-XX/results/iteration_decision.json`

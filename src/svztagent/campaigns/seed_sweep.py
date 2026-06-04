@@ -14,6 +14,7 @@ import zipfile
 
 import yaml
 
+from svztagent.config.load import load_workspace_config, resolve_repository_locations
 from svztagent.core.errors import ConfigError
 from svztagent.hpc.interfaces import ExecutionMode
 from svztagent.workflows.tune_trees import (
@@ -76,6 +77,18 @@ def _copy_workspace_config(source_root: Path, target_root: Path) -> None:
     optional = source_root / "config" / "clinical_targets.yaml"
     if optional.exists():
         shutil.copy2(optional, config_dir / optional.name)
+    resolved_repositories = {
+        name: path
+        for name, path in resolve_repository_locations(
+            load_workspace_config(source_root), source_root
+        ).items()
+        if path is not None
+    }
+    if resolved_repositories:
+        _write_yaml(
+            config_dir / "repositories.yaml",
+            {"repositories": resolved_repositories},
+        )
     (target_root / "runs").mkdir(parents=True, exist_ok=True)
 
 

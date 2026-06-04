@@ -75,6 +75,16 @@ Generated prestress depends on seed-generation evidence already present under
 the run directory. If those `steady/mean` VTUs are missing, the iteration enters
 `needs_review` rather than creating an extra steady simulation.
 
+Explicit postop staging also consumes the same resolved `threed` config, but it
+must generate a fresh prestress field against the postop mesh for deformable
+wall runs. The final postop transient solve still preserves the resolved YAML
+`threed` settings and the selected iteration's canonical
+`svzerod_3Dcoupling.json`; only the nested prestress helper temporarily
+normalizes to a single-rank run so it can produce a
+postop-mesh-compatible `Prestress_file_path`. If the same postop workspace
+already contains a completed prestress result, the workflow reuses that
+run-scoped VTU instead of falling back to a patient-level prestress path.
+
 Spatial Robin tissue support may reference a VTP file through `tissue_support.spatial_values_file_path`; that file is read by svMultiPhysics from the staged simulation directory and should be provided as part of the patient/runtime input setup, not written back into patient source data.
 
 ## Impedance Tuning Runtime Config

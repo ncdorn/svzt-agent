@@ -63,6 +63,21 @@ artifact-fetch status.
 alongside `postop_run`. It points at the normalized artifact root under
 `postop/from-iter-XX/results/postprocess/`.
 
+`paraview_viz_runs[]` records ParaView visualization submissions for selected
+pre-op, explicit post-op, and adaptation stages. Selected-preop entries usually
+carry the child scheduler job id immediately because the sibling job is
+submitted directly by `svzt preop select`. Explicit postop/adaptation entries
+are appended at launch time with `status: planned` because the child job id is
+not known until the remote manager later submits the stage-owned ParaView job.
+The remote truth for those manager-owned child submissions is recorded in
+`results/paraview_viz/paraview_viz_submission.json`.
+
+`runs/<run_id>/cfd-results.json` is a run-scoped derived artifact produced from
+the template plus fetched/local postprocess evidence and manifest-backed run
+status. It is not a manifest
+field, and the manifest should only point to the source iteration and postprocess
+artifacts used to build it.
+
 `remote.svzerodtrees_paths` includes resolved 3D assets:
 - `mesh_surfaces`
 - `preop_mesh_complete`

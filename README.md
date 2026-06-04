@@ -33,17 +33,47 @@ pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://
 The installed console command remains `svzt`:
 
 ```bash
+svzt init-workspace ./svz-workspace
+svzt --workspace-root ./svz-workspace config validate
+svzt --workspace-root ./svz-workspace doctor
 svzt plan tune --cluster sherlock --patient TST-STAN-x --run-id demo-run
 svzt run tune --cluster sherlock --patient TST-STAN-x --run-id demo-run --execute
 svzt watch demo-run --fetch-on-complete --auto-advance
 svzt preop select --run-id demo-run --iteration 3 --reason "best tuned preop"
 svzt run postop --run-id demo-run --execute
+svzt postprocess cfd-results --run-id demo-run
 svzt campaign seed-sweep plan --cluster sherlock --campaign-id tst-stan-5-learned
 ```
 
 Cluster configs must provide both `executables.svfsiplus_path` and
 `executables.svslicer_path` for explicit postop and selected-preop 3D
 postprocessing.
+
+`svzt init-workspace` bootstraps a local workspace with example `config/`
+files plus `runs/`, `mirrors/`, and `templates/` directories. `svzt config
+validate` checks the required YAML config plus optional repository-location
+overrides, and `svzt doctor` summarizes local workspace diagnostics and
+checkout discovery warnings.
+
+Resistance-map frame mapping for selected-preop and explicit postop
+postprocessing is controlled by `defaults.postprocess.resistance_map.*`.
+When `workers: auto` is left in place, `svzt-agent` resolves it to the full
+single-node postprocess allocation instead of forcing a 4-worker cap:
+selected-preop uses `defaults.scheduler.cpus` when it is numeric, and explicit
+postop uses the resolved 3D `procs_per_node`. Both postprocess jobs request
+matching `--cpus-per-task`; selected-preop also uses `selected_preop_mem` when
+more than one worker is requested.
+
+Run-scoped CFD output JSONs are built locally with:
+
+```bash
+svzt --workspace-root /path/to/svz-workspace postprocess cfd-results --run-id <run-id>
+```
+
+By default this reads `data/cfd-results/cfd-results-template.json`, overlays any
+existing `runs/<run_id>/cfd-results.json` if present, refreshes run-derived
+fields from local artifacts and manifest-backed run status, and writes back to
+`runs/<run_id>/cfd-results.json`.
 
 For `iteration1_seed.source: generate`, dry-run previews only materialize the seed locally when the required patient assets are mounted locally; otherwise the Sherlock iteration driver generates the seed during `--execute`.
 

@@ -9,6 +9,7 @@ import shutil
 from pydantic import BaseModel, Field
 import yaml
 
+from svztagent.config.load import resolve_repository_locations
 from svztagent.config.models import ClusterConfig, ResolvedPatient, WorkspaceConfig
 from svztagent.core.errors import ConfigError
 from svztagent.core.paths import LocalRunPaths
@@ -119,6 +120,49 @@ class PostprocessRunRecord(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class ParaViewVizRecord(BaseModel):
+    stage: str
+    source_iteration: int
+    status: str = "pending"
+    local_dir: str
+    remote_dir: str
+    local_script_path: str | None = None
+    remote_script_path: str | None = None
+    scheduler_job_id: str | None = None
+    submitted_at: str | None = None
+    updated_at: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class AdaptationInflowProvenance(BaseModel):
+    source_path: str
+    fingerprint: str | None = None
+    metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+
+
+class AdaptationRunRecord(BaseModel):
+    model: str
+    mode: str
+    parameter_set: str
+    source_preop_iteration: int
+    source_postop_job_id: str | None = None
+    status: str = "pending"
+    territory_scheme: str = "lpa_rpa"
+    target_stage: str = "postop"
+    local_dir: str
+    remote_dir: str
+    local_job_script_path: str | None = None
+    remote_job_script_path: str | None = None
+    scheduler_job_id: str | None = None
+    submitted_at: str | None = None
+    updated_at: str | None = None
+    inflow_provenance: AdaptationInflowProvenance
+    artifact_roots: dict[str, str] = Field(default_factory=dict)
+    summary_path: str | None = None
+    comparison_path: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
 class TuningIterationTracker(BaseModel):
     current_iteration: int = 1
     max_iterations: int = 5
@@ -201,6 +245,8 @@ class RunManifest(BaseModel):
     postop_run: PostopRunRecord | None = None
     selected_preop_postprocess: PostprocessRunRecord | None = None
     postop_postprocess: PostprocessRunRecord | None = None
+    adaptation_runs: list[AdaptationRunRecord] = Field(default_factory=list)
+    paraview_viz_runs: list[ParaViewVizRecord] = Field(default_factory=list)
 
 
 def _utc_now_iso() -> str:
@@ -326,6 +372,17 @@ def _update_lifecycle_timestamps(
 
 
 def resolve_submitted_job_id(manifest: RunManifest) -> str | None:
+    if manifest.adaptation_runs:
+        for record in reversed(manifest.adaptation_runs):
+            candidate = str(record.scheduler_job_id or "").strip()
+            if candidate and not candidate.startswith("<"):
+                return candidate
+
+    if manifest.postop_run is not None and manifest.postop_run.postop_job_id:
+        candidate = str(manifest.postop_run.postop_job_id).strip()
+        if candidate and not candidate.startswith("<"):
+            return candidate
+
     tracker = manifest.tuning_iteration_tracker
     if tracker.iterations:
         active = next(
@@ -624,6 +681,106 @@ def record_postprocess_submission(
     return updated
 
 
+def record_paraview_viz_submission(
+    manifest: RunManifest,
+    *,
+    stage: str,
+    source_iteration: int,
+    local_dir: str,
+    remote_dir: str,
+    local_script_path: str | None = None,
+    remote_script_path: str | None = None,
+    scheduler_job_id: str | None = None,
+    note: str | None = None,
+    at: str | None = None,
+) -> RunManifest:
+    timestamp = at or _utc_now_iso()
+    updated = manifest.model_copy(deep=True)
+    record = ParaViewVizRecord(
+        stage=stage,
+        source_iteration=source_iteration,
+        status="submitted" if scheduler_job_id else "planned",
+        local_dir=local_dir,
+        remote_dir=remote_dir,
+        local_script_path=local_script_path,
+        remote_script_path=remote_script_path,
+        scheduler_job_id=scheduler_job_id,
+        submitted_at=timestamp if scheduler_job_id else None,
+        updated_at=timestamp,
+        notes=[note] if note else [],
+    )
+    updated.paraview_viz_runs.append(record)
+    updated.updated_at = timestamp
+    return updated
+
+
+def record_adaptation_submission(
+    manifest: RunManifest,
+    *,
+    model: str,
+    mode: str,
+    parameter_set: str,
+    source_preop_iteration: int,
+    source_postop_job_id: str | None,
+    territory_scheme: str,
+    target_stage: str,
+    local_dir: str,
+    remote_dir: str,
+    local_job_script_path: str,
+    remote_job_script_path: str,
+    scheduler_job_id: str,
+    inflow_source_path: str,
+    inflow_fingerprint: str | None,
+    inflow_metadata: dict[str, str | int | float | bool | None] | None = None,
+    artifact_roots: dict[str, str] | None = None,
+    summary_path: str | None = None,
+    comparison_path: str | None = None,
+    note: str | None = None,
+    at: str | None = None,
+) -> RunManifest:
+    timestamp = at or _utc_now_iso()
+    updated = manifest.model_copy(deep=True)
+    notes = [note] if note else []
+    record = AdaptationRunRecord(
+        model=model,
+        mode=mode,
+        parameter_set=parameter_set,
+        source_preop_iteration=source_preop_iteration,
+        source_postop_job_id=source_postop_job_id,
+        status="submitted",
+        territory_scheme=territory_scheme,
+        target_stage=target_stage,
+        local_dir=local_dir,
+        remote_dir=remote_dir,
+        local_job_script_path=local_job_script_path,
+        remote_job_script_path=remote_job_script_path,
+        scheduler_job_id=scheduler_job_id,
+        submitted_at=timestamp,
+        updated_at=timestamp,
+        inflow_provenance=AdaptationInflowProvenance(
+            source_path=inflow_source_path,
+            fingerprint=inflow_fingerprint,
+            metadata=inflow_metadata or {},
+        ),
+        artifact_roots=artifact_roots or {},
+        summary_path=summary_path,
+        comparison_path=comparison_path,
+        notes=notes,
+    )
+    updated.adaptation_runs.append(record)
+    if updated.progress_tracker is not None:
+        updated = mark_progress_milestone(
+            updated,
+            "adapted_model",
+            "planned",
+            "completed",
+            note=f"Adaptation {model} submitted with parameter set '{parameter_set}'.",
+            at=timestamp,
+        )
+    updated.updated_at = timestamp
+    return updated
+
+
 def advance_iteration(
     manifest: RunManifest,
     *,
@@ -866,11 +1023,7 @@ def create_manifest(
             else None,
             "data_policy": patient.data_policy,
         },
-        repos={
-            "svzt_agent": str((workspace_root / "repos" / "svzt-agent").resolve()),
-            "svZeroDTrees": str((workspace_root / "repos" / "svZeroDTrees").resolve()),
-            "svZeroDSolver": str((workspace_root / "repos" / "svZeroDSolver").resolve()),
-        },
+        repos=resolve_repository_locations(config, workspace_root),
         remote={
             "patient_data_root": cluster.remote_roots.patient_data_root,
             "permanent_data_root": cluster.remote_roots.permanent_data_root,
@@ -896,6 +1049,7 @@ def create_manifest(
             },
             "threed_defaults": patient.threed.model_dump(mode="json"),
             "impedance_defaults": patient.impedance.model_dump(mode="json"),
+            "adaptation_defaults": patient.adaptation.model_dump(mode="json"),
             "scheduler_defaults": config.defaults.scheduler.model_dump(mode="json"),
             "monitoring_defaults": config.defaults.monitoring.model_dump(mode="json"),
         },
@@ -1081,6 +1235,7 @@ def copy_config_snapshot(workspace_root: Path, config_snapshot_dir: Path) -> Non
     config_snapshot_dir.mkdir(parents=True, exist_ok=True)
     config_root = workspace_root / "config"
     required = ["clusters.yaml", "patients.yaml", "defaults.yaml"]
+    optional = ["repositories.yaml"]
 
     missing = [name for name in required if not (config_root / name).exists()]
     if missing:
@@ -1090,3 +1245,7 @@ def copy_config_snapshot(workspace_root: Path, config_snapshot_dir: Path) -> Non
 
     for name in required:
         shutil.copy2(config_root / name, config_snapshot_dir / name)
+    for name in optional:
+        source = config_root / name
+        if source.exists():
+            shutil.copy2(source, config_snapshot_dir / name)

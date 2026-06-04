@@ -18,7 +18,7 @@
   - rendered template fixtures
   - fetched artifact fixtures
   - status/watch progression fixtures
-- Put long-lived deterministic fixture data under `repos/svzt-agent/tests/fixtures/` instead of relying only on inline generated temporary content.
+- Put long-lived deterministic fixture data under `tests/fixtures/` instead of relying only on inline generated temporary content.
 - Keep fixtures small and scenario-named so they explain intent rather than mirroring arbitrary run IDs.
 
 ## Fake Adapter Boundaries

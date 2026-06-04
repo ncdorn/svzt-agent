@@ -13,15 +13,22 @@ from svztagent.campaigns.seed_sweep import (
     summarize_seed_sweep_campaign,
     write_seed_sweep_slides,
 )
+from svztagent.campaigns.adapt_benchmark import (
+    plan_adapt_benchmark_campaign,
+    run_adapt_benchmark_campaign,
+    summarize_adapt_benchmark_campaign,
+)
 from svztagent.core.errors import SvztError
 from svztagent.core.manifest import update_run_progress
 from svztagent.core.paths import build_local_run_paths
 from svztagent.core.state import RunLifecycleState
 from svztagent.hpc.interfaces import ExecutionMode
+from svztagent.postprocess.cfd_results import write_run_cfd_results
 from svztagent.workflows.postop import (
     run_postop,
     select_converged_preop_iteration,
 )
+from svztagent.workflows.adapt import run_adapt
 from svztagent.workflows.tune_trees import (
     advance_tune_iteration,
     continue_tune_iteration,
@@ -33,6 +40,11 @@ from svztagent.workflows.tune_trees import (
     run_tune_trees,
     watch_and_auto_advance_tuning,
     watch_run_lifecycle,
+)
+from svztagent.workspace_bootstrap import (
+    doctor_workspace,
+    init_workspace,
+    validate_workspace_config,
 )
 
 
@@ -49,6 +61,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_workspace_cmd = subparsers.add_parser(
+        "init-workspace", help="Bootstrap a new local workspace with example config files"
+    )
+    init_workspace_cmd.add_argument(
+        "path",
+        nargs="?",
+        default=".",
+        help="Target directory for the new workspace (defaults to current directory)",
+    )
+    init_workspace_cmd.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing example config files in the target workspace",
+    )
+    init_workspace_cmd.set_defaults(handler=cmd_init_workspace)
 
     init_run = subparsers.add_parser("init-run", help="Create run directory and manifest")
     init_run.add_argument("--cluster", required=True)
@@ -110,6 +138,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_postop_cmd.set_defaults(handler=cmd_run_postop)
 
+    run_adapt_cmd = run_subparsers.add_parser(
+        "adapt", help="Run explicit adaptation workflow from converged preop + completed postop"
+    )
+    run_adapt_cmd.add_argument("--run-id", required=True)
+    run_adapt_cmd.add_argument("--model", required=True, choices=["M1", "M2", "M3"])
+    run_adapt_cmd.add_argument("--parameter-set", required=False)
+    mode_group_adapt = run_adapt_cmd.add_mutually_exclusive_group()
+    mode_group_adapt.add_argument(
+        "--dry-run", action="store_true", help="Preview commands only (default)"
+    )
+    mode_group_adapt.add_argument(
+        "--execute", action="store_true", help="Execute remote operations"
+    )
+    run_adapt_cmd.set_defaults(handler=cmd_run_adapt)
+
     preop = subparsers.add_parser("preop", help="Manage converged preop iteration handoff")
     preop_subparsers = preop.add_subparsers(dest="preop_command", required=True)
     preop_select = preop_subparsers.add_parser(
@@ -118,7 +161,24 @@ def build_parser() -> argparse.ArgumentParser:
     preop_select.add_argument("--run-id", required=True)
     preop_select.add_argument("--iteration", required=True, type=int)
     preop_select.add_argument("--reason", required=False)
+    preop_select.add_argument(
+        "--skip-postprocess",
+        action="store_true",
+        help="Record the selected preop iteration without submitting selected-preop postprocess",
+    )
     preop_select.set_defaults(handler=cmd_preop_select)
+
+    config_cmd = subparsers.add_parser("config", help="Validate workspace configuration")
+    config_subparsers = config_cmd.add_subparsers(dest="config_command", required=True)
+    config_validate = config_subparsers.add_parser(
+        "validate", help="Validate workspace config files and repo-location contract"
+    )
+    config_validate.set_defaults(handler=cmd_config_validate)
+
+    doctor = subparsers.add_parser(
+        "doctor", help="Run local workspace diagnostics for config and checkout discovery"
+    )
+    doctor.set_defaults(handler=cmd_doctor)
 
     status = subparsers.add_parser("status", help="Query scheduler status for a run")
     status.add_argument("run_id")
@@ -128,6 +188,35 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("run_id")
     fetch.add_argument("--dry-run", action="store_true", help="Preview rsync pull command only")
     fetch.set_defaults(handler=cmd_fetch)
+
+    postprocess = subparsers.add_parser("postprocess", help="Build derived local postprocess artifacts")
+    postprocess_subparsers = postprocess.add_subparsers(dest="postprocess_command", required=True)
+    cfd_results = postprocess_subparsers.add_parser(
+        "cfd-results",
+        help="Normalize a run-scoped CFD results JSON from the current template and run artifacts",
+    )
+    cfd_results.add_argument("--run-id", required=True)
+    cfd_results.add_argument(
+        "--source-json",
+        required=False,
+        help="Optional existing CFD results JSON to overlay before refreshing run-derived fields",
+    )
+    cfd_results.add_argument(
+        "--template",
+        required=False,
+        help="Optional explicit template path (defaults to workspace data/cfd-results template)",
+    )
+    cfd_results.add_argument(
+        "--output",
+        required=False,
+        help="Optional explicit output path (defaults to runs/<run_id>/cfd-results.json)",
+    )
+    cfd_results.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow replacing an existing output JSON",
+    )
+    cfd_results.set_defaults(handler=cmd_postprocess_cfd_results)
 
     watch = subparsers.add_parser("watch", help="Watch run scheduler lifecycle to terminal state")
     watch.add_argument("run_id")
@@ -180,6 +269,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Advance tuning iteration based on latest decision and optionally submit next iteration",
     )
     advance_iter.add_argument("--run-id", required=True)
+    advance_iter.add_argument(
+        "--max-iterations",
+        required=False,
+        type=int,
+        help="Raise the run's tuning iteration cap before advancing",
+    )
     advance_iter.add_argument(
         "--execute",
         action="store_true",
@@ -235,11 +330,56 @@ def build_parser() -> argparse.ArgumentParser:
     seed_slides.add_argument("campaign_id")
     seed_slides.set_defaults(handler=cmd_campaign_seed_sweep_slides)
 
+    adapt_benchmark = campaign_subparsers.add_parser(
+        "adapt-benchmark", help="Benchmark adaptation models across completed postop runs"
+    )
+    adapt_benchmark_subparsers = adapt_benchmark.add_subparsers(
+        dest="adapt_benchmark_command", required=True
+    )
+    adapt_plan = adapt_benchmark_subparsers.add_parser("plan", help="Plan adaptation benchmark")
+    adapt_plan.add_argument("--campaign-id", required=False)
+    adapt_plan.add_argument("--run-ids", nargs="+", required=False)
+    adapt_plan.add_argument("--models", nargs="+", required=False, choices=["M1", "M2", "M3"])
+    adapt_plan.add_argument("--parameter-set", required=False)
+    adapt_plan.add_argument(
+        "--benchmark-mode",
+        required=False,
+        default="predict",
+        choices=["predict", "retrospective_fit"],
+    )
+    adapt_plan.set_defaults(handler=cmd_campaign_adapt_benchmark_plan)
+
+    adapt_run = adapt_benchmark_subparsers.add_parser("run", help="Run adaptation benchmark")
+    adapt_run.add_argument("campaign_id")
+    mode_group_adapt_campaign = adapt_run.add_mutually_exclusive_group()
+    mode_group_adapt_campaign.add_argument("--dry-run", action="store_true", help="Preview commands only")
+    mode_group_adapt_campaign.add_argument("--execute", action="store_true", help="Execute remote operations")
+    adapt_run.set_defaults(handler=cmd_campaign_adapt_benchmark_run)
+
+    adapt_summary = adapt_benchmark_subparsers.add_parser(
+        "summarize", help="Summarize adaptation benchmark"
+    )
+    adapt_summary.add_argument("campaign_id")
+    adapt_summary.set_defaults(handler=cmd_campaign_adapt_benchmark_summarize)
+
     return parser
 
 
 def _resolve_mode(execute: bool) -> ExecutionMode:
     return ExecutionMode.EXECUTE if execute else ExecutionMode.DRY_RUN
+
+
+def cmd_init_workspace(args: argparse.Namespace) -> int:
+    result = init_workspace(args.path, force=args.force)
+    print(f"Workspace root: {result.workspace_root}")
+    if result.created_directories:
+        print("Created directories:")
+        for path in result.created_directories:
+            print(f"  - {path}")
+    print("Wrote example config files:")
+    for path in result.written_files:
+        print(f"  - {path}")
+    return 0
 
 
 def cmd_init_run(args: argparse.Namespace) -> int:
@@ -355,6 +495,32 @@ def cmd_run_postop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_adapt(args: argparse.Namespace) -> int:
+    workspace_root = detect_workspace_root(args.workspace_root)
+    mode = _resolve_mode(args.execute)
+    result = run_adapt(
+        workspace_root=workspace_root,
+        run_id=args.run_id,
+        model=args.model,
+        parameter_set=args.parameter_set,
+        mode=mode,
+    )
+    print(f"Run ID: {result.run_id}")
+    print(f"Model: {result.model}")
+    print(f"Parameter set: {result.parameter_set}")
+    print(f"Source preop iteration: {result.source_preop_iteration}")
+    print(f"Mode: {result.mode.value}")
+    print(f"Plan: {result.plan_path}")
+    print(f"Remote adaptation dir: {result.remote_adaptation_dir}")
+    print(f"Remote job script: {result.remote_job_script_path}")
+    print(f"Submitted job ID: {result.submitted_job_id}")
+    print(f"Inflow source-of-truth: {result.inflow_source_path}")
+    print("Command previews:")
+    for argv in result.command_previews:
+        print(f"  - {' '.join(argv)}")
+    return 0
+
+
 def cmd_preop_select(args: argparse.Namespace) -> int:
     workspace_root = detect_workspace_root(args.workspace_root)
     result = select_converged_preop_iteration(
@@ -362,6 +528,7 @@ def cmd_preop_select(args: argparse.Namespace) -> int:
         run_id=args.run_id,
         iteration=args.iteration,
         reason=args.reason,
+        submit_postprocess=not args.skip_postprocess,
     )
     print(f"Run ID: {result.run_id}")
     print(f"Converged preop iteration: {result.iteration}")
@@ -371,6 +538,37 @@ def cmd_preop_select(args: argparse.Namespace) -> int:
     print(f"Canonical coupler: {result.remote_canonical_coupler}")
     if result.postprocess_job_id:
         print(f"Selected-preop postprocess job ID: {result.postprocess_job_id}")
+    return 0
+
+
+def cmd_config_validate(args: argparse.Namespace) -> int:
+    result = validate_workspace_config(args.workspace_root)
+    print(f"Workspace root: {result.workspace_root}")
+    print(f"Clusters: {', '.join(result.cluster_names) or '<none>'}")
+    print(f"Patients: {', '.join(result.patient_aliases) or '<none>'}")
+    print("Repository locations:")
+    for repo_name, repo_path in result.repository_locations.items():
+        print(f"  - {repo_name}: {repo_path or '<not present>'}")
+    print("Optional config files:")
+    for file_name, present in result.optional_config_files.items():
+        print(f"  - {file_name}: {'present' if present else 'absent'}")
+    print("Config validation: PASS")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    result = doctor_workspace(args.workspace_root)
+    print(f"Workspace root: {result.workspace_root}")
+    print("Repository locations:")
+    for repo_name, repo_path in result.repository_locations.items():
+        print(f"  - {repo_name}: {repo_path or '<not present>'}")
+    if result.warnings:
+        print("Warnings:")
+        for warning in result.warnings:
+            print(f"  - {warning}")
+    else:
+        print("Warnings: none")
+    print("Doctor: PASS")
     return 0
 
 
@@ -386,6 +584,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"Scheduler source: {result.source}")
     print(f"Raw state: {result.raw_state or '<none>'}")
     print(f"Normalized state: {result.normalized_state.value}")
+    print(f"Active workflow: {result.active_workflow}")
     print(f"Current iteration: {result.current_iteration} / {result.max_iterations}")
     print(f"Iteration tracker status: {result.tracker_status}")
     print(f"Current stage: {result.stage_label}")
@@ -413,6 +612,17 @@ def cmd_status(args: argparse.Namespace) -> int:
             else result.postop_job_state_raw or "<none>"
         )
         print(f"Postop job: {result.postop_job_id} ({state})")
+    if result.adaptation_job_id:
+        state = (
+            result.adaptation_job_state_normalized.value
+            if result.adaptation_job_state_normalized is not None
+            else result.adaptation_job_state_raw or "<none>"
+        )
+        print(
+            f"Adaptation job: {result.adaptation_job_id} ({state}) "
+            f"model={result.adaptation_model or '<none>'} "
+            f"parameter_set={result.adaptation_parameter_set or '<none>'}"
+        )
     warnings = result.progress_warnings or []
     if warnings:
         print("Warnings:")
@@ -438,6 +648,23 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     print(f"Local output dir: {result.local_output_dir}")
     print(f"Pull patterns: {', '.join(result.pull_patterns)}")
     print(f"Command preview: {' '.join(result.command_preview)}")
+    return 0
+
+
+def cmd_postprocess_cfd_results(args: argparse.Namespace) -> int:
+    workspace_root = detect_workspace_root(args.workspace_root)
+    result = write_run_cfd_results(
+        workspace_root=workspace_root,
+        run_id=args.run_id,
+        source_path=args.source_json,
+        template_path=args.template,
+        output_path=args.output,
+        overwrite=args.overwrite,
+    )
+    print(f"Run ID: {result.run_id}")
+    print(f"Template: {result.template_path}")
+    print(f"Source JSON: {result.source_path or '<none>'}")
+    print(f"Output: {result.output_path}")
     return 0
 
 
@@ -546,6 +773,7 @@ def cmd_advance_iter(args: argparse.Namespace) -> int:
     result = advance_tune_iteration(
         workspace_root=workspace_root,
         run_id=args.run_id,
+        max_iterations=args.max_iterations,
         execute=args.execute,
     )
     print(f"Run ID: {result.run_id}")
@@ -634,6 +862,56 @@ def cmd_campaign_seed_sweep_slides(args: argparse.Namespace) -> int:
         campaign_id=args.campaign_id,
     )
     print(f"Slides: {path}")
+    return 0
+
+
+def cmd_campaign_adapt_benchmark_plan(args: argparse.Namespace) -> int:
+    workspace_root = detect_workspace_root(args.workspace_root)
+    manifest = plan_adapt_benchmark_campaign(
+        workspace_root=workspace_root,
+        run_ids=args.run_ids,
+        campaign_id=args.campaign_id,
+        models=args.models,
+        parameter_set=args.parameter_set,
+        benchmark_mode=args.benchmark_mode,
+    )
+    print(f"Campaign ID: {manifest['campaign_id']}")
+    print(f"Child runs: {len(manifest['child_runs'])}")
+    print(
+        "Campaign manifest: "
+        f"{workspace_root / 'runs' / 'campaigns' / manifest['campaign_id'] / 'campaign_manifest.yaml'}"
+    )
+    return 0
+
+
+def cmd_campaign_adapt_benchmark_run(args: argparse.Namespace) -> int:
+    workspace_root = detect_workspace_root(args.workspace_root)
+    manifest = run_adapt_benchmark_campaign(
+        workspace_root=workspace_root,
+        campaign_id=args.campaign_id,
+        mode=_resolve_mode(args.execute),
+    )
+    print(f"Campaign ID: {manifest['campaign_id']}")
+    for result in manifest.get("last_run_results", []):
+        print(
+            f"- run={result['run_id']} model={result['model']} "
+            f"parameter_set={result['parameter_set']} job={result['submitted_job_id']}"
+        )
+    return 0
+
+
+def cmd_campaign_adapt_benchmark_summarize(args: argparse.Namespace) -> int:
+    workspace_root = detect_workspace_root(args.workspace_root)
+    rows = summarize_adapt_benchmark_campaign(
+        workspace_root=workspace_root,
+        campaign_id=args.campaign_id,
+    )
+    print(f"Campaign ID: {args.campaign_id}")
+    print(f"Rows: {len(rows)}")
+    print(
+        "Summary: "
+        f"{workspace_root / 'runs' / 'campaigns' / args.campaign_id / 'adapt_benchmark_summary.csv'}"
+    )
     return 0
 
 

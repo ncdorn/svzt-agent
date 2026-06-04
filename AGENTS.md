@@ -13,6 +13,8 @@
 - It is not the place for solver internals, numerical method rewrites, or domain-library redesign unless integration explicitly requires it.
 - If a change is fundamentally about tuning math, model construction, or solver behavior, first ask whether it belongs in `svZeroDTrees` or `svZeroDSolver` instead.
 
+**Slide generation integration (future):** The downstream output of completed runs will feed into the HTML slide-deck pipeline in `ppas-slide-generation/`. Postprocess helpers in `src/svztagent/postprocess/` are the intended extraction point for producing `cfd-results-template.json` records that conform to `ppas-slide-generation/cfd-results-data/README.md`. See `../AUTOMATE_REPO_SLIDES.md` for the full pipeline roadmap and stage tracker.
+
 ## Architecture Boundaries
 - Keep config loading and schema logic separate from workflow orchestration.
 - Keep plan generation and plan validation separate from execution.
