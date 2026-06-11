@@ -127,6 +127,7 @@
   - overlay matching fields from the source JSON to preserve curated/manual values
   - overwrite run-derived fields from local evidence
   - drop legacy keys that are not present in the template
+- Pressure metrics derived from `mpa_pressure_vs_time.csv` use the final cardiac period when `cycle_duration_s` is available in the postprocess metadata; in particular, diastolic pressure is taken as the minimum over that last period rather than over the full transient trace.
 - The command prefers systolic resistance-map artifacts when available and falls back to mean resistance summaries when selected-preop systolic outputs are missing.
 - When postop postprocess artifacts are still missing, the command preserves any curated measured fields from the source JSON and carries forward the best available manifest-backed run status instead of clearing the state back to `pending`.
 - This command is local normalization only. Remote generation and artifact fetch remain separate workflow/operator steps.

@@ -13,6 +13,7 @@ from svztagent.core.manifest import (
 )
 from svztagent.postprocess.cfd_results import (
     CfdResultsWriteResult,
+    _normalize_run_status,
     default_cfd_results_output_path,
     default_cfd_results_template_path,
     write_run_cfd_results,
@@ -37,6 +38,16 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, object]])
 def _placeholder_png(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("png", encoding="utf-8")
+
+
+def test_normalize_run_status_uses_slide_contract_values() -> None:
+    assert _normalize_run_status("completed") == "complete"
+    assert _normalize_run_status("success") == "complete"
+    assert _normalize_run_status("submitted") == "pending"
+    assert _normalize_run_status("running") == "pending"
+    assert _normalize_run_status("failed") == "needs review"
+    assert _normalize_run_status("cancelled") == "needs review"
+    assert _normalize_run_status(None) is None
 
 
 def _template_payload() -> dict:
@@ -295,6 +306,18 @@ def _seed_run_artifacts(
         },
     )
     _placeholder_png(iter1_post / "mpa_pressure_vs_time.png")
+    _write_csv(
+        iter1_post / "mpa_pressure_vs_time.csv",
+        ["timestep_id", "time_s", "mpa_pressure_mmhg"],
+        [
+            {"timestep_id": 1, "time_s": 0.0, "mpa_pressure_mmhg": -2.0},
+            {"timestep_id": 2, "time_s": 0.4, "mpa_pressure_mmhg": 25.0},
+            {"timestep_id": 3, "time_s": 0.8, "mpa_pressure_mmhg": 12.0},
+            {"timestep_id": 4, "time_s": 1.0, "mpa_pressure_mmhg": 9.0},
+            {"timestep_id": 5, "time_s": 1.2, "mpa_pressure_mmhg": 30.0},
+            {"timestep_id": 6, "time_s": 1.6, "mpa_pressure_mmhg": 11.0},
+        ],
+    )
     _placeholder_png(iter1_post / "resistance_map_mean.png")
     _write_csv(
         iter1_post / "branch_resistance_summary.csv",
@@ -416,7 +439,7 @@ def test_write_run_cfd_results_prefers_selected_iteration_and_systolic_hotspots(
     assert preop["run_id"] == "run-cfd-001"
     assert preop["run_path"] == "/scratch/users/test/run-cfd-001/iterations/iter-01"
     assert preop["metrics"]["mpa_systolic_mmhg"] == 41.0
-    assert preop["metrics"]["mpa_diastolic_mmhg"] == -2.0
+    assert preop["metrics"]["mpa_diastolic_mmhg"] == 9.0
     assert preop["metrics"]["rpa_flow_pct"] == 67.5
     assert preop["metrics"]["total_pvr"] == 500.0
     assert preop["metrics"]["total_pvr_units"] == "mmHg / (L/min)"
@@ -432,7 +455,7 @@ def test_write_run_cfd_results_prefers_selected_iteration_and_systolic_hotspots(
     assert postop["metrics"]["total_pvr"] == 150.0
     assert postop["metrics"]["total_pvr_units"] == "mmHg / (L/min)"
     assert postop["resistance_hotspots"][0]["vessel"] == "branch_id:7"
-    assert postop["run_status"] == "completed"
+    assert postop["run_status"] == "complete"
 
     assert payload["errors"]["by_metric"]["mpa_systolic_mmhg"]["baseline_error"] == 5.0
     assert payload["errors"]["by_metric"]["mpa_mean_mmhg"]["baseline_error"] == 5.0
@@ -468,7 +491,7 @@ def test_write_run_cfd_results_falls_back_to_mean_hotspots_when_systolic_missing
     assert payload["states"]["preop_tuned"]["resistance_hotspots"][0]["vessel"] == "branch_id:9"
     assert payload["figures"]["resistance_maps"]["preop_tuned"] == "runs/run-cfd-002/iterations/iter-01/results/postprocess/resistance_map_mean.png"
     assert payload["states"]["preop_tuned"]["metrics"]["total_pvr"] == 175.0
-    assert payload["states"]["preop_tuned"]["run_status"] == "completed"
+    assert payload["states"]["preop_tuned"]["run_status"] == "complete"
 
 
 def test_write_run_cfd_results_populates_adapted_state_when_adaptation_postprocess_exists(
@@ -497,7 +520,7 @@ def test_write_run_cfd_results_populates_adapted_state_when_adaptation_postproce
     adapted = payload["states"]["postop_adapted"]
     assert adapted["run_id"] == "run-cfd-004"
     assert adapted["run_path"] == "/scratch/users/test/run-cfd-004/adaptation/from-iter-01/m1"
-    assert adapted["run_status"] == "completed"
+    assert adapted["run_status"] == "complete"
     assert adapted["metrics"]["mpa_systolic_mmhg"] == 32.0
     assert adapted["metrics"]["mpa_diastolic_mmhg"] == 12.0
     assert adapted["metrics"]["mpa_mean_mmhg"] == 22.0

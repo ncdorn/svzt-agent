@@ -198,6 +198,8 @@ def _render_postprocess_script(
     fallback_clinical_targets_csv: str | None = None,
     inflow_csv: str | None = None,
     resistance_map_workers: int | Literal["auto"] | None = None,
+    camera_offset_dir: list[float] | None = None,
+    camera_view_up: list[float] | None = None,
     cpus_per_task: int | None = None,
     mem: str | None = None,
     account: str | None = None,
@@ -210,6 +212,8 @@ def _render_postprocess_script(
         else ("None" if fallback_clinical_targets_csv is None else json.dumps(fallback_clinical_targets_csv))
     )
     inflow_expr = "None" if inflow_csv is None else json.dumps(inflow_csv)
+    camera_offset_expr = "None" if camera_offset_dir is None else repr(list(camera_offset_dir))
+    camera_view_up_expr = "None" if camera_view_up is None else repr(list(camera_view_up))
     slurm_header = _render_postprocess_slurm_header(
         remote_root=remote_root,
         remote_logs_dir=remote_logs_dir,
@@ -245,6 +249,8 @@ try:
         clinical_targets={clinical_targets_expr},
         inflow_csv={inflow_expr},
         resistance_map_workers={json.dumps(resistance_map_workers)},
+        camera_offset_dir={camera_offset_expr},
+        camera_view_up={camera_view_up_expr},
     )
 except Exception as exc:
     payload = {{
@@ -263,6 +269,23 @@ submission_path.write_text(
 )
 PY
 """
+
+
+def _resolve_resistance_map_camera(
+    config,
+    *,
+    patient_alias: str,
+) -> tuple[list[float] | None, list[float] | None]:
+    patient_cfg = next((p for p in config.patients if p.alias == patient_alias), None)
+    patient_override = (
+        patient_cfg.postprocess.paraview_viz
+        if patient_cfg is not None and patient_cfg.postprocess is not None
+        else None
+    )
+    viz_cfg = _resolve_viz_config(config.defaults.postprocess.paraview_viz, patient_override)
+    camera_offset_dir = list(viz_cfg.camera_offset_dir) if viz_cfg.camera_offset_dir is not None else None
+    camera_view_up = list(viz_cfg.camera_view_up) if viz_cfg.camera_view_up is not None else None
+    return camera_offset_dir, camera_view_up
 
 
 def _selected_preop_local_paths(workspace_root: Path, run_id: str, iteration: int) -> dict[str, Path]:
@@ -382,6 +405,10 @@ def submit_selected_preop_postprocess(
         raise ConfigError("manifest remote.svzerodtrees_paths.centerlines is required for postprocessing")
 
     simulation_dir = str(PurePosixPath(remote_layout["remote_results_dir"]).parent.parent / "preop")
+    camera_offset_dir, camera_view_up = _resolve_resistance_map_camera(
+        config,
+        patient_alias=patient_alias,
+    )
     script_body = _render_postprocess_script(
         config=config,
         cluster=cluster,
@@ -396,6 +423,8 @@ def submit_selected_preop_postprocess(
         fallback_clinical_targets_csv=str(fallback_csv) if fallback_csv else None,
         inflow_csv=str(inflow_csv) if inflow_csv else None,
         resistance_map_workers=resistance_map_workers,
+        camera_offset_dir=camera_offset_dir,
+        camera_view_up=camera_view_up,
         cpus_per_task=cpus_per_task,
         mem=mem,
     )

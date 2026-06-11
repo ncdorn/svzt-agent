@@ -51,6 +51,22 @@ def _enable_postop_mesh(sample_config_files):
         defaults_path.write_text(defaults, encoding="utf-8")
 
 
+def _set_patient_paraview_camera(sample_config_files):
+    patients_path = sample_config_files / "config" / "patients.yaml"
+    payload = patients_path.read_text(encoding="utf-8")
+    if "camera_offset_dir" in payload:
+        return
+    payload = payload.replace(
+        '    data_policy: "read_only"\n',
+        '    data_policy: "read_only"\n'
+        '    postprocess:\n'
+        '      paraview_viz:\n'
+        '        camera_offset_dir: [0.25, -0.5, 0.75]\n'
+        '        camera_view_up: [0.0, 0.0, 1.0]\n',
+    )
+    patients_path.write_text(payload, encoding="utf-8")
+
+
 def _write_completed_iteration_artifacts(paths, *, iteration: int, decision: str = "not_close"):
     iter_dir = paths.run_dir / "iterations" / f"iter-{iteration:02d}"
     results = iter_dir / "results"
@@ -184,6 +200,7 @@ clinical_targets:
 
 def test_preop_select_submits_selected_preop_postprocess(sample_config_files):
     _enable_postop_mesh(sample_config_files)
+    _set_patient_paraview_camera(sample_config_files)
     paths, _ctx = init_run_workspace(
         workspace_root=sample_config_files,
         cluster_name="sherlock",
@@ -231,6 +248,8 @@ def test_preop_select_submits_selected_preop_postprocess(sample_config_files):
     assert "#SBATCH --cpus-per-task=4" in script_text
     assert "#SBATCH --mem=64G" in script_text
     assert "resistance_map_workers=4" in script_text
+    assert "camera_offset_dir=[0.25, -0.5, 0.75]" in script_text
+    assert "camera_view_up=[0.0, 0.0, 1.0]" in script_text
 
 
 def test_preop_select_can_skip_selected_preop_postprocess(sample_config_files):
@@ -451,6 +470,7 @@ def test_run_postop_dry_run_writes_plan_without_manifest_submission(sample_confi
 
 
 def test_run_postop_execute_first_generates_plan_and_records_job(sample_config_files):
+    _set_patient_paraview_camera(sample_config_files)
     paths = _prepare_selected_run(sample_config_files, run_id="run-postop-exec")
     transfer = FakeFileTransferAdapter()
     scheduler = FakeSchedulerAdapter()
@@ -511,6 +531,8 @@ def test_run_postop_execute_first_generates_plan_and_records_job(sample_config_f
     assert 'threed_config["prestress_file_path"] = str(_generate_postop_prestress_file())' in script_text
     assert "paraview_viz_submission.json" in script_text
     assert "ParaView visualization job submitted" in script_text
+    assert "camera_offset_dir=[0.25, -0.5, 0.75]" in script_text
+    assert "camera_view_up=[0.0, 0.0, 1.0]" in script_text
 
 
 def test_run_postop_refreshes_stale_selected_tuned_config_from_local_decision(sample_config_files):

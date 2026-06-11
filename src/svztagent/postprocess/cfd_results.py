@@ -128,18 +128,18 @@ def _normalize_run_status(value: Any) -> str | None:
     if not text:
         return None
     aliases = {
-        "complete": "completed",
-        "completed": "completed",
-        "success": "completed",
-        "succeeded": "completed",
-        "submitted": "submitted",
-        "running": "running",
+        "complete": "complete",
+        "completed": "complete",
+        "success": "complete",
+        "succeeded": "complete",
+        "submitted": "pending",
+        "running": "pending",
         "pending": "pending",
-        "failed": "failed",
-        "error": "failed",
-        "cancelled": "cancelled",
-        "canceled": "cancelled",
-        "unknown": "unknown",
+        "failed": "needs review",
+        "error": "needs review",
+        "cancelled": "needs review",
+        "canceled": "needs review",
+        "unknown": "needs review",
     }
     return aliases.get(text, text)
 
@@ -237,16 +237,37 @@ def _adapted_paths(run_dir: Path, manifest: Any, iteration: int) -> dict[str, Pa
     }
 
 
-def _load_pressure_metrics(csv_path: Path) -> dict[str, float | None]:
+def _load_pressure_metrics(
+    csv_path: Path,
+    *,
+    cycle_duration_s: float | None = None,
+) -> dict[str, float | None]:
     rows = _read_csv_rows(csv_path)
-    values = [_float_or_none(row.get("mpa_pressure_mmhg")) for row in rows]
-    series = [value for value in values if value is not None]
+    time_and_pressure = [
+        (_float_or_none(row.get("time_s")), _float_or_none(row.get("mpa_pressure_mmhg")))
+        for row in rows
+    ]
+    series = [pressure for _, pressure in time_and_pressure if pressure is not None]
     if not series:
         return {
             "mpa_systolic_mmhg": None,
             "mpa_diastolic_mmhg": None,
             "mpa_mean_mmhg": None,
         }
+
+    if cycle_duration_s is not None and cycle_duration_s > 0.0:
+        finite_times = [time_s for time_s, _ in time_and_pressure if time_s is not None]
+        if finite_times:
+            end_time = max(finite_times)
+            start_time = end_time - cycle_duration_s
+            final_period = [
+                pressure
+                for time_s, pressure in time_and_pressure
+                if time_s is not None and pressure is not None and time_s >= start_time - 1e-9
+            ]
+            if final_period:
+                series = final_period
+
     return {
         "mpa_systolic_mmhg": max(series),
         "mpa_diastolic_mmhg": min(series),
@@ -346,7 +367,10 @@ def _state_metrics_from_iteration_metrics(metrics_payload: dict[str, Any]) -> di
 
 def _state_metrics_from_postop_suite(postprocess_dir: Path, suite_payload: dict[str, Any]) -> dict[str, float | None]:
     pressure_csv = postprocess_dir / "mpa_pressure_vs_time.csv"
-    pressure_metrics = _load_pressure_metrics(pressure_csv)
+    pressure_metrics = _load_pressure_metrics(
+        pressure_csv,
+        cycle_duration_s=_float_or_none(suite_payload.get("cycle_duration_s")),
+    )
     flow_split = suite_payload.get("flow_split") if isinstance(suite_payload.get("flow_split"), dict) else {}
     rpa_split = _float_or_none(flow_split.get("rpa_split"))
     rpa_flow_pct = rpa_split * 100.0 if rpa_split is not None else None
@@ -358,6 +382,28 @@ def _state_metrics_from_postop_suite(postprocess_dir: Path, suite_payload: dict[
         "total_pvr": None,
         "total_pvr_units": None,
     }
+
+
+def _override_preop_diastolic_from_postprocess(
+    metrics: dict[str, float | None],
+    postprocess_dir: Path,
+    suite_payload: dict[str, Any],
+) -> dict[str, float | None]:
+    pressure_csv = postprocess_dir / "mpa_pressure_vs_time.csv"
+    if not pressure_csv.exists():
+        return metrics
+
+    pressure_metrics = _load_pressure_metrics(
+        pressure_csv,
+        cycle_duration_s=_float_or_none(suite_payload.get("cycle_duration_s")),
+    )
+    diastolic = pressure_metrics.get("mpa_diastolic_mmhg")
+    if diastolic is None:
+        return metrics
+
+    updated = dict(metrics)
+    updated["mpa_diastolic_mmhg"] = diastolic
+    return updated
 
 
 def _run_path_from_suite(suite_payload: dict[str, Any], fallback: str | None) -> str | None:
@@ -567,6 +613,11 @@ def build_run_cfd_results(
         postop_total_pvr, postop_total_pvr_units = (None, None)
 
     preop_metrics = _state_metrics_from_iteration_metrics(preop_metrics_payload)
+    preop_metrics = _override_preop_diastolic_from_postprocess(
+        preop_metrics,
+        preop_paths["postprocess"],
+        preop_suite,
+    )
     preop_metrics["total_pvr"] = preop_total_pvr
     preop_metrics["total_pvr_units"] = preop_total_pvr_units
 

@@ -65,6 +65,12 @@ from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtk
 
 # Unit conversion: CFD pressure (dyn/cm²) → clinical display units (mmHg)
 PRESSURE_TO_MMHG = 1.0 / 1333.22
+SCALAR_BAR_POSITION = [0.885, 0.2]
+SCALAR_BAR_LENGTH = 0.66
+SCALAR_BAR_THICKNESS = 32
+SCALAR_BAR_TITLE_FONT_SIZE = 16
+SCALAR_BAR_LABEL_FONT_SIZE = 14
+SCALAR_BAR_TEXT_COLOR = [0.0, 0.0, 0.0]
 
 
 def _extract_step(path):
@@ -259,6 +265,48 @@ def _has_point_array(source, name):
     return False
 
 
+def _lut_scalar_range(lut):
+    """Return the scalar range encoded in a ParaView color transfer function."""
+    pts = list(getattr(lut, "RGBPoints", []) or [])
+    if len(pts) >= 5:
+        return [float(pts[0]), float(pts[-4])]
+    return None
+
+
+def _style_scalar_bar(scalar_bar, title):
+    """Apply the locked pulmonary postprocessing scalar-bar style."""
+    scalar_bar.Visibility = 1
+    scalar_bar.Title = title
+    scalar_bar.ComponentTitle = ""
+    scalar_bar.TitleFontSize = SCALAR_BAR_TITLE_FONT_SIZE
+    scalar_bar.LabelFontSize = SCALAR_BAR_LABEL_FONT_SIZE
+    scalar_bar.TitleColor = SCALAR_BAR_TEXT_COLOR
+    scalar_bar.LabelColor = SCALAR_BAR_TEXT_COLOR
+    scalar_bar.WindowLocation = "Any Location"
+    scalar_bar.Orientation = "Vertical"
+    scalar_bar.Position = SCALAR_BAR_POSITION
+    scalar_bar.ScalarBarLength = SCALAR_BAR_LENGTH
+    scalar_bar.ScalarBarThickness = SCALAR_BAR_THICKNESS
+
+
+def _style_render_view(view):
+    """Apply the locked pulmonary postprocessing view style."""
+    view.Background = [1.0, 1.0, 1.0]
+    view.OrientationAxesVisibility = 0
+    view.CenterAxesVisibility = 0
+
+
+def _style_volume_opacity(field, lut, scalar_range=None):
+    """Use a linear min-transparent to max-opaque ramp for volume rendering."""
+    from paraview.simple import GetOpacityTransferFunction
+
+    sr = scalar_range or _lut_scalar_range(lut)
+    if not sr:
+        return
+    otf = GetOpacityTransferFunction(field)
+    otf.Points = [sr[0], 0.0, 0.5, 0.0, sr[1], 1.0, 0.5, 0.0]
+
+
 def _warp_by_displacement(source):
     """Apply WarpByVector using DISPLACEMENT_FIELD.
 
@@ -287,7 +335,6 @@ def _render_field(source, field, view, out_path, cmap, label, representation="Su
         Delete,
         ExtractSurface,
         GetColorTransferFunction,
-        GetOpacityTransferFunction,
         GetScalarBar,
         Hide,
         SaveScreenshot,
@@ -308,22 +355,13 @@ def _render_field(source, field, view, out_path, cmap, label, representation="Su
     lut.ApplyPreset(cmap, True)
 
     if representation == "Volume":
-        # Set linear opacity: transparent at min, opaque at max so internal
-        # flow structure is visible without obscuring the vessel wall.
-        scalar_range = lut.RGBPoints[:2] if lut.RGBPoints else None
-        otf = GetOpacityTransferFunction(field)
-        if scalar_range:
-            vmin, vmax = scalar_range[0], scalar_range[-2]
-            otf.Points = [vmin, 0.0, 0.5, 0.0, vmax, 1.0, 0.5, 0.0]
+        # Keep internal flow structure visible without obscuring the vessel wall.
+        _style_volume_opacity(field, lut)
 
     sb = GetScalarBar(lut, view)
-    sb.Visibility = 1
-    sb.Title = label
-    sb.ComponentTitle = ""
-    sb.TitleFontSize = 14
-    sb.LabelFontSize = 12
+    _style_scalar_bar(sb, label)
     view.Update()
-    SaveScreenshot(str(out_path))
+    SaveScreenshot(str(out_path), view, TransparentBackground=1)
 
     if surf is not None:
         Hide(surf, view)
@@ -394,17 +432,11 @@ def _render_animation_pass(cycle_files, view, field, cmap, label, scalar_range, 
         disp.RescaleTransferFunctionToDataRange(False, False)
 
     if representation == "Volume":
-        # Linear opacity ramp: transparent at min → opaque at max
-        otf = GetOpacityTransferFunction(render_field)
-        sr = scalar_range or [lut.RGBPoints[0], lut.RGBPoints[-2]]
-        otf.Points = [sr[0], 0.0, 0.5, 0.0, sr[1], 1.0, 0.5, 0.0]
+        # Linear opacity ramp: transparent at min → opaque at max.
+        _style_volume_opacity(render_field, lut, scalar_range)
 
     sb = GetScalarBar(lut, view)
-    sb.Visibility = 1
-    sb.Title = label
-    sb.ComponentTitle = ""
-    sb.TitleFontSize = 14
-    sb.LabelFontSize = 12
+    _style_scalar_bar(sb, label)
 
     frame_paths = []
     for i, vtu in enumerate(cycle_files):
@@ -412,7 +444,7 @@ def _render_animation_pass(cycle_files, view, field, cmap, label, scalar_range, 
         reader.UpdatePipeline()
         view.Update()
         fp = Path(frames_dir) / f"{prefix}_{i:04d}.png"
-        SaveScreenshot(str(fp))
+        SaveScreenshot(str(fp), view, TransparentBackground=1)
         frame_paths.append(fp)
         if (i + 1) % 20 == 0 or (i + 1) == len(cycle_files):
             print(f"[pviz]   {prefix} animation: {i+1}/{len(cycle_files)} frames")
@@ -509,8 +541,8 @@ def main():
         print("[pviz] WARNING: could not compute cycle averages — no VTU data read")
 
     view = CreateView("RenderView")
-    view.Background = [1.0, 1.0, 1.0]
     view.ViewSize = IMAGE_RESOLUTION
+    _style_render_view(view)
     SetActiveView(view)
 
     # ---- Systolic frame pipeline: reader → warp → derived fields ----

@@ -50,6 +50,7 @@ from svztagent.workflows.postprocess import (
     _python_bootstrap,
     _render_postprocess_script,
     _render_postprocess_slurm_header,
+    _resolve_resistance_map_camera,
     _resolved_postprocess_worker_count,
     submit_selected_preop_postprocess,
 )
@@ -479,6 +480,10 @@ def _render_postop_job_script(
         cluster_name=cluster_name,
         configured_path=cluster.executables.svfsiplus_path,
     )
+    camera_offset_dir, camera_view_up = _resolve_resistance_map_camera(
+        config,
+        patient_alias=patient_alias,
+    )
 
     # Pre-render the postprocessing script so it can be embedded in the manager job.
     # The manager writes it to disk after CMM completes and submits it as a separate job.
@@ -496,6 +501,8 @@ def _render_postop_job_script(
         fallback_clinical_targets_csv=str(clinical_targets) if clinical_targets else None,
         inflow_csv=str(inflow_csv) if inflow_csv else None,
         resistance_map_workers=postop_postprocess_cpus,
+        camera_offset_dir=camera_offset_dir,
+        camera_view_up=camera_view_up,
         cpus_per_task=postop_postprocess_cpus,
         mem=f"{int(threed_config.get('memory', 16))}G",
         account=account,

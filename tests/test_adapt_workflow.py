@@ -50,6 +50,22 @@ def _enable_postop_mesh(sample_config_files):
         defaults_path.write_text(defaults, encoding="utf-8")
 
 
+def _set_patient_paraview_camera(sample_config_files):
+    patients_path = sample_config_files / "config" / "patients.yaml"
+    payload = patients_path.read_text(encoding="utf-8")
+    if "camera_offset_dir" in payload:
+        return
+    payload = payload.replace(
+        '    data_policy: "read_only"\n',
+        '    data_policy: "read_only"\n'
+        '    postprocess:\n'
+        '      paraview_viz:\n'
+        '        camera_offset_dir: [0.25, -0.5, 0.75]\n'
+        '        camera_view_up: [0.0, 0.0, 1.0]\n',
+    )
+    patients_path.write_text(payload, encoding="utf-8")
+
+
 def _write_completed_iteration_artifacts(paths, *, iteration: int, decision: str = "not_close"):
     iter_dir = paths.run_dir / "iterations" / f"iter-{iteration:02d}"
     results = iter_dir / "results"
@@ -299,6 +315,7 @@ def test_run_adapt_renders_progress_logging(sample_config_files):
 
 
 def test_run_adapt_renders_adaptation_paraview_submission(sample_config_files):
+    _set_patient_paraview_camera(sample_config_files)
     _prepare_adaptable_run(sample_config_files, run_id="run-adapt-paraview")
 
     result = run_adapt(
@@ -317,6 +334,8 @@ def test_run_adapt_renders_adaptation_paraview_submission(sample_config_files):
     assert 'paraview_viz_skipped' in script_text
     assert 'paraview_viz_submission.json' in script_text
     assert '/adaptation/from-iter-03/m1/results/paraview_viz' in script_text
+    assert script_text.count("camera_offset_dir=[0.25, -0.5, 0.75]") == 2
+    assert script_text.count("camera_view_up=[0.0, 0.0, 1.0]") == 2
 
 
 def test_submit_adaptation_paraview_viz_records_manifest(sample_config_files):

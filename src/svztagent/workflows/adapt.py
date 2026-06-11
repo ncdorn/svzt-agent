@@ -46,7 +46,7 @@ from svztagent.workflows.paraview_viz import (
     _paraview_skip_reason,
     _prepare_adaptation_paraview_viz_job,
 )
-from svztagent.workflows.postprocess import _python_bootstrap
+from svztagent.workflows.postprocess import _python_bootstrap, _resolve_resistance_map_camera
 from svztagent.workflows.tune_trees import (
     _build_default_adapters,
     _resolve_cluster_svfsiplus_path,
@@ -381,6 +381,13 @@ def _render_adapt_job_script(
         raise ConfigError("clinical target path is required for adaptation")
     if not centerline:
         raise ConfigError("centerline path is required for adaptation")
+    patient_alias = str(manifest.patient.get("alias"))
+    camera_offset_dir, camera_view_up = _resolve_resistance_map_camera(
+        config,
+        patient_alias=patient_alias,
+    )
+    camera_offset_expr = "None" if camera_offset_dir is None else repr(camera_offset_dir)
+    camera_view_up_expr = "None" if camera_view_up is None else repr(camera_view_up)
 
     scheduler_defaults = manifest.remote.get("scheduler_defaults", {})
     account = str(scheduler_defaults.get("account") or "").strip() or None
@@ -1008,6 +1015,8 @@ try:
         stage=target_stage,
         inflow_csv=str(inflow_source_path),
         resistance_map_workers={postprocess_workers},
+        camera_offset_dir={camera_offset_expr},
+        camera_view_up={camera_view_up_expr},
     )
     _record_event(
         "baseline_postprocess_completed",
@@ -1024,6 +1033,8 @@ try:
         stage=target_stage,
         inflow_csv=str(inflow_source_path),
         resistance_map_workers={postprocess_workers},
+        camera_offset_dir={camera_offset_expr},
+        camera_view_up={camera_view_up_expr},
     )
     _record_event(
         "adapted_postprocess_completed",
