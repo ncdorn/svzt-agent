@@ -24,6 +24,7 @@ from svztagent.core.paths import build_local_run_paths
 from svztagent.core.state import RunLifecycleState
 from svztagent.hpc.interfaces import ExecutionMode
 from svztagent.postprocess.cfd_results import write_run_cfd_results
+from svztagent.postprocess.tuning_progress import write_tuning_progress
 from svztagent.workflows.postop import (
     run_postop,
     select_converged_preop_iteration,
@@ -217,6 +218,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow replacing an existing output JSON",
     )
     cfd_results.set_defaults(handler=cmd_postprocess_cfd_results)
+
+    tuning_progress = postprocess_subparsers.add_parser(
+        "tuning-progress",
+        help="Build run-scoped 0D/3D tuning progress exports and figure",
+    )
+    tuning_progress.add_argument("--run-id", required=True)
+    tuning_progress.add_argument(
+        "--output-dir",
+        required=False,
+        help="Optional explicit output directory (defaults to runs/<run_id>/tuning-progress)",
+    )
+    tuning_progress.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow replacing existing output artifacts",
+    )
+    tuning_progress.set_defaults(handler=cmd_postprocess_tuning_progress)
 
     watch = subparsers.add_parser("watch", help="Watch run scheduler lifecycle to terminal state")
     watch.add_argument("run_id")
@@ -665,6 +683,22 @@ def cmd_postprocess_cfd_results(args: argparse.Namespace) -> int:
     print(f"Template: {result.template_path}")
     print(f"Source JSON: {result.source_path or '<none>'}")
     print(f"Output: {result.output_path}")
+    return 0
+
+
+def cmd_postprocess_tuning_progress(args: argparse.Namespace) -> int:
+    workspace_root = detect_workspace_root(args.workspace_root)
+    result = write_tuning_progress(
+        workspace_root=workspace_root,
+        run_id=args.run_id,
+        output_dir=args.output_dir,
+        overwrite=args.overwrite,
+    )
+    print(f"Run ID: {result.run_id}")
+    print(f"Output directory: {result.output_dir}")
+    print(f"CSV: {result.csv_path}")
+    print(f"JSON: {result.json_path}")
+    print(f"Figure: {result.figure_path}")
     return 0
 
 

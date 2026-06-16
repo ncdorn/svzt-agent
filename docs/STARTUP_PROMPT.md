@@ -74,10 +74,12 @@ Phase 4: Create a clean workspace
 - Create a new sibling workspace directory, for example `svz-workspace/`, beside the three repos unless the user requests a different name.
 - Bootstrap it with:
   - `svzt init-workspace <workspace-path>`
+- Ensure `<workspace-path>/AGENTS.md` exists. If the bootstrap did not create it for any reason, create it before continuing.
 - Because the workspace is a sibling of all three repos, update `config/repositories.yaml` so it points to:
   - `../svzt-agent`
   - `../svZeroDTrees`
   - `../svZeroDSolver`
+- Start from the generated example YAML files, which mirror the current `../svz` control-plane layout and field structure.
 - Fill in `config/clusters.yaml`, `config/patients.yaml`, and `config/defaults.yaml` using the user-provided values.
 - Keep the example safety model intact:
   - patient roots read-only

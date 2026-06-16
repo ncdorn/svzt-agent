@@ -131,6 +131,7 @@ from svzerodtrees.tuning import (
     evaluate_iteration_gate,
     generate_reduced_pa_from_iteration,
     run_impedance_tuning_for_iteration,
+    summarize_pulmonary_zerod_config,
     write_iteration_decision,
     write_iteration_metrics,
 )
@@ -195,6 +196,7 @@ decision_payload = {
         "stree_optimization_log": None,
         "pa_config_snapshot": None,
         "tuned_zerod_config": None,
+        "zerod_pre_mapping_metrics": None,
     },
     "postop_submission_requested": False,
     "postop_job_id": None,
@@ -975,9 +977,59 @@ try:
                     "stree_optimization_log": tuning.get("stree_optimization_log"),
                     "pa_config_snapshot": tuning.get("pa_config_snapshot"),
                     "tuned_zerod_config": tuning.get("tuned_zerod_config"),
+                    "zerod_pre_mapping_metrics": str(remote_results_dir / "zerod_pre_mapping_metrics.json"),
                 }
             )
             log["steps"].append("0d_tuning_completed")
+
+            snapshot_path_raw = tuning.get("pa_config_snapshot")
+            snapshot_path = Path(snapshot_path_raw) if snapshot_path_raw else None
+            if snapshot_path is not None and snapshot_path.exists() and clinical_targets_path is not None:
+                try:
+                    zerod_metrics = summarize_pulmonary_zerod_config(snapshot_path)
+                    zerod_gate = evaluate_iteration_gate(
+                        metrics={key: float(zerod_metrics[key]) for key in ("mpa_sys", "mpa_dia", "mpa_mean", "rpa_split")},
+                        clinical_targets=clinical_targets_path,
+                    )
+                    zerod_payload = {
+                        "run_id": run_id,
+                        "iteration": iteration,
+                        "status": "ok",
+                        "source_kind": "pa_config_tuning_snapshot",
+                        "source_config_path": str(snapshot_path),
+                        "metrics": {
+                            key: zerod_metrics.get(key)
+                            for key in (
+                                "mpa_sys",
+                                "mpa_dia",
+                                "mpa_mean",
+                                "rpa_split",
+                                "mpa_flow",
+                                "lpa_flow",
+                                "rpa_flow",
+                            )
+                        },
+                        "clinical_targets": zerod_gate.get("clinical_targets"),
+                        "comparison": {
+                            "targets": zerod_gate.get("clinical_targets"),
+                            "signed_deltas": {
+                                key: float(zerod_metrics[key]) - float(zerod_gate["clinical_targets"][key])
+                                for key in ("mpa_sys", "mpa_dia", "mpa_mean", "rpa_split")
+                            },
+                            "absolute_deltas": zerod_gate.get("deltas"),
+                            "thresholds": zerod_gate.get("thresholds"),
+                            "within_threshold": {
+                                key: bool(zerod_gate["deltas"][key] <= zerod_gate["thresholds"][key])
+                                for key in ("mpa_sys", "mpa_dia", "mpa_mean", "rpa_split")
+                            },
+                            "close_to_targets": bool(zerod_gate.get("close_to_targets")),
+                            "decision": zerod_gate.get("decision"),
+                        },
+                    }
+                    write_iteration_metrics(remote_results_dir / "zerod_pre_mapping_metrics.json", zerod_payload)
+                    log["steps"].append("zerod_pre_mapping_metrics_written")
+                except Exception as exc:
+                    log["warnings"].append(f"zerod_pre_mapping_metrics_failed: {exc}")
 
         tuned_zerod_raw = decision_payload["tuning_artifacts"].get("tuned_zerod_config")
         tuned_config_path = Path(tuned_zerod_raw) if tuned_zerod_raw else None

@@ -312,6 +312,12 @@ def test_run_adapt_renders_progress_logging(sample_config_files):
     assert '"paraview_viz_submitted"' in script_text
     assert '"paraview_viz_skipped"' in script_text
     assert '"manager_failed"' in script_text
+    assert script_text.count("_write_stacked_centerline_timeseries(") >= 3
+    assert script_text.count("_run_postprocess_suite_with_optional_camera(") >= 3
+    assert '"simulation_dir": str(postop_simulation_dir)' in script_text
+    assert '"simulation_dir": str(simulation_dir)' in script_text
+    assert "centerline_timeseries_last_cycle.vtp" in script_text
+    assert script_text.count("_preserve_intermediate_centerlines(") >= 3
 
 
 def test_run_adapt_renders_adaptation_paraview_submission(sample_config_files):
@@ -334,8 +340,8 @@ def test_run_adapt_renders_adaptation_paraview_submission(sample_config_files):
     assert 'paraview_viz_skipped' in script_text
     assert 'paraview_viz_submission.json' in script_text
     assert '/adaptation/from-iter-03/m1/results/paraview_viz' in script_text
-    assert script_text.count("camera_offset_dir=[0.25, -0.5, 0.75]") == 2
-    assert script_text.count("camera_view_up=[0.0, 0.0, 1.0]") == 2
+    assert script_text.count('camera_offset_dir"] = [0.25, -0.5, 0.75]') == 2
+    assert script_text.count('camera_view_up"] = [0.0, 0.0, 1.0]') == 2
 
 
 def test_submit_adaptation_paraview_viz_records_manifest(sample_config_files):

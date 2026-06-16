@@ -39,6 +39,7 @@ svzt --workspace-root ./svz-workspace doctor
 svzt plan tune --cluster sherlock --patient TST-STAN-x --run-id demo-run
 svzt run tune --cluster sherlock --patient TST-STAN-x --run-id demo-run --execute
 svzt watch demo-run --fetch-on-complete --auto-advance
+svzt advance-iter --run-id demo-run --execute
 svzt preop select --run-id demo-run --iteration 3 --reason "best tuned preop"
 svzt run postop --run-id demo-run --execute
 svzt postprocess cfd-results --run-id demo-run
@@ -50,10 +51,10 @@ Cluster configs must provide both `executables.svfsiplus_path` and
 postprocessing.
 
 `svzt init-workspace` bootstraps a local workspace with example `config/`
-files plus `runs/`, `mirrors/`, and `templates/` directories. `svzt config
-validate` checks the required YAML config plus optional repository-location
-overrides, and `svzt doctor` summarizes local workspace diagnostics and
-checkout discovery warnings.
+files, an `AGENTS.md` workspace router, plus `runs/`, `mirrors/`, and
+`templates/` directories. `svzt config validate` checks the required YAML
+config plus optional repository-location overrides, and `svzt doctor`
+summarizes local workspace diagnostics and checkout discovery warnings.
 
 Resistance-map frame mapping for selected-preop and explicit postop
 postprocessing is controlled by `defaults.postprocess.resistance_map.*`.

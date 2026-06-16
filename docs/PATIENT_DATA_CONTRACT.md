@@ -2,6 +2,34 @@
 
 This contract defines the canonical layout for each patient directory under `permanent_data_root` (Oak).
 
+## Canonical Permanent Directory Layout
+
+For a patient rooted at:
+`<permanent_data_root>/<patient-alias>`
+
+the desired directory structure is:
+
+```text
+<patient-alias>/
+├── centerlines.vtp
+├── clinical_targets.csv
+├── inflow.csv
+├── preop-mesh-complete/
+│   └── mesh-surfaces/
+├── postop-meshes/
+│   └── clinical-postop-mesh-complete/
+│       └── mesh-surfaces/
+├── prestress/
+│   └── 1-procs/
+│       └── result_009.vtu
+└── zerod-models/
+    └── baseline_0d_learned.json
+```
+
+`svzt-agent` treats this tree as read-only source data. The workflow may read
+from any configured asset path under the patient root, but remote writes still
+belong under `runs_root`, never under `permanent_data_root`.
+
 ## Required Patient Assets
 
 For a patient root like:
@@ -14,8 +42,10 @@ the agent resolves:
 - `inflow.csv`
 - `preop-mesh-complete/`
 - `preop-mesh-complete/mesh-surfaces/` (derived subpath for svZeroDTrees BC workflows)
-- optional `postop-mesh-complete/`
-- optional `postop-mesh-complete/mesh-surfaces/` (when postop simulation submission is expected)
+- optional `postop-meshes/clinical-postop-mesh-complete/`
+- optional `postop-meshes/clinical-postop-mesh-complete/mesh-surfaces/` (when postop simulation submission is expected)
+- optional `prestress/1-procs/result_009.vtu` or another configured patient-level prestress VTU
+- optional `zerod-models/baseline_0d_learned.json` for learned-seed workflows and seed-sweep campaigns
 
 These names are configured centrally in `defaults.patient_data_layout`.
 
@@ -38,7 +68,7 @@ The resolved Oak assets map directly to svZeroDTrees path keys:
 - `paths.inflow` -> `<patient>/inflow.csv`
 - `paths.mesh_surfaces` -> `<patient>/preop-mesh-complete/mesh-surfaces`
 - `paths.preop_mesh_complete` -> `<patient>/preop-mesh-complete`
-- `paths.postop_mesh_complete` -> optional `<patient>/postop-mesh-complete`
+- `paths.postop_mesh_complete` -> optional `<patient>/postop-meshes/clinical-postop-mesh-complete`
 
 Reference points in `svZeroDTrees`:
 
@@ -86,6 +116,10 @@ already contains a completed prestress result, the workflow reuses that
 run-scoped VTU instead of falling back to a patient-level prestress path.
 
 Spatial Robin tissue support may reference a VTP file through `tissue_support.spatial_values_file_path`; that file is read by svMultiPhysics from the staged simulation directory and should be provided as part of the patient/runtime input setup, not written back into patient source data.
+
+When a patient-level prestress file is configured explicitly, the preferred
+location is under `<patient>/prestress/` in the permanent data tree so the
+input remains versioned with the rest of the patient reference data.
 
 ## Impedance Tuning Runtime Config
 

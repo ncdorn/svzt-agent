@@ -143,6 +143,7 @@ def test_init_workspace_creates_example_files(tmp_path: Path):
     result = init_workspace(workspace)
 
     assert result.workspace_root == workspace.resolve()
+    assert (workspace / "AGENTS.md").exists()
     assert (workspace / "config" / "clusters.yaml").exists()
     assert (workspace / "config" / "patients.yaml").exists()
     assert (workspace / "config" / "defaults.yaml").exists()
@@ -154,9 +155,18 @@ def test_init_workspace_creates_example_files(tmp_path: Path):
     repositories = yaml.safe_load(
         (workspace / "config" / "repositories.yaml").read_text(encoding="utf-8")
     )
+    clusters = yaml.safe_load((workspace / "config" / "clusters.yaml").read_text(encoding="utf-8"))
+    patients = yaml.safe_load((workspace / "config" / "patients.yaml").read_text(encoding="utf-8"))
+    defaults = yaml.safe_load((workspace / "config" / "defaults.yaml").read_text(encoding="utf-8"))
     assert repositories["repositories"]["svzt_agent"] == "../svzt-agent"
     assert repositories["repositories"]["svZeroDTrees"] == "../svZeroDTrees"
     assert repositories["repositories"]["svZeroDSolver"] == "../../svZeroDSolver"
+    assert clusters["clusters"][0]["name"] == "sherlock"
+    assert clusters["clusters"][0]["communication"]["ssh_alias"] == "sherlock"
+    assert len(patients["patients"]) == 5
+    assert patients["patients"][0]["alias"] == "TST-STAN-1"
+    assert defaults["defaults"]["scheduler"]["partition"] == "amarsden"
+    assert defaults["defaults"]["postprocess"]["resistance_map"]["workers"] == "auto"
 
 
 def test_init_workspace_refuses_to_overwrite_without_force(tmp_path: Path):

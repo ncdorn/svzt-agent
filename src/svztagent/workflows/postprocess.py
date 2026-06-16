@@ -183,6 +183,201 @@ def _render_postprocess_slurm_header(
     return "\n".join(header)
 
 
+def _stacked_centerline_timeseries_python_source() -> str:
+    return """
+import shutil
+import vtk
+
+
+def _read_polydata(path: Path) -> vtk.vtkPolyData:
+    reader = vtk.vtkXMLPolyDataReader()
+    reader.SetFileName(str(path))
+    reader.Update()
+    poly = vtk.vtkPolyData()
+    poly.DeepCopy(reader.GetOutput())
+    return poly
+
+
+def _write_polydata(poly: vtk.vtkPolyData, path: Path) -> None:
+    writer = vtk.vtkXMLPolyDataWriter()
+    writer.SetFileName(str(path))
+    writer.SetInputData(poly)
+    if writer.Write() != 1:
+        raise RuntimeError(f"failed to write polydata: {path}")
+
+
+def _constant_int_array(name: str, value: int, size: int) -> vtk.vtkIntArray:
+    array = vtk.vtkIntArray()
+    array.SetName(name)
+    array.SetNumberOfValues(size)
+    for index in range(size):
+        array.SetValue(index, int(value))
+    return array
+
+
+def _constant_double_array(name: str, value: float, size: int) -> vtk.vtkDoubleArray:
+    array = vtk.vtkDoubleArray()
+    array.SetName(name)
+    array.SetNumberOfValues(size)
+    for index in range(size):
+        array.SetValue(index, float(value))
+    return array
+
+
+def _annotate_timestep_polydata(
+    poly: vtk.vtkPolyData,
+    *,
+    frame_index: int,
+    time_s: float,
+    timestep_id: int | None,
+) -> vtk.vtkPolyData:
+    point_count = poly.GetNumberOfPoints()
+    cell_count = poly.GetNumberOfCells()
+    point_data = poly.GetPointData()
+    cell_data = poly.GetCellData()
+
+    point_data.AddArray(_constant_int_array("processed_timestep_index", frame_index, point_count))
+    point_data.AddArray(_constant_double_array("processed_timestep_time_s", time_s, point_count))
+    cell_data.AddArray(_constant_int_array("processed_timestep_index", frame_index, cell_count))
+    cell_data.AddArray(_constant_double_array("processed_timestep_time_s", time_s, cell_count))
+
+    if timestep_id is not None:
+        point_data.AddArray(_constant_int_array("processed_timestep_id", timestep_id, point_count))
+        cell_data.AddArray(_constant_int_array("processed_timestep_id", timestep_id, cell_count))
+    return poly
+
+
+def _preserve_intermediate_centerlines(intermediate_dir: Path):
+    original_rmtree = shutil.rmtree
+    protected_dir = intermediate_dir.expanduser().resolve(strict=False)
+
+    def _wrapped_rmtree(path, *args, **kwargs):
+        candidate = Path(path).expanduser().resolve(strict=False)
+        if candidate == protected_dir:
+            return None
+        return original_rmtree(path, *args, **kwargs)
+
+    shutil.rmtree = _wrapped_rmtree
+    return original_rmtree
+
+
+def _cleanup_intermediate_centerlines(intermediate_dir: Path, original_rmtree) -> None:
+    shutil.rmtree = original_rmtree
+    if intermediate_dir.exists():
+        original_rmtree(intermediate_dir, ignore_errors=True)
+
+
+def _is_unexpected_camera_kwarg_error(exc: Exception) -> bool:
+    if not isinstance(exc, TypeError):
+        return False
+    message = str(exc)
+    return (
+        "unexpected keyword argument" in message
+        and ("camera_offset_dir" in message or "camera_view_up" in message)
+    )
+
+
+def _run_postprocess_suite_with_optional_camera(run_postprocess, postprocess_kwargs: dict[str, object]):
+    try:
+        return run_postprocess(**postprocess_kwargs)
+    except Exception as exc:
+        if not _is_unexpected_camera_kwarg_error(exc):
+            raise
+        trimmed_kwargs = dict(postprocess_kwargs)
+        trimmed_kwargs.pop("camera_offset_dir", None)
+        trimmed_kwargs.pop("camera_view_up", None)
+        return run_postprocess(**trimmed_kwargs)
+
+
+def _write_stacked_centerline_timeseries(
+    *,
+    output_dir: Path,
+    suite_metadata_path: Path,
+    result: dict[str, object],
+) -> dict[str, object]:
+    resistance_result = result.get("resistance_map")
+    if not isinstance(resistance_result, dict):
+        raise RuntimeError("postprocess result missing resistance_map payload")
+    mean_metadata_json = resistance_result.get("metadata_json")
+    if not isinstance(mean_metadata_json, str) or not mean_metadata_json.strip():
+        raise RuntimeError("postprocess result missing resistance_map metadata_json")
+
+    mean_metadata_path = Path(mean_metadata_json).expanduser().resolve()
+    mean_metadata = json.loads(mean_metadata_path.read_text(encoding="utf-8"))
+    selected_frames = mean_metadata.get("selected_frames")
+    if not isinstance(selected_frames, list) or not selected_frames:
+        raise RuntimeError("resistance map metadata missing selected_frames")
+
+    append = vtk.vtkAppendPolyData()
+    processed_frames: list[dict[str, object]] = []
+    for frame_index, frame in enumerate(selected_frames):
+        if not isinstance(frame, dict):
+            raise RuntimeError("selected_frames entries must be objects")
+        raw_path = frame.get("path")
+        raw_time = frame.get("time_s")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise RuntimeError("selected frame missing mapped centerline path")
+        if raw_time is None:
+            raise RuntimeError("selected frame missing time_s")
+        mapped_path = Path(raw_path).expanduser().resolve()
+        if not mapped_path.exists():
+            raise FileNotFoundError(f"mapped centerline missing for stacked timeseries: {mapped_path}")
+        timestep_id_raw = frame.get("timestep_id")
+        timestep_id = int(timestep_id_raw) if timestep_id_raw is not None else None
+        poly = _annotate_timestep_polydata(
+            _read_polydata(mapped_path),
+            frame_index=frame_index,
+            time_s=float(raw_time),
+            timestep_id=timestep_id,
+        )
+        append.AddInputData(poly)
+        processed_frames.append(
+            {
+                "frame_index": frame_index,
+                "mapped_path": str(mapped_path),
+                "time_s": float(raw_time),
+                "timestep_id": timestep_id,
+                "source_frame_path": frame.get("source_frame_path"),
+            }
+        )
+
+    append.Update()
+    stacked_poly = vtk.vtkPolyData()
+    stacked_poly.DeepCopy(append.GetOutput())
+
+    output_path = output_dir / "centerline_timeseries_last_cycle.vtp"
+    metadata_output_path = output_dir / "centerline_timeseries_last_cycle_metadata.json"
+    _write_polydata(stacked_poly, output_path)
+
+    stack_result = {
+        "kind": "centerline_timeseries_last_cycle",
+        "output_path": str(output_path),
+        "metadata_json": str(metadata_output_path),
+        "source_resistance_map_metadata_json": str(mean_metadata_path),
+        "selected_frame_count": len(processed_frames),
+        "point_count": int(stacked_poly.GetNumberOfPoints()),
+        "cell_count": int(stacked_poly.GetNumberOfCells()),
+        "processed_frames": processed_frames,
+    }
+    metadata_output_path.write_text(json.dumps(stack_result, indent=2, sort_keys=True), encoding="utf-8")
+
+    suite_metadata = {}
+    if suite_metadata_path.exists():
+        suite_metadata = json.loads(suite_metadata_path.read_text(encoding="utf-8"))
+    outputs = suite_metadata.get("outputs")
+    if not isinstance(outputs, dict):
+        outputs = {}
+    outputs["centerline_timeseries_last_cycle_vtp"] = str(output_path)
+    outputs["centerline_timeseries_last_cycle_metadata_json"] = str(metadata_output_path)
+    suite_metadata["outputs"] = outputs
+    suite_metadata["centerline_timeseries_last_cycle"] = stack_result
+    suite_metadata_path.write_text(json.dumps(suite_metadata, indent=2, sort_keys=True), encoding="utf-8")
+
+    result["centerline_timeseries_last_cycle"] = stack_result
+    return stack_result
+"""
+
+
 def _render_postprocess_script(
     *,
     config,
@@ -237,21 +432,40 @@ import json
 
 from svzerodtrees.post_processing import run_pulmonary_threed_postprocess_suite
 
+{_stacked_centerline_timeseries_python_source()}
+
+output_dir = Path({json.dumps(output_dir)})
 submission_path = Path({json.dumps(str(PurePosixPath(output_dir) / "postprocess_submission.json"))})
-metadata_path = Path({json.dumps(str(PurePosixPath(output_dir) / "postprocess_suite_metadata.json"))})
+    metadata_path = Path({json.dumps(str(PurePosixPath(output_dir) / "postprocess_suite_metadata.json"))})
 try:
-    result = run_pulmonary_threed_postprocess_suite(
-        simulation_dir={json.dumps(simulation_dir)},
-        output_dir={json.dumps(output_dir)},
-        centerline={json.dumps(centerline)},
-        stage={json.dumps(stage)},
-        svslicer_path={json.dumps(svslicer_path)},
-        clinical_targets={clinical_targets_expr},
-        inflow_csv={inflow_expr},
-        resistance_map_workers={json.dumps(resistance_map_workers)},
-        camera_offset_dir={camera_offset_expr},
-        camera_view_up={camera_view_up_expr},
-    )
+    postprocess_kwargs = {{
+        "simulation_dir": {json.dumps(simulation_dir)},
+        "output_dir": str(output_dir),
+        "centerline": {json.dumps(centerline)},
+        "stage": {json.dumps(stage)},
+        "svslicer_path": {json.dumps(svslicer_path)},
+        "clinical_targets": {clinical_targets_expr},
+        "inflow_csv": {inflow_expr},
+        "resistance_map_workers": {json.dumps(resistance_map_workers)},
+    }}
+    if {camera_offset_expr} is not None:
+        postprocess_kwargs["camera_offset_dir"] = {camera_offset_expr}
+    if {camera_view_up_expr} is not None:
+        postprocess_kwargs["camera_view_up"] = {camera_view_up_expr}
+    preserved_centerlines = output_dir / "resistance_map" / "intermediate_centerlines"
+    original_rmtree = _preserve_intermediate_centerlines(preserved_centerlines)
+    try:
+        result = _run_postprocess_suite_with_optional_camera(
+            run_pulmonary_threed_postprocess_suite,
+            postprocess_kwargs,
+        )
+        _write_stacked_centerline_timeseries(
+            output_dir=output_dir,
+            suite_metadata_path=metadata_path,
+            result=result,
+        )
+    finally:
+        _cleanup_intermediate_centerlines(preserved_centerlines, original_rmtree)
 except Exception as exc:
     payload = {{
         "status": "failed",

@@ -46,7 +46,11 @@ from svztagent.workflows.paraview_viz import (
     _paraview_skip_reason,
     _prepare_adaptation_paraview_viz_job,
 )
-from svztagent.workflows.postprocess import _python_bootstrap, _resolve_resistance_map_camera
+from svztagent.workflows.postprocess import (
+    _python_bootstrap,
+    _resolve_resistance_map_camera,
+    _stacked_centerline_timeseries_python_source,
+)
 from svztagent.workflows.tune_trees import (
     _build_default_adapters,
     _resolve_cluster_svfsiplus_path,
@@ -457,6 +461,8 @@ from svzerodtrees.post_processing.pulmonary_threed_suite import run_pulmonary_th
 from svzerodtrees.simulation import Simulation
 from svzerodtrees.simulation.simulation_directory import SimulationDirectory
 from svzerodtrees.tune_bcs.clinical_targets import ClinicalTargets
+
+{_stacked_centerline_timeseries_python_source()}
 
 remote_adaptation_dir = Path({json.dumps(remote_layout["remote_adaptation_dir"])})
 remote_results_dir = Path({json.dumps(remote_layout["remote_results_dir"])})
@@ -1006,36 +1012,78 @@ try:
         )
 
     _record_event("baseline_postprocess_started", "info")
-    baseline_meta = run_pulmonary_threed_postprocess_suite(
-        simulation_dir=str(postop_simulation_dir),
-        centerline=str(centerline),
-        svslicer_path=str(svslicer_path),
-        output_dir=str(Path({json.dumps(str(baseline_postprocess_dir))})),
-        clinical_targets=str(clinical_targets_csv),
-        stage=target_stage,
-        inflow_csv=str(inflow_source_path),
-        resistance_map_workers={postprocess_workers},
-        camera_offset_dir={camera_offset_expr},
-        camera_view_up={camera_view_up_expr},
+    baseline_output_dir = Path({json.dumps(str(baseline_postprocess_dir))})
+    baseline_original_rmtree = _preserve_intermediate_centerlines(
+        baseline_output_dir / "resistance_map" / "intermediate_centerlines"
     )
+    try:
+        baseline_postprocess_kwargs = {{
+            "simulation_dir": str(postop_simulation_dir),
+            "centerline": str(centerline),
+            "svslicer_path": str(svslicer_path),
+            "output_dir": str(baseline_output_dir),
+            "clinical_targets": str(clinical_targets_csv),
+            "stage": target_stage,
+            "inflow_csv": str(inflow_source_path),
+            "resistance_map_workers": {postprocess_workers},
+        }}
+        if {camera_offset_expr} is not None:
+            baseline_postprocess_kwargs["camera_offset_dir"] = {camera_offset_expr}
+        if {camera_view_up_expr} is not None:
+            baseline_postprocess_kwargs["camera_view_up"] = {camera_view_up_expr}
+        baseline_meta = _run_postprocess_suite_with_optional_camera(
+            run_pulmonary_threed_postprocess_suite,
+            baseline_postprocess_kwargs,
+        )
+        _write_stacked_centerline_timeseries(
+            output_dir=baseline_output_dir,
+            suite_metadata_path=baseline_output_dir / "postprocess_suite_metadata.json",
+            result=baseline_meta,
+        )
+    finally:
+        _cleanup_intermediate_centerlines(
+            baseline_output_dir / "resistance_map" / "intermediate_centerlines",
+            baseline_original_rmtree,
+        )
     _record_event(
         "baseline_postprocess_completed",
         "info",
         metadata_json=baseline_meta.get("metadata_json"),
     )
     _record_event("adapted_postprocess_started", "info")
-    adapted_meta = run_pulmonary_threed_postprocess_suite(
-        simulation_dir=str(simulation_dir),
-        centerline=str(centerline),
-        svslicer_path=str(svslicer_path),
-        output_dir=str(Path({json.dumps(str(adapted_postprocess_dir))})),
-        clinical_targets=str(clinical_targets_csv),
-        stage=target_stage,
-        inflow_csv=str(inflow_source_path),
-        resistance_map_workers={postprocess_workers},
-        camera_offset_dir={camera_offset_expr},
-        camera_view_up={camera_view_up_expr},
+    adapted_output_dir = Path({json.dumps(str(adapted_postprocess_dir))})
+    adapted_original_rmtree = _preserve_intermediate_centerlines(
+        adapted_output_dir / "resistance_map" / "intermediate_centerlines"
     )
+    try:
+        adapted_postprocess_kwargs = {{
+            "simulation_dir": str(simulation_dir),
+            "centerline": str(centerline),
+            "svslicer_path": str(svslicer_path),
+            "output_dir": str(adapted_output_dir),
+            "clinical_targets": str(clinical_targets_csv),
+            "stage": target_stage,
+            "inflow_csv": str(inflow_source_path),
+            "resistance_map_workers": {postprocess_workers},
+        }}
+        if {camera_offset_expr} is not None:
+            adapted_postprocess_kwargs["camera_offset_dir"] = {camera_offset_expr}
+        if {camera_view_up_expr} is not None:
+            adapted_postprocess_kwargs["camera_view_up"] = {camera_view_up_expr}
+        adapted_meta = _run_postprocess_suite_with_optional_camera(
+            run_pulmonary_threed_postprocess_suite,
+            adapted_postprocess_kwargs,
+        )
+        _write_stacked_centerline_timeseries(
+            output_dir=adapted_output_dir,
+            suite_metadata_path=adapted_output_dir / "postprocess_suite_metadata.json",
+            result=adapted_meta,
+        )
+    finally:
+        _cleanup_intermediate_centerlines(
+            adapted_output_dir / "resistance_map" / "intermediate_centerlines",
+            adapted_original_rmtree,
+        )
     _record_event(
         "adapted_postprocess_completed",
         "info",

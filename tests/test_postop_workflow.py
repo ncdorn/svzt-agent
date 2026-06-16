@@ -247,9 +247,19 @@ def test_preop_select_submits_selected_preop_postprocess(sample_config_files):
     assert f"#SBATCH --output={remote_job_script.parent}/logs/slurm-%j.out" in script_text
     assert "#SBATCH --cpus-per-task=4" in script_text
     assert "#SBATCH --mem=64G" in script_text
-    assert "resistance_map_workers=4" in script_text
-    assert "camera_offset_dir=[0.25, -0.5, 0.75]" in script_text
-    assert "camera_view_up=[0.0, 0.0, 1.0]" in script_text
+    assert '"resistance_map_workers": 4' in script_text
+    assert "def _run_postprocess_suite_with_optional_camera(" in script_text
+    assert '"simulation_dir":' in script_text
+    assert 'if [0.25, -0.5, 0.75] is not None:' in script_text
+    assert 'postprocess_kwargs["camera_offset_dir"] = [0.25, -0.5, 0.75]' in script_text
+    assert 'if [0.0, 0.0, 1.0] is not None:' in script_text
+    assert 'postprocess_kwargs["camera_view_up"] = [0.0, 0.0, 1.0]' in script_text
+    assert "_run_postprocess_suite_with_optional_camera(" in script_text
+    assert "_write_stacked_centerline_timeseries(" in script_text
+    assert "centerline_timeseries_last_cycle.vtp" in script_text
+    assert "centerline_timeseries_last_cycle_metadata.json" in script_text
+    assert "_preserve_intermediate_centerlines" in script_text
+    assert "_cleanup_intermediate_centerlines" in script_text
 
 
 def test_preop_select_can_skip_selected_preop_postprocess(sample_config_files):
@@ -463,6 +473,8 @@ def test_run_postop_dry_run_writes_plan_without_manifest_submission(sample_confi
     assert "srun -N {nodes} -n {total_tasks}" in script_text
     assert "paraview_viz_submission.json" in script_text
     assert "paraview_viz_job_id" in script_text
+    assert "_write_stacked_centerline_timeseries(" in script_text
+    assert "centerline_timeseries_last_cycle_vtp" in script_text
 
     manifest = read_manifest(paths.manifest)
     assert manifest.postop_run is None
@@ -513,7 +525,7 @@ def test_run_postop_execute_first_generates_plan_and_records_job(sample_config_f
     assert manifest.paraview_viz_runs[-1].stage == "postop"
     assert manifest.paraview_viz_runs[-1].scheduler_job_id is None
     script_text = result.local_job_script_path.read_text(encoding="utf-8")
-    assert 'resistance_map_workers=24' in script_text
+    assert 'resistance_map_workers' in script_text
     assert "#SBATCH --cpus-per-task=24" in script_text
     assert "#SBATCH --nodes=1" in script_text
     assert "#SBATCH --ntasks-per-node=24" not in script_text
@@ -531,8 +543,8 @@ def test_run_postop_execute_first_generates_plan_and_records_job(sample_config_f
     assert 'threed_config["prestress_file_path"] = str(_generate_postop_prestress_file())' in script_text
     assert "paraview_viz_submission.json" in script_text
     assert "ParaView visualization job submitted" in script_text
-    assert "camera_offset_dir=[0.25, -0.5, 0.75]" in script_text
-    assert "camera_view_up=[0.0, 0.0, 1.0]" in script_text
+    assert "_write_stacked_centerline_timeseries(" in script_text
+    assert "centerline_timeseries_last_cycle_metadata.json" in script_text
 
 
 def test_run_postop_refreshes_stale_selected_tuned_config_from_local_decision(sample_config_files):

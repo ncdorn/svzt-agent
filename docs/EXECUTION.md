@@ -10,6 +10,7 @@
 - `svzt run postop --run-id <id> [--dry-run|--execute]`
 - `svzt run adapt --run-id <id> --model M1|M2|M3 [--parameter-set <name>] [--dry-run|--execute]`
 - `svzt postprocess cfd-results --run-id <id> [--source-json <path>] [--template <path>] [--output <path>] [--overwrite]`
+- `svzt postprocess tuning-progress --run-id <id> [--output-dir <path>] [--overwrite]`
 - `svzt campaign seed-sweep plan --cluster <name> [--campaign-id <id>] [--patients <alias> ...]`
 - `svzt campaign seed-sweep run <campaign-id> [--dry-run|--execute]`
 - `svzt campaign seed-sweep summarize <campaign-id>`
@@ -40,6 +41,18 @@
 - `svzt init-workspace` creates a new local workspace root with example config
   files for `clusters.yaml`, `patients.yaml`, `defaults.yaml`,
   `clinical_targets.yaml`, and `repositories.yaml`.
+- The generated example YAML mirrors the current `../svz` control-plane config
+  shape so a fresh sibling workspace starts from the same field structure and
+  defaults used in active operation.
+- The generated patient-data layout defaults assume permanent patient assets are
+  organized under each `permanent_remote_path` with:
+  `clinical_targets.csv`, `centerlines.vtp`, `inflow.csv`,
+  `preop-mesh-complete/mesh-surfaces/`,
+  `postop-meshes/clinical-postop-mesh-complete/mesh-surfaces/`, and optional
+  `prestress/` plus `zerod-models/` subtrees. See
+  `docs/PATIENT_DATA_CONTRACT.md` for the canonical tree.
+- `svzt init-workspace` also creates `AGENTS.md` at the workspace root when it
+  is missing so agent sessions started inside the workspace have a local router.
 - The command also creates `runs/`, `mirrors/`, and `templates/` directories so
   a new workspace starts with the expected local structure.
 - `svzt config validate` validates the required YAML config, reports cluster and
@@ -131,6 +144,22 @@
 - The command prefers systolic resistance-map artifacts when available and falls back to mean resistance summaries when selected-preop systolic outputs are missing.
 - When postop postprocess artifacts are still missing, the command preserves any curated measured fields from the source JSON and carries forward the best available manifest-backed run status instead of clearing the state back to `pending`.
 - This command is local normalization only. Remote generation and artifact fetch remain separate workflow/operator steps.
+
+## Run-Scoped Tuning Progress Diagnostics
+- `svzt postprocess tuning-progress` builds a run-scoped diagnostic bundle that compares:
+  - tuned 0D pre-mapping metrics from `pa_config_tuning_snapshot.json`
+  - existing 3D preop gate metrics from `iteration_metrics.json`
+  - clinical targets and threshold bands from `iteration_decision.json`
+- Default output dir: `<workspace_root>/runs/<run_id>/tuning-progress/`
+- Outputs:
+  - `tuning_progress.csv`
+  - `tuning_progress.json`
+  - `tuning_progress.png`
+- For future runs, the iteration driver also writes `iterations/iter-XX/results/zerod_pre_mapping_metrics.json`.
+- When the per-iteration 0D summary is missing, the command backfills it locally from `pa_config_tuning_snapshot.json` when that artifact is available under either:
+  - `iterations/iter-XX/results/`
+  - `pulled_outputs/iterations/iter-XX/results/`
+- Missing historical 0D snapshot artifacts remain explicit gaps in the output; the command does not infer pre-mapping behavior from the post-mapping 3D-coupled config.
 
 ## Adaptation Configuration
 - Configure adaptation defaults in YAML:
@@ -225,8 +254,13 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
   records `selected_preop_postprocess` in the manifest. Its Slurm stdout/stderr
   now live under `runs/<run_id>/iterations/iter-XX/postprocess/logs/`, and the
   job writes `postprocess_submission.json` plus
-  `postprocess_suite_metadata.json` for success/failure evidence. The generated
-  resistance-map step now supports bounded frame-level parallelism through
+  `postprocess_suite_metadata.json` for success/failure evidence. In addition to
+  the resistance-map artifacts, the selected-preop postprocess job now writes a
+  stacked last-cycle centerline timeseries artifact at
+  `results/postprocess/centerline_timeseries_last_cycle.vtp` plus companion
+  `centerline_timeseries_last_cycle_metadata.json`, built from the per-timestep
+  `svslicer` centerline projections used by the mean resistance-map pass. The
+  generated resistance-map step now supports bounded frame-level parallelism through
   `defaults.postprocess.resistance_map.workers`; selected-preop jobs request
   matching `--cpus-per-task`, resolving `auto` against the selected-preop
   allocation, and when more than one worker is requested they also request
@@ -241,8 +275,11 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
   config must provide `executables.svslicer_path`. Postop postprocess Slurm
   stdout/stderr live under `<runs_root>/<run_id>/postop/from-iter-XX/logs/`,
   and the job writes `postop_submission.json` plus
-  `results/postprocess/postprocess_suite_metadata.json`. The postop postprocess
-  step receives the same resistance-map worker setting, resolving `auto`
+  `results/postprocess/postprocess_suite_metadata.json`. That same postop
+  postprocess output directory now also includes
+  `centerline_timeseries_last_cycle.vtp` and
+  `centerline_timeseries_last_cycle_metadata.json` as separate artifacts from
+  the resistance-map products. The postop postprocess step receives the same resistance-map worker setting, resolving `auto`
   against the single-node child postprocess allocation using the resolved 3D
   `procs_per_node`. The enclosing explicit postop wrapper now requests the same
   Slurm resources as the resolved
@@ -283,7 +320,11 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
   - `results/reduced_pa_flow_split_convergence.csv` for `M1`
   - `results/reduced_pa_flow_split_convergence.png` for `M1`
   then runs one adapted 3D solve on the postop mesh and inline postprocess for
-  both postop baseline and adapted prediction.
+  both postop baseline and adapted prediction. Each inline postprocess output
+  directory now includes a stacked last-cycle centerline timeseries artifact
+  (`centerline_timeseries_last_cycle.vtp` plus
+  `centerline_timeseries_last_cycle_metadata.json`) alongside the resistance-map
+  outputs.
 - `svzt status <run-id>` now combines parent scheduler state with iteration progress artifacts:
   - prints the active iteration and tracker status
   - reports the best-known stage within the active iteration (`0D` tuning, preop `3D`, post-preop analysis, postop `3D`, or terminal branch outcome)

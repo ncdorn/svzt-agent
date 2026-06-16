@@ -102,7 +102,11 @@ svzt run postop --run-id <run-id> --execute
 
 `svzt preop select` now also submits a selected-preop postprocess job that
 generates `mpa_pressure_vs_time.csv/png`, flow-split comparison artifacts, and
-resistance-map outputs under `iterations/iter-XX/results/postprocess/`.
+resistance-map outputs under `iterations/iter-XX/results/postprocess/`. It also
+writes `centerline_timeseries_last_cycle.vtp` plus
+`centerline_timeseries_last_cycle_metadata.json`, which stack the per-timestep
+`svslicer` centerline projections from the last processed cardiac cycle into
+one time-series centerline artifact.
 Scheduler logs for that job are written under
 `iterations/iter-XX/postprocess/logs/`. The job also writes
 `postprocess_submission.json` and `postprocess_suite_metadata.json` so partial
@@ -140,6 +144,9 @@ Fetches whatever `defaults.artifacts.pull` specifies in the workspace YAML — t
 Selected-preop and explicit postop postprocess outputs are written under the run
 tree at `iterations/iter-XX/results/postprocess/` and
 `postop/from-iter-XX/results/postprocess/`.
+Each postprocess directory now includes the separate
+`centerline_timeseries_last_cycle.vtp` artifact and its metadata JSON alongside
+the resistance-map products.
 Their Slurm stdout/stderr logs live under `iterations/iter-XX/postprocess/logs/`
 and `postop/from-iter-XX/logs/`.
 Explicit postop runs receive the same resistance-map worker setting, resolving
@@ -163,6 +170,32 @@ Useful flags:
 
 The command reads local run artifacts only. If the needed postprocess files are
 still remote, fetch or sync them first.
+
+---
+
+## Build tuning-progress diagnostics
+
+To inspect how well the tuned 0D model matched the clinical targets before
+BC-to-3D mapping at each iteration, generate the run-scoped tuning-progress
+bundle:
+
+```bash
+svzt postprocess tuning-progress --run-id <run-id>
+```
+
+Outputs land under `runs/<run-id>/tuning-progress/`:
+- `tuning_progress.csv`
+- `tuning_progress.json`
+- `tuning_progress.png`
+
+The command overlays:
+- 0D pre-mapping metrics from `pa_config_tuning_snapshot.json`
+- 3D preop gate metrics from `iteration_metrics.json`
+- targets and threshold bands from `iteration_decision.json`
+
+For newer runs the iteration driver writes `zerod_pre_mapping_metrics.json`
+directly. For older runs, the command backfills that summary from the local
+snapshot when it exists in `iterations/.../results/` or `pulled_outputs/.../results/`.
 
 ---
 
@@ -205,6 +238,7 @@ last iteration, select that iteration with `svzt preop select`.
 | `svzt preop select --run-id R --iteration N` | Record converged preop iteration |
 | `svzt run postop --run-id R` | Preview explicit postop submission |
 | `svzt run postop --run-id R --execute` | Submit explicit postop simulation |
+| `svzt postprocess tuning-progress --run-id R` | Build run-scoped 0D vs 3D tuning diagnostics |
 | `svzt continue R --execute` | Force-advance after driver timeout |
 | `svzt run tune-iter --cluster C --patient P --run-id R --execute` | Re-submit a stuck/failed iteration |
 | `svzt run tune-iter ... --skip-zerod-tuning --execute` | Re-submit 3D only, reuse 0D artifacts |
