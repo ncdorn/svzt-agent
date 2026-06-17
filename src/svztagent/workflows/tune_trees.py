@@ -1174,82 +1174,6 @@ def _stage_seed_from_remote(
     return pulled_seed
 
 
-def _has_local_seed_generation_assets(patient_assets: dict[str, str] | None) -> bool:
-    if not patient_assets:
-        return False
-    preop_path = str(patient_assets.get("preop_mesh_complete_dir", "")).strip()
-    targets_path = str(patient_assets.get("clinical_targets", "")).strip()
-    if not preop_path or not targets_path:
-        return False
-    return Path(preop_path).expanduser().exists() and Path(targets_path).expanduser().exists()
-
-
-def _generate_iteration1_seed_via_svzerodtrees(
-    *,
-    iteration_paths: dict[str, Path],
-    patient_assets: dict[str, str] | None,
-) -> Path:
-    if patient_assets is None:
-        raise ConfigError(
-            "iteration-1 seed generation requires resolved patient asset paths"
-        )
-
-    preop_mesh_complete = Path(
-        patient_assets.get("preop_mesh_complete_dir", "")
-    ).expanduser()
-    clinical_targets = Path(patient_assets.get("clinical_targets", "")).expanduser()
-    inflow_value = patient_assets.get("inflow")
-    inflow = Path(inflow_value).expanduser() if inflow_value else None
-
-    missing = []
-    if not preop_mesh_complete.exists():
-        missing.append(str(preop_mesh_complete))
-    if not clinical_targets.exists():
-        missing.append(str(clinical_targets))
-    if missing:
-        raise ConfigError(
-            "cannot generate iteration-1 seed; missing required patient assets: "
-            + ", ".join(missing)
-        )
-
-    try:
-        from svzerodtrees.simulation import Simulation
-    except Exception as exc:  # pragma: no cover - import path depends on runtime env
-        raise ConfigError(
-            "iteration-1 seed generation requested, but svZeroDTrees import failed"
-        ) from exc
-
-    seed_workspace = iteration_paths["root"] / "seed_generation"
-    preop_dir = seed_workspace / "preop"
-    postop_dir = seed_workspace / "postop"
-    preop_dir.mkdir(parents=True, exist_ok=True)
-    postop_dir.mkdir(parents=True, exist_ok=True)
-
-    mesh_complete_target = preop_dir / "mesh-complete"
-    _link_or_copy_directory(preop_mesh_complete, mesh_complete_target)
-
-    sim = Simulation(
-        path=str(seed_workspace),
-        clinical_targets=str(clinical_targets),
-        preop_dir="preop",
-        postop_dir="postop",
-        adapted_dir=None,
-        inflow_path=str(inflow) if inflow is not None and inflow.exists() else None,
-    )
-    # Seed generation only needs steady solves and the reduced 0D seed.  The
-    # full svZeroDTrees pipeline reads optimized_params.csv for impedance BCs
-    # even when optimize_bcs=False, so avoid that tuning-artifact path here.
-    sim.run_steady_sims()
-    sim.generate_simplified_nonlinear_zerod()
-
-    generated = seed_workspace / "simplified_nonlinear_zerod.json"
-    if not generated.exists():
-        raise ConfigError(
-            "svZeroDTrees completed without writing simplified_nonlinear_zerod.json"
-        )
-    return generated
-
-
 def _stage_local_inflow_if_available(
     *,
     iteration_paths: dict[str, Path],
@@ -1377,21 +1301,8 @@ def _stage_tune_inputs(
                         )
                         if pulled_seed is not None:
                             seed = pulled_seed
-                if seed is None and not (
-                    mode == ExecutionMode.DRY_RUN
-                    and attempted_remote_pull
-                    and not _has_local_seed_generation_assets(patient_assets)
-                ):
-                    seed = _generate_iteration1_seed_via_svzerodtrees(
-                        iteration_paths=iteration_paths,
-                        patient_assets=patient_assets,
-                    )
         elif iter1_seed_source == "generate":
-            if _has_local_seed_generation_assets(patient_assets):
-                seed = _generate_iteration1_seed_via_svzerodtrees(
-                    iteration_paths=iteration_paths,
-                    patient_assets=patient_assets,
-                )
+            pass
 
     if seed is not None and seed.exists():
         target = iteration_paths["staged_inputs"] / seed_input_filename

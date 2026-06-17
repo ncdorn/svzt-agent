@@ -5,6 +5,11 @@ import shutil
 
 from svztagent.core.manifest import read_manifest, record_lifecycle_transition, write_manifest
 from svztagent.core.state import RunLifecycleState
+from svztagent.hpc.fake import (
+    FakeFileTransferAdapter,
+    FakeRemoteExecAdapter,
+    FakeSchedulerAdapter,
+)
 from svztagent.hpc.interfaces import ExecutionMode
 from svztagent.workflows.tune_trees import _iteration_impedance_config, run_tune_trees
 
@@ -189,8 +194,8 @@ def test_run_tune_dry_run_iteration1_stages_seed_from_yaml_config(sample_config_
     assert staged_inflow.read_text(encoding="utf-8") == "t,q\n0,0\n"
 
 
-def test_run_tune_dry_run_iteration1_missing_seed_path_falls_back_to_generate(
-    sample_config_files, monkeypatch
+def test_run_tune_dry_run_iteration1_missing_seed_path_leaves_seed_for_remote_driver(
+    sample_config_files,
 ):
     (sample_config_files / "config" / "defaults.yaml").write_text(
         """
@@ -203,15 +208,7 @@ defaults:
         + "\n",
         encoding="utf-8",
     )
-    generated = sample_config_files / "generated_seed.json"
-    generated.write_text("{\"generated\": true}", encoding="utf-8")
-
-    monkeypatch.setattr(
-        "svztagent.workflows.tune_trees._generate_iteration1_seed_via_svzerodtrees",
-        lambda **_: generated,
-    )
-
-    run_tune_trees(
+    result = run_tune_trees(
         workspace_root=sample_config_files,
         cluster_name="sherlock",
         patient_alias="TST-STAN-x",
@@ -228,12 +225,14 @@ defaults:
         / "inputs"
         / "simplified_nonlinear_zerod.json"
     )
-    assert staged_seed.exists()
-    assert staged_seed.read_text(encoding="utf-8") == "{\"generated\": true}"
+    assert not staged_seed.exists()
+    rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
+    assert "if not staged_seed_path.exists():" in rendered_script
+    assert "_generate_iteration_seed(staged_seed_path)" in rendered_script
 
 
 def test_run_tune_dry_run_generate_seed_skips_local_generation_when_assets_are_remote_only(
-    sample_config_files, monkeypatch
+    sample_config_files,
 ):
     (sample_config_files / "config" / "clusters.yaml").write_text(
         """
@@ -268,17 +267,6 @@ patients:
         encoding="utf-8",
     )
 
-    called = {"generate": False}
-
-    def _fake_generate(**_kwargs):
-        called["generate"] = True
-        return sample_config_files / "generated_seed.json"
-
-    monkeypatch.setattr(
-        "svztagent.workflows.tune_trees._generate_iteration1_seed_via_svzerodtrees",
-        _fake_generate,
-    )
-
     result = run_tune_trees(
         workspace_root=sample_config_files,
         cluster_name="sherlock",
@@ -297,7 +285,46 @@ patients:
         / "simplified_nonlinear_zerod.json"
     )
     assert not staged_seed.exists()
-    assert called["generate"] is False
+    rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
+    assert "if not staged_seed_path.exists():" in rendered_script
+    assert "_generate_iteration_seed(staged_seed_path)" in rendered_script
+
+
+def test_run_tune_execute_generate_seed_defers_to_remote_driver(
+    sample_config_files,
+):
+    (sample_config_files / "config" / "defaults.yaml").write_text(
+        """
+defaults:
+  tuning:
+    iteration1_seed:
+      source: "generate"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-exec-iter1-seed-remote",
+        mode=ExecutionMode.EXECUTE,
+        remote_exec_adapter=FakeRemoteExecAdapter(),
+        transfer_adapter=FakeFileTransferAdapter(),
+        scheduler_adapter=FakeSchedulerAdapter(),
+    )
+
+    staged_seed = (
+        sample_config_files
+        / "runs"
+        / "run-exec-iter1-seed-remote"
+        / "iterations"
+        / "iter-01"
+        / "inputs"
+        / "simplified_nonlinear_zerod.json"
+    )
+    assert not staged_seed.exists()
     rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
     assert "if not staged_seed_path.exists():" in rendered_script
     assert "_generate_iteration_seed(staged_seed_path)" in rendered_script
@@ -358,6 +385,7 @@ def test_run_tune_dry_run_renders_threed_defaults_and_stage_paths(sample_config_
     assert 'PYTHON_CANDIDATE="python3"' in rendered_script
     assert "svzerodtrees.tuning missing required symbols" in rendered_script
     assert "sim.run_steady_sims()" in rendered_script
+    assert "execution_config=solver_execution," in rendered_script
 
 
 def test_run_tune_dry_run_renders_slurm_mail_settings_for_svzerodtrees(sample_config_files):
@@ -476,7 +504,7 @@ patients:
     assert '"wait_timeout_seconds": 999' in rendered_script
 
 
-def test_run_tune_dry_run_renders_generate_prestress_from_seed_mean(sample_config_files, monkeypatch):
+def test_run_tune_dry_run_renders_generate_prestress_from_seed_mean(sample_config_files):
     (sample_config_files / "config" / "patients.yaml").write_text(
         f"""
 patients:
@@ -494,13 +522,6 @@ patients:
         + "\n",
         encoding="utf-8",
     )
-    generated = sample_config_files / "generated_seed.json"
-    generated.write_text("{\"generated\": true}", encoding="utf-8")
-    monkeypatch.setattr(
-        "svztagent.workflows.tune_trees._generate_iteration1_seed_via_svzerodtrees",
-        lambda **_: generated,
-    )
-
     result = run_tune_trees(
         workspace_root=sample_config_files,
         cluster_name="sherlock",

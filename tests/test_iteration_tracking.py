@@ -649,7 +649,7 @@ def test_stage_tune_inputs_full_pa_uses_full_pa_seed_filename(sample_config_file
     assert not reduced_seed.exists()
 
 
-def test_stage_tune_inputs_iteration1_generate_calls_helper(monkeypatch, sample_config_files):
+def test_stage_tune_inputs_iteration1_generate_leaves_seed_for_remote_driver(sample_config_files):
     paths, _ctx = init_run_workspace(
         workspace_root=sample_config_files,
         cluster_name="sherlock",
@@ -662,25 +662,12 @@ def test_stage_tune_inputs_iteration1_generate_calls_helper(monkeypatch, sample_
         patient_alias="TST-STAN-x",
         run_id="run-iter-007",
     )
-    generated_seed = paths.run_dir / "generated_seed.json"
-    generated_seed.write_text("{\"generated\": true}", encoding="utf-8")
-    called = {}
     local_preop = sample_config_files / "local-preop-mesh-complete"
     (local_preop / "mesh-surfaces").mkdir(parents=True, exist_ok=True)
     local_targets = sample_config_files / "local-clinical_targets.csv"
     local_targets.write_text("target,value\n", encoding="utf-8")
     local_inflow = sample_config_files / "local-inflow.csv"
     local_inflow.write_text("t,q\n0,0\n", encoding="utf-8")
-
-    def _fake_generate(*, iteration_paths, patient_assets):
-        called["iteration_root"] = iteration_paths["root"]
-        called["patient_assets"] = patient_assets
-        return generated_seed
-
-    monkeypatch.setattr(
-        "svztagent.workflows.tune_trees._generate_iteration1_seed_via_svzerodtrees",
-        _fake_generate,
-    )
 
     _stage_tune_inputs(
         paths,
@@ -697,9 +684,7 @@ def test_stage_tune_inputs_iteration1_generate_calls_helper(monkeypatch, sample_
     )
 
     staged_seed = paths.run_dir / "iterations" / "iter-01" / "inputs" / "simplified_nonlinear_zerod.json"
-    assert staged_seed.exists()
-    assert staged_seed.read_text(encoding="utf-8") == "{\"generated\": true}"
-    assert isinstance(called["iteration_root"], Path)
+    assert not staged_seed.exists()
 
 
 def test_stage_tune_inputs_stages_local_inflow_when_available(sample_config_files):
@@ -746,8 +731,8 @@ def test_stage_tune_inputs_stages_local_inflow_when_available(sample_config_file
     assert staged_inflow.read_text(encoding="utf-8") == patient_inflow.read_text(encoding="utf-8")
 
 
-def test_stage_tune_inputs_iteration1_path_missing_falls_back_to_generate(
-    monkeypatch, sample_config_files
+def test_stage_tune_inputs_iteration1_path_missing_leaves_seed_for_remote_driver(
+    sample_config_files
 ):
     paths, _ctx = init_run_workspace(
         workspace_root=sample_config_files,
@@ -762,13 +747,6 @@ def test_stage_tune_inputs_iteration1_path_missing_falls_back_to_generate(
         run_id="run-iter-008",
     )
 
-    generated_seed = paths.run_dir / "generated_seed_for_missing_path.json"
-    generated_seed.write_text("{\"generated\": true}", encoding="utf-8")
-    monkeypatch.setattr(
-        "svztagent.workflows.tune_trees._generate_iteration1_seed_via_svzerodtrees",
-        lambda **_: generated_seed,
-    )
-
     _stage_tune_inputs(
         paths,
         plan,
@@ -781,8 +759,7 @@ def test_stage_tune_inputs_iteration1_path_missing_falls_back_to_generate(
     )
 
     staged_seed = paths.run_dir / "iterations" / "iter-01" / "inputs" / "simplified_nonlinear_zerod.json"
-    assert staged_seed.exists()
-    assert staged_seed.read_text(encoding="utf-8") == "{\"generated\": true}"
+    assert not staged_seed.exists()
 
 
 def test_stage_tune_inputs_iteration1_remote_path_pulls_seed(sample_config_files):
@@ -830,7 +807,7 @@ def test_stage_tune_inputs_iteration1_remote_path_pulls_seed(sample_config_files
 
 
 def test_stage_tune_inputs_iteration1_remote_path_dry_run_skips_generate(
-    monkeypatch, sample_config_files
+    sample_config_files,
 ):
     paths, _ctx = init_run_workspace(
         workspace_root=sample_config_files,
@@ -844,17 +821,6 @@ def test_stage_tune_inputs_iteration1_remote_path_dry_run_skips_generate(
         patient_alias="TST-STAN-x",
         run_id="run-iter-012",
     )
-    called = {"generate": False}
-
-    def _fake_generate(**_kwargs):
-        called["generate"] = True
-        return paths.run_dir / "nonexistent.json"
-
-    monkeypatch.setattr(
-        "svztagent.workflows.tune_trees._generate_iteration1_seed_via_svzerodtrees",
-        _fake_generate,
-    )
-
     _stage_tune_inputs(
         paths,
         plan,
@@ -870,4 +836,3 @@ def test_stage_tune_inputs_iteration1_remote_path_dry_run_skips_generate(
 
     staged_seed = paths.run_dir / "iterations" / "iter-01" / "inputs" / "simplified_nonlinear_zerod.json"
     assert not staged_seed.exists()
-    assert called["generate"] is False
