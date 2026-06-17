@@ -263,7 +263,9 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
   stacked last-cycle centerline timeseries artifact at
   `results/postprocess/centerline_timeseries_last_cycle.vtp` plus companion
   `centerline_timeseries_last_cycle_metadata.json`, built from the per-timestep
-  `svslicer` centerline projections used by the mean resistance-map pass. The
+  `svslicer` centerline projections used by the mean resistance-map pass as one
+  centerline geometry with ZeroD-compatible `pressure_i` / `velocity_i` point
+  arrays for `calibrate_0d_from_3d`. The
   generated resistance-map step now supports bounded frame-level parallelism through
   `defaults.postprocess.resistance_map.workers`; selected-preop jobs request
   matching `--cpus-per-task`, resolving `auto` against the selected-preop

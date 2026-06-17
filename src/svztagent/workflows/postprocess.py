@@ -206,45 +206,69 @@ def _write_polydata(poly: vtk.vtkPolyData, path: Path) -> None:
         raise RuntimeError(f"failed to write polydata: {path}")
 
 
-def _constant_int_array(name: str, value: int, size: int) -> vtk.vtkIntArray:
-    array = vtk.vtkIntArray()
-    array.SetName(name)
-    array.SetNumberOfValues(size)
-    for index in range(size):
-        array.SetValue(index, int(value))
-    return array
+def _copy_array_with_name(array, name: str):
+    copied = array.NewInstance()
+    copied.DeepCopy(array)
+    copied.SetName(name)
+    return copied
 
 
-def _constant_double_array(name: str, value: float, size: int) -> vtk.vtkDoubleArray:
-    array = vtk.vtkDoubleArray()
-    array.SetName(name)
-    array.SetNumberOfValues(size)
-    for index in range(size):
-        array.SetValue(index, float(value))
-    return array
+def _point_scalar_array(data, source_path: Path, name: str, aliases: tuple[str, ...]):
+    names = (name, *aliases)
+    for candidate in names:
+        if data.HasArray(candidate):
+            array = data.GetArray(candidate)
+            if array is not None and array.GetNumberOfComponents() == 1:
+                return array
+    raise RuntimeError(f"{source_path}: missing scalar point-data array (tried {names})")
 
 
-def _annotate_timestep_polydata(
-    poly: vtk.vtkPolyData,
-    *,
-    frame_index: int,
-    time_s: float,
-    timestep_id: int | None,
-) -> vtk.vtkPolyData:
-    point_count = poly.GetNumberOfPoints()
-    cell_count = poly.GetNumberOfCells()
-    point_data = poly.GetPointData()
-    cell_data = poly.GetCellData()
+def _strip_timestep_point_fields(data) -> None:
+    to_remove = []
+    for array_index in range(data.GetNumberOfArrays()):
+        name = data.GetArrayName(array_index)
+        if name is None:
+            continue
+        lowered = name.lower()
+        if lowered in ("pressure", "velocity", "flow"):
+            to_remove.append(name)
+        elif lowered.startswith("pressure_") or lowered.startswith("velocity_") or lowered.startswith("flow_"):
+            to_remove.append(name)
+    for name in to_remove:
+        data.RemoveArray(name)
 
-    point_data.AddArray(_constant_int_array("processed_timestep_index", frame_index, point_count))
-    point_data.AddArray(_constant_double_array("processed_timestep_time_s", time_s, point_count))
-    cell_data.AddArray(_constant_int_array("processed_timestep_index", frame_index, cell_count))
-    cell_data.AddArray(_constant_double_array("processed_timestep_time_s", time_s, cell_count))
 
-    if timestep_id is not None:
-        point_data.AddArray(_constant_int_array("processed_timestep_id", timestep_id, point_count))
-        cell_data.AddArray(_constant_int_array("processed_timestep_id", timestep_id, cell_count))
-    return poly
+def _validate_matching_geometry(reference: vtk.vtkPolyData, candidate: vtk.vtkPolyData, source_path: Path) -> None:
+    if reference.GetNumberOfPoints() != candidate.GetNumberOfPoints():
+        raise RuntimeError(f"mapped centerline point count changed for stacked timeseries: {source_path}")
+    if reference.GetNumberOfCells() != candidate.GetNumberOfCells():
+        raise RuntimeError(f"mapped centerline cell count changed for stacked timeseries: {source_path}")
+
+    for point_index in range(reference.GetNumberOfPoints()):
+        if reference.GetPoint(point_index) != candidate.GetPoint(point_index):
+            raise RuntimeError(f"mapped centerline point coordinates changed for stacked timeseries: {source_path}")
+
+    for cell_index in range(reference.GetNumberOfCells()):
+        reference_cell = reference.GetCell(cell_index)
+        candidate_cell = candidate.GetCell(cell_index)
+        if reference_cell.GetNumberOfPoints() != candidate_cell.GetNumberOfPoints():
+            raise RuntimeError(f"mapped centerline connectivity changed for stacked timeseries: {source_path}")
+        for point_offset in range(reference_cell.GetNumberOfPoints()):
+            if reference_cell.GetPointId(point_offset) != candidate_cell.GetPointId(point_offset):
+                raise RuntimeError(f"mapped centerline connectivity changed for stacked timeseries: {source_path}")
+
+
+def _add_zerod_timestep_array(base_data, frame_data, source_path: Path, frame_index: int, role: str) -> str:
+    if role == "pressure":
+        source_array = _point_scalar_array(frame_data, source_path, "Pressure", ("pressure",))
+    elif role == "velocity":
+        source_array = _point_scalar_array(frame_data, source_path, "Velocity", ("velocity", "Flow", "flow"))
+    else:
+        raise RuntimeError(f"unsupported stacked centerline role: {role}")
+
+    target_name = f"{role}_{frame_index}"
+    base_data.AddArray(_copy_array_with_name(source_array, target_name))
+    return target_name
 
 
 def _preserve_intermediate_centerlines(intermediate_dir: Path):
@@ -397,9 +421,9 @@ def _write_stacked_centerline_timeseries(
     selected_frames = mean_metadata.get("selected_frames")
     if not isinstance(selected_frames, list) or not selected_frames:
         raise RuntimeError("resistance map metadata missing selected_frames")
-
-    append = vtk.vtkAppendPolyData()
+    reference_poly = None
     processed_frames: list[dict[str, object]] = []
+    zerod_point_arrays: list[str] = []
     for frame_index, frame in enumerate(selected_frames):
         if not isinstance(frame, dict):
             raise RuntimeError("selected_frames entries must be objects")
@@ -414,30 +438,45 @@ def _write_stacked_centerline_timeseries(
             raise FileNotFoundError(f"mapped centerline missing for stacked timeseries: {mapped_path}")
         timestep_id_raw = frame.get("timestep_id")
         timestep_id = int(timestep_id_raw) if timestep_id_raw is not None else None
-        poly = _annotate_timestep_polydata(
-            _read_polydata(mapped_path),
-            frame_index=frame_index,
-            time_s=float(raw_time),
-            timestep_id=timestep_id,
+        poly = _read_polydata(mapped_path)
+        if reference_poly is None:
+            reference_poly = poly
+            _strip_timestep_point_fields(reference_poly.GetPointData())
+        else:
+            _validate_matching_geometry(reference_poly, poly, mapped_path)
+
+        pressure_name = _add_zerod_timestep_array(
+            reference_poly.GetPointData(),
+            poly.GetPointData(),
+            mapped_path,
+            frame_index,
+            "pressure",
         )
-        append.AddInputData(poly)
+        velocity_name = _add_zerod_timestep_array(
+            reference_poly.GetPointData(),
+            poly.GetPointData(),
+            mapped_path,
+            frame_index,
+            "velocity",
+        )
+        zerod_point_arrays.extend([pressure_name, velocity_name])
+
         processed_frames.append(
             {
                 "frame_index": frame_index,
-                "mapped_path": str(mapped_path),
                 "time_s": float(raw_time),
                 "timestep_id": timestep_id,
                 "source_frame_path": frame.get("source_frame_path"),
+                "point_arrays": [pressure_name, velocity_name],
             }
         )
 
-    append.Update()
-    stacked_poly = vtk.vtkPolyData()
-    stacked_poly.DeepCopy(append.GetOutput())
+    if reference_poly is None:
+        raise RuntimeError("resistance map metadata missing selected_frames")
 
     output_path = output_dir / "centerline_timeseries_last_cycle.vtp"
     metadata_output_path = output_dir / "centerline_timeseries_last_cycle_metadata.json"
-    _write_polydata(stacked_poly, output_path)
+    _write_polydata(reference_poly, output_path)
 
     stack_result = {
         "kind": "centerline_timeseries_last_cycle",
@@ -445,8 +484,9 @@ def _write_stacked_centerline_timeseries(
         "metadata_json": str(metadata_output_path),
         "source_resistance_map_metadata_json": str(mean_metadata_path),
         "selected_frame_count": len(processed_frames),
-        "point_count": int(stacked_poly.GetNumberOfPoints()),
-        "cell_count": int(stacked_poly.GetNumberOfCells()),
+        "point_count": int(reference_poly.GetNumberOfPoints()),
+        "cell_count": int(reference_poly.GetNumberOfCells()),
+        "zerod_point_arrays": zerod_point_arrays,
         "processed_frames": processed_frames,
     }
     metadata_output_path.write_text(json.dumps(stack_result, indent=2, sort_keys=True), encoding="utf-8")

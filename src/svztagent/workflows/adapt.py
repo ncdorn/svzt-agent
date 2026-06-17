@@ -491,6 +491,12 @@ threed_config = json.loads({json.dumps(json.dumps(threed_config, sort_keys=True)
 partition = {json.dumps(partition)}
 account = {json.dumps(account) if account is not None else "None"}
 cluster_svfsiplus_path = {json.dumps(svfsiplus_path)}
+solver_execution = dict(threed_config.get("execution", {{}}))
+solver_execution["mode"] = "slurm"
+solver_execution["executable"] = cluster_svfsiplus_path
+solver_execution["submit_command"] = "bash"
+solver_execution["svfsiplus_path"] = cluster_svfsiplus_path
+threed_config["execution"] = solver_execution
 poll_seconds = int(threed_config.get("wait_poll_seconds", 30))
 cmm_timeout_seconds = max(int(threed_config.get("hours", 20)) * 3600 + 7200, int(threed_config.get("wait_timeout_seconds", 14400)))
 manager_log_path = remote_adaptation_dir / "logs" / "adaptation_manager_log.jsonl"
@@ -780,7 +786,7 @@ def _sync_source_of_truth_inflow(sim_dir: SimulationDirectory) -> None:
         prestress_file_path=None,
         tissue_support=threed_config.get("tissue_support"),
         inflow_path=str(inflow_source_path),
-        execution_config={{"mode": "slurm", "submit_command": "bash"}},
+        execution_config=solver_execution,
     )
     full_inflow = getattr(inflow_helper, "inflow_3d", None)
     if full_inflow is None:

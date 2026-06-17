@@ -602,7 +602,10 @@ threed_config.pop("prestress_file_path", None)
 threed_config.pop("prestress_file", None)
 solver_execution = dict(threed_config.get("execution", {{}}))
 solver_execution["mode"] = "slurm"
+solver_execution["executable"] = cluster_svfsiplus_path
 solver_execution["submit_command"] = "bash"
+solver_execution["svfsiplus_path"] = cluster_svfsiplus_path
+threed_config["execution"] = solver_execution
 resolved_inflow_path = {json.dumps(str(inflow_csv)) if inflow_csv else "None"}
 
 

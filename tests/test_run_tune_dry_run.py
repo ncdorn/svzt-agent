@@ -433,6 +433,9 @@ clusters:
         'cluster_svfsiplus_path = "/opt/svfsiplus/bin/svmultiphysics"'
         in rendered_script
     )
+    assert 'solver_execution["executable"] = cluster_svfsiplus_path' in rendered_script
+    assert 'solver_execution["svfsiplus_path"] = cluster_svfsiplus_path' in rendered_script
+    assert 'threed_config["execution"] = solver_execution' in rendered_script
     assert "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics" not in rendered_script
 
 

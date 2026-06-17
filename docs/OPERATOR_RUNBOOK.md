@@ -104,9 +104,10 @@ svzt run postop --run-id <run-id> --execute
 generates `mpa_pressure_vs_time.csv/png`, flow-split comparison artifacts, and
 resistance-map outputs under `iterations/iter-XX/results/postprocess/`. It also
 writes `centerline_timeseries_last_cycle.vtp` plus
-`centerline_timeseries_last_cycle_metadata.json`, which stack the per-timestep
+`centerline_timeseries_last_cycle_metadata.json`, which convert the per-timestep
 `svslicer` centerline projections from the last processed cardiac cycle into
-one time-series centerline artifact.
+one centerline geometry with ZeroD-compatible `pressure_i` / `velocity_i`
+point arrays.
 Scheduler logs for that job are written under
 `iterations/iter-XX/postprocess/logs/`. The job also writes
 `postprocess_submission.json` and `postprocess_suite_metadata.json` so partial

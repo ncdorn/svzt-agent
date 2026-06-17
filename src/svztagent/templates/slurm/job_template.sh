@@ -153,6 +153,12 @@ postop_mesh_complete_path = Path("{{REMOTE_POSTOP_MESH_COMPLETE_DIR}}") if "{{RE
 
 cluster_svfsiplus_path = "{{CLUSTER_SVFSIPLUS_PATH}}"
 threed_config = json.loads(r'''{{THREED_CONFIG_JSON}}''')
+solver_execution = dict(threed_config.get("execution", {}))
+solver_execution["mode"] = "slurm"
+solver_execution["executable"] = cluster_svfsiplus_path
+solver_execution["submit_command"] = "bash"
+solver_execution["svfsiplus_path"] = cluster_svfsiplus_path
+threed_config["execution"] = solver_execution
 impedance_config = json.loads(r'''{{IMPEDANCE_CONFIG_JSON}}''')
 skip_zerod_tuning = json.loads(r'''{{SKIP_ZEROD_TUNING_JSON}}''')
 mesh_scale_factor = float("{{MESH_SCALE_FACTOR}}")
