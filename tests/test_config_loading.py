@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from svztagent.config.load import load_workspace_config
+from svztagent.config.load import load_workspace_config, resolve_patient_alias
 from svztagent.core.errors import ConfigError
 
 
@@ -97,6 +97,65 @@ patients:
     assert config.patients[0].tuning.threed.tissue_support.enabled is False
     assert config.patients[0].tuning.threed.n_tsteps == 3000
     assert config.patients[0].tuning.threed.wait_timeout_seconds == 3600
+
+
+def test_load_workspace_config_supports_threed_slurm_mail_defaults(sample_config_files):
+    (sample_config_files / "config" / "defaults.yaml").write_text(
+        """
+defaults:
+  tuning:
+    threed:
+      execution:
+        slurm:
+          mail_user: "user@example.com"
+          mail_types: ["fail", "end"]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_workspace_config(sample_config_files)
+    assert config.defaults.tuning.threed.execution.slurm.mail_user == "user@example.com"
+    assert config.defaults.tuning.threed.execution.slurm.mail_types == ["fail", "end"]
+
+
+def test_load_workspace_config_merges_patient_threed_slurm_mail_override(sample_config_files):
+    active_patient_path = sample_config_files / "remote_data" / "active" / "TST-STAN-x"
+    permanent_patient_path = sample_config_files / "remote_data" / "permanent" / "TST-STAN-x"
+    (sample_config_files / "config" / "defaults.yaml").write_text(
+        """
+defaults:
+  tuning:
+    threed:
+      execution:
+        slurm:
+          mail_user: "default@example.com"
+          mail_types: ["begin", "end"]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        f"""
+patients:
+  - alias: "TST-STAN-x"
+    remote_path: "{active_patient_path.as_posix()}"
+    permanent_remote_path: "{permanent_patient_path.as_posix()}"
+    data_policy: "read_only"
+    tuning:
+      threed:
+        execution:
+          slurm:
+            mail_user: "patient@example.com"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_workspace_config(sample_config_files)
+    patient = resolve_patient_alias(config, "sherlock", "TST-STAN-x")
+    assert patient.threed.execution.slurm.mail_user == "patient@example.com"
+    assert patient.threed.execution.slurm.mail_types == ["begin", "end"]
 
 
 def test_load_workspace_config_preserves_generate_prestress_mode(sample_config_files):

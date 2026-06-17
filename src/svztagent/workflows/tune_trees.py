@@ -76,7 +76,6 @@ from svztagent.hpc.rsync import RsyncFileTransferAdapter
 from svztagent.hpc.slurm import SlurmSchedulerAdapter, SlurmSubmitOptions
 from svztagent.hpc.ssh import SshRemoteExecAdapter
 
-SHERLOCK_SVFSIPLUS_PATH = "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
 REDUCED_SEED_INPUT_FILENAME = "simplified_nonlinear_zerod.json"
 FULL_PA_SEED_INPUT_FILENAME = "full_pa_zerod.json"
 
@@ -1058,8 +1057,7 @@ def _template_text() -> str:
 
 
 def _resolve_cluster_svfsiplus_path(*, cluster_name: str, configured_path: str) -> str:
-    if cluster_name.strip().lower() == "sherlock":
-        return SHERLOCK_SVFSIPLUS_PATH
+    _ = cluster_name
     return configured_path
 
 

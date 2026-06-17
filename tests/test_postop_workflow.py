@@ -255,11 +255,62 @@ def test_preop_select_submits_selected_preop_postprocess(sample_config_files):
     assert 'if [0.0, 0.0, 1.0] is not None:' in script_text
     assert 'postprocess_kwargs["camera_view_up"] = [0.0, 0.0, 1.0]' in script_text
     assert "_run_postprocess_suite_with_optional_camera(" in script_text
+    assert "_repair_failed_suite_result_if_outputs_exist(" in script_text
     assert "_write_stacked_centerline_timeseries(" in script_text
     assert "centerline_timeseries_last_cycle.vtp" in script_text
     assert "centerline_timeseries_last_cycle_metadata.json" in script_text
     assert "_preserve_intermediate_centerlines" in script_text
     assert "_cleanup_intermediate_centerlines" in script_text
+
+
+def test_preop_select_skips_duplicate_paraview_submission(sample_config_files):
+    _enable_postop_mesh(sample_config_files)
+    _set_patient_paraview_camera(sample_config_files)
+    paths, _ctx = init_run_workspace(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-preop-no-dup-pviz",
+    )
+    manifest = read_manifest(paths.manifest)
+    manifest = mark_iteration_submitted(
+        manifest,
+        iteration=2,
+        tune_job_id="990002",
+        local_dir=str(paths.run_dir / "iterations" / "iter-02"),
+        remote_dir="/scratch/users/ndorn/svzt_runs/run-preop-no-dup-pviz/iterations/iter-02",
+        job_script_path="/scratch/users/ndorn/svzt_runs/run-preop-no-dup-pviz/iterations/iter-02/run_tune_iter.sh",
+    )
+    write_manifest(manifest, paths.manifest)
+    _write_completed_iteration_artifacts(paths, iteration=2, decision="converged")
+
+    first_transfer = FakeFileTransferAdapter()
+    first_scheduler = FakeSchedulerAdapter()
+    first_remote = FakeRemoteExecAdapter()
+    select_converged_preop_iteration(
+        workspace_root=sample_config_files,
+        run_id="run-preop-no-dup-pviz",
+        iteration=2,
+        transfer_adapter=first_transfer,
+        scheduler_adapter=first_scheduler,
+        remote_exec_adapter=first_remote,
+    )
+
+    second_transfer = FakeFileTransferAdapter()
+    second_scheduler = FakeSchedulerAdapter()
+    second_remote = FakeRemoteExecAdapter()
+    select_converged_preop_iteration(
+        workspace_root=sample_config_files,
+        run_id="run-preop-no-dup-pviz",
+        iteration=2,
+        transfer_adapter=second_transfer,
+        scheduler_adapter=second_scheduler,
+        remote_exec_adapter=second_remote,
+    )
+
+    manifest = read_manifest(paths.manifest)
+    assert len(manifest.paraview_viz_runs) == 1
+    assert len(second_scheduler.submit_calls) == 1
 
 
 def test_preop_select_can_skip_selected_preop_postprocess(sample_config_files):

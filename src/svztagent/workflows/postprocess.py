@@ -289,6 +289,96 @@ def _run_postprocess_suite_with_optional_camera(run_postprocess, postprocess_kwa
         return run_postprocess(**trimmed_kwargs)
 
 
+def _has_point_array(poly: vtk.vtkPolyData, name: str) -> bool:
+    point_data = poly.GetPointData()
+    for index in range(point_data.GetNumberOfArrays()):
+        candidate = point_data.GetArrayName(index)
+        if candidate == name:
+            return True
+    return False
+
+
+def _repair_failed_suite_result_if_outputs_exist(
+    *,
+    output_dir: Path,
+    suite_metadata_path: Path,
+    result: dict[str, object],
+) -> dict[str, object]:
+    if not isinstance(result, dict) or result.get("status") != "failed":
+        return result
+
+    mean_vtp = output_dir / "resistance_map_mean.vtp"
+    mean_metadata_json = output_dir / "resistance_map_metadata.json"
+    mean_summary_csv = output_dir / "branch_resistance_summary.csv"
+    mean_ranked_csv = output_dir / "ranked_stent_candidates.csv"
+    systolic_vtp = output_dir / "resistance_map_systolic.vtp"
+    systolic_metadata_json = output_dir / "resistance_map_systolic_metadata.json"
+    systolic_summary_csv = output_dir / "branch_resistance_summary_systolic.csv"
+    systolic_ranked_csv = output_dir / "ranked_stent_candidates_systolic.csv"
+
+    required_paths = [
+        mean_vtp,
+        mean_metadata_json,
+        mean_summary_csv,
+        mean_ranked_csv,
+        systolic_vtp,
+        systolic_metadata_json,
+        systolic_summary_csv,
+        systolic_ranked_csv,
+        suite_metadata_path,
+    ]
+    if any(not path.exists() for path in required_paths):
+        return result
+
+    mean_poly = _read_polydata(mean_vtp)
+    systolic_poly = _read_polydata(systolic_vtp)
+    if not _has_point_array(mean_poly, "BranchId") or not _has_point_array(systolic_poly, "BranchId"):
+        return result
+
+    mean_metadata = json.loads(mean_metadata_json.read_text(encoding="utf-8"))
+    systolic_metadata = json.loads(systolic_metadata_json.read_text(encoding="utf-8"))
+    repaired = json.loads(suite_metadata_path.read_text(encoding="utf-8"))
+
+    repaired.pop("error", None)
+    repaired["status"] = "completed"
+    steps = repaired.get("steps")
+    if not isinstance(steps, dict):
+        steps = {}
+        repaired["steps"] = steps
+
+    mean_result = {
+        "kind": "pulmonary_resistance_map",
+        "metric_suffix": "mean",
+        "output_dir": str(output_dir / "resistance_map"),
+        "resistance_map": str(mean_vtp),
+        "summary_csv": str(mean_summary_csv),
+        "ranked_csv": str(mean_ranked_csv),
+        "metadata_json": str(mean_metadata_json),
+        "selected_frame_count": int(mean_metadata.get("selected_frame_count", 0)),
+        "available_frame_count": int(mean_metadata.get("available_frame_count", 0)),
+        "intermediate_dir": mean_metadata.get("intermediate_dir"),
+    }
+    systolic_result = {
+        "kind": "pulmonary_resistance_map",
+        "metric_suffix": "systolic",
+        "output_dir": str(output_dir / "resistance_map_systolic"),
+        "resistance_map": str(systolic_vtp),
+        "summary_csv": str(systolic_summary_csv),
+        "ranked_csv": str(systolic_ranked_csv),
+        "metadata_json": str(systolic_metadata_json),
+        "selected_frame_count": int(systolic_metadata.get("selected_frame_count", 0)),
+        "available_frame_count": int(systolic_metadata.get("available_frame_count", 0)),
+        "intermediate_dir": systolic_metadata.get("intermediate_dir"),
+    }
+
+    steps["resistance_map"] = {"status": "completed", "result": mean_result}
+    steps["resistance_map_systolic"] = {"status": "completed", "result": systolic_result}
+    repaired["resistance_map"] = mean_result
+    repaired["resistance_map_systolic"] = systolic_result
+    suite_metadata_path.write_text(json.dumps(repaired, indent=2, sort_keys=True), encoding="utf-8")
+    return repaired
+
+
 def _write_stacked_centerline_timeseries(
     *,
     output_dir: Path,
@@ -436,7 +526,7 @@ from svzerodtrees.post_processing import run_pulmonary_threed_postprocess_suite
 
 output_dir = Path({json.dumps(output_dir)})
 submission_path = Path({json.dumps(str(PurePosixPath(output_dir) / "postprocess_submission.json"))})
-    metadata_path = Path({json.dumps(str(PurePosixPath(output_dir) / "postprocess_suite_metadata.json"))})
+metadata_path = Path({json.dumps(str(PurePosixPath(output_dir) / "postprocess_suite_metadata.json"))})
 try:
     postprocess_kwargs = {{
         "simulation_dir": {json.dumps(simulation_dir)},
@@ -458,6 +548,11 @@ try:
         result = _run_postprocess_suite_with_optional_camera(
             run_pulmonary_threed_postprocess_suite,
             postprocess_kwargs,
+        )
+        result = _repair_failed_suite_result_if_outputs_exist(
+            output_dir=output_dir,
+            suite_metadata_path=metadata_path,
+            result=result,
         )
         _write_stacked_centerline_timeseries(
             output_dir=output_dir,
@@ -555,6 +650,21 @@ def _submit_paraview_viz_if_configured(
         else None
     )
     viz_cfg = _resolve_viz_config(config.defaults.postprocess.paraview_viz, patient_override)
+    manifest = read_manifest(build_local_run_paths(root, validated_run_id).manifest)
+    existing_preop_pviz = next(
+        (
+            record
+            for record in reversed(manifest.paraview_viz_runs)
+            if record.stage == "preop" and int(record.source_iteration) == int(iteration)
+        ),
+        None,
+    )
+    if existing_preop_pviz is not None:
+        print(
+            "[postprocess] ParaView viz skipped: existing preop viz record "
+            f"found for iteration {iteration} (job {existing_preop_pviz.scheduler_job_id or 'planned'})"
+        )
+        return
 
     if viz_cfg.cycle_duration_s is None:
         print(
@@ -607,6 +717,7 @@ def submit_selected_preop_postprocess(
     patient_alias = str(manifest.patient.get("alias"))
     clinical_targets_payload = _load_stage_target_payload(root, patient_alias=patient_alias, stage="preop")
     svzerodtrees_paths = manifest.remote.get("svzerodtrees_paths", {})
+    threed_defaults = manifest.remote.get("threed_defaults", {})
     resistance_map_workers = _resolved_postprocess_worker_count(config)
     cpus_per_task = resistance_map_workers
     mem = None

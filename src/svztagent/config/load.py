@@ -228,7 +228,17 @@ def _resolve_patient_threed_config(
         else None
     )
     if override is not None:
-        merged.update(override.model_dump(mode="json", exclude_none=True))
+        override_payload = override.model_dump(mode="json", exclude_none=True)
+        if "execution" in override_payload:
+            execution_overrides = override_payload.pop("execution")
+            merged_execution = dict(merged.get("execution") or {})
+            if "slurm" in execution_overrides:
+                merged_slurm = dict(merged_execution.get("slurm") or {})
+                merged_slurm.update(execution_overrides.pop("slurm"))
+                merged_execution["slurm"] = merged_slurm
+            merged_execution.update(execution_overrides)
+            merged["execution"] = merged_execution
+        merged.update(override_payload)
     return ThreedTuningConfig.model_validate(merged)
 
 

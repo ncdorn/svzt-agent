@@ -392,6 +392,8 @@ def _normalize_solver_runscript(
     hours: int,
     partition: str,
     account: str | None,
+    mail_user: str | None,
+    mail_types: list[str] | None,
     svfsiplus_path: str,
 ) -> None:
     stage_dir = script_path.parent.resolve()
@@ -426,6 +428,10 @@ def _normalize_solver_runscript(
     ]
     if account:
         header.insert(4, f"#SBATCH --account={account}")
+    if mail_user:
+        header.append(f"#SBATCH --mail-user={mail_user}")
+        for mail_type in mail_types or ["begin", "end"]:
+            header.append(f"#SBATCH --mail-type={mail_type}")
 
     rendered = "\n".join(header) + "\n\n"
     if body:
@@ -647,6 +653,7 @@ def _ensure_generated_prestress_file() -> Path:
         "poisson_ratio": threed_config.get("poisson_ratio"),
         "shell_thickness": threed_config.get("shell_thickness"),
         "tissue_support": threed_config.get("tissue_support"),
+        "execution": threed_config.get("execution"),
     }
     prestress_sim.write_files(
         simname="Prestress Simulation",
@@ -664,6 +671,8 @@ def _ensure_generated_prestress_file() -> Path:
         hours=int(prestress_config["hours"]),
         partition=str(scheduler_defaults.get("partition") or "amarsden"),
         account=str(scheduler_defaults.get("account") or "").strip() or None,
+        mail_user=_resolve_slurm_mail_user(prestress_config),
+        mail_types=_resolve_slurm_mail_types(prestress_config),
         svfsiplus_path=cluster_svfsiplus_path,
     )
 
@@ -725,6 +734,34 @@ def _resolve_prestress_file_path(sim_cfg: dict) -> str | None:
         return prestress_setting
 
     return None
+
+
+def _resolve_slurm_mail_user(sim_cfg: dict) -> str | None:
+    execution = sim_cfg.get("execution") or {}
+    if not isinstance(execution, dict):
+        return None
+    slurm = execution.get("slurm") or {}
+    if not isinstance(slurm, dict):
+        return None
+    value = slurm.get("mail_user")
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
+def _resolve_slurm_mail_types(sim_cfg: dict) -> list[str]:
+    execution = sim_cfg.get("execution") or {}
+    if not isinstance(execution, dict):
+        return ["begin", "end"]
+    slurm = execution.get("slurm") or {}
+    if not isinstance(slurm, dict):
+        return ["begin", "end"]
+    value = slurm.get("mail_types", ["begin", "end"])
+    if not isinstance(value, list):
+        return ["begin", "end"]
+    normalized = [str(item).strip() for item in value if str(item).strip()]
+    return normalized or ["begin", "end"]
 
 
 def _submit_job(script_path: Path) -> str:
@@ -876,6 +913,8 @@ def _prepare_and_submit_stage(
         hours=int(sim_cfg.get("hours", 20)),
         partition=str(scheduler_defaults.get("partition") or "amarsden"),
         account=str(scheduler_defaults.get("account") or "").strip() or None,
+        mail_user=_resolve_slurm_mail_user(sim_cfg),
+        mail_types=_resolve_slurm_mail_types(sim_cfg),
         svfsiplus_path=cluster_svfsiplus_path,
     )
 

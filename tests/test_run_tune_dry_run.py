@@ -358,6 +358,37 @@ def test_run_tune_dry_run_renders_threed_defaults_and_stage_paths(sample_config_
     assert 'PYTHON_CANDIDATE="python3"' in rendered_script
     assert "svzerodtrees.tuning missing required symbols" in rendered_script
     assert "sim.run_steady_sims()" in rendered_script
+
+
+def test_run_tune_dry_run_renders_slurm_mail_settings_for_svzerodtrees(sample_config_files):
+    (sample_config_files / "config" / "defaults.yaml").write_text(
+        """
+defaults:
+  tuning:
+    threed:
+      execution:
+        slurm:
+          mail_user: "user@example.com"
+          mail_types: ["fail", "end"]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-dry-mail-user",
+        mode=ExecutionMode.DRY_RUN,
+    )
+
+    rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
+    assert '"execution": {"slurm": {"mail_types": ["fail", "end"], "mail_user": "user@example.com"}}' in rendered_script
+    assert "def _resolve_slurm_mail_user(sim_cfg: dict) -> str | None:" in rendered_script
+    assert "def _resolve_slurm_mail_types(sim_cfg: dict) -> list[str]:" in rendered_script
+    assert "mail_user=_resolve_slurm_mail_user(sim_cfg)" in rendered_script
+    assert "mail_types=_resolve_slurm_mail_types(sim_cfg)" in rendered_script
     assert "sim.generate_simplified_nonlinear_zerod()" in rendered_script
     assert "sim.run_pipeline(run_steady=True, optimize_bcs=False" not in rendered_script
     assert "def _resolve_prestress_file_path(sim_cfg: dict) -> str | None:" in rendered_script
@@ -369,7 +400,7 @@ def test_run_tune_dry_run_renders_threed_defaults_and_stage_paths(sample_config_
     )
 
 
-def test_run_tune_dry_run_forces_sherlock_solver_path(sample_config_files):
+def test_run_tune_dry_run_uses_configured_solver_path(sample_config_files):
     (sample_config_files / "config" / "clusters.yaml").write_text(
         f"""
 clusters:
@@ -399,10 +430,10 @@ clusters:
 
     rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
     assert (
-        'cluster_svfsiplus_path = "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"'
+        'cluster_svfsiplus_path = "/opt/svfsiplus/bin/svmultiphysics"'
         in rendered_script
     )
-    assert "/opt/svfsiplus/bin/svmultiphysics" not in rendered_script
+    assert "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics" not in rendered_script
 
 
 def test_run_tune_dry_run_renders_patient_threed_override(sample_config_files):

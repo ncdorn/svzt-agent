@@ -352,6 +352,7 @@ class ThreedTuningConfig(BaseModel):
     hours: int = 20
     wait_poll_seconds: int = 30
     wait_timeout_seconds: int = 43200
+    execution: "ThreedExecutionConfig" = Field(default_factory=lambda: ThreedExecutionConfig())
 
     @field_validator(
         "elasticity_modulus",
@@ -427,6 +428,50 @@ class PatientThreedOverrides(BaseModel):
     hours: int | None = None
     wait_poll_seconds: int | None = None
     wait_timeout_seconds: int | None = None
+    execution: "PatientThreedExecutionOverrides | None" = None
+
+
+class ThreedSlurmExecutionConfig(BaseModel):
+    mail_user: str | None = None
+    mail_types: list[str] = Field(default_factory=lambda: ["begin", "end"])
+
+    @field_validator("mail_user")
+    @classmethod
+    def _mail_user_nonempty(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("mail_user cannot be empty")
+        return cleaned
+
+    @field_validator("mail_types", mode="before")
+    @classmethod
+    def _normalize_mail_types(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("mail_types must be a list")
+        normalized: list[str] = []
+        for item in value:
+            cleaned = str(item).strip()
+            if not cleaned:
+                raise ValueError("mail_types entries cannot be empty")
+            normalized.append(cleaned)
+        return normalized
+
+
+class ThreedExecutionConfig(BaseModel):
+    slurm: ThreedSlurmExecutionConfig = Field(default_factory=ThreedSlurmExecutionConfig)
+
+
+class PatientThreedSlurmExecutionOverrides(BaseModel):
+    mail_user: str | None = None
+    mail_types: list[str] | None = None
+
+
+class PatientThreedExecutionOverrides(BaseModel):
+    slurm: PatientThreedSlurmExecutionOverrides | None = None
 
 
 class FreeParamConfig(BaseModel):

@@ -660,6 +660,8 @@ def _normalize_solver_runscript(
     hours: int,
     partition: str,
     account: str | None,
+    mail_user: str | None,
+    mail_types: list[str] | None,
     svfsiplus_path: str,
 ) -> None:
     stage_dir = script_path.parent.resolve()
@@ -701,6 +703,10 @@ def _normalize_solver_runscript(
     ]
     if account:
         header.insert(4, f"#SBATCH --account={{account}}")
+    if mail_user:
+        header.append(f"#SBATCH --mail-user={{mail_user}}")
+        for mail_type in mail_types or ["begin", "end"]:
+            header.append(f"#SBATCH --mail-type={{mail_type}}")
 
     total_tasks = nodes * procs_per_node
     rendered = "\\n".join(header) + "\\n\\n"
@@ -780,6 +786,28 @@ def _force_xml_text(xml_path: Path, tag: str, value: str) -> None:
     node.text = value
     ET.indent(root)
     tree.write(xml_path, encoding="utf-8", xml_declaration=True)
+
+
+def _resolve_slurm_mail_user(execution_config: dict) -> str | None:
+    slurm = execution_config.get("slurm") or {{}}
+    if not isinstance(slurm, dict):
+        return None
+    value = slurm.get("mail_user")
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
+def _resolve_slurm_mail_types(execution_config: dict) -> list[str]:
+    slurm = execution_config.get("slurm") or {{}}
+    if not isinstance(slurm, dict):
+        return ["begin", "end"]
+    value = slurm.get("mail_types", ["begin", "end"])
+    if not isinstance(value, list):
+        return ["begin", "end"]
+    normalized = [str(item).strip() for item in value if str(item).strip()]
+    return normalized or ["begin", "end"]
 
 
 _NESTED_SBATCH_STRIP_ENV_VARS = (
@@ -934,6 +962,8 @@ def _generate_postop_prestress_file() -> Path:
         hours=min(int(threed_config.get("hours", 20)), 6),
         partition=partition,
         account=account,
+        mail_user=_resolve_slurm_mail_user(solver_execution),
+        mail_types=_resolve_slurm_mail_types(solver_execution),
         svfsiplus_path=cluster_svfsiplus_path,
     )
     print("[svzt] Submitting mean steady simulation for prestress traction...", flush=True)
@@ -1004,6 +1034,7 @@ def _generate_postop_prestress_file() -> Path:
         "poisson_ratio": threed_config.get("poisson_ratio"),
         "shell_thickness": threed_config.get("shell_thickness"),
         "tissue_support": threed_config.get("tissue_support"),
+        "execution": solver_execution,
     }}
     prestress_sim.write_files(
         simname="Postop Prestress Simulation",
@@ -1020,6 +1051,8 @@ def _generate_postop_prestress_file() -> Path:
         hours=int(prestress_config["hours"]),
         partition=partition,
         account=account,
+        mail_user=_resolve_slurm_mail_user(solver_execution),
+        mail_types=_resolve_slurm_mail_types(solver_execution),
         svfsiplus_path=cluster_svfsiplus_path,
     )
     print("[svzt] Submitting prestress simulation...", flush=True)
@@ -1056,6 +1089,8 @@ _normalize_solver_runscript(
     hours=int(threed_config.get("hours", 20)),
     partition=partition,
     account=account,
+    mail_user=_resolve_slurm_mail_user(solver_execution),
+    mail_types=_resolve_slurm_mail_types(solver_execution),
     svfsiplus_path=cluster_svfsiplus_path,
 )
 print("[svzt] Submitting postop CMM simulation...", flush=True)

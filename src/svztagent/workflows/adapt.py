@@ -675,7 +675,7 @@ def _wait_for_completion(job_id: str, poll_seconds: int, timeout_seconds: int, *
         time.sleep(max(poll_seconds, 5))
 
 
-def _normalize_solver_runscript(script_path: Path, *, nodes: int, procs_per_node: int, memory_gb: int, hours: int, partition: str, account: str | None, svfsiplus_path: str) -> None:
+def _normalize_solver_runscript(script_path: Path, *, nodes: int, procs_per_node: int, memory_gb: int, hours: int, partition: str, account: str | None, mail_user: str | None, mail_types: list[str] | None, svfsiplus_path: str) -> None:
     stage_dir = script_path.parent.resolve()
     output_path = stage_dir / "svFlowSolver.o%j"
     error_path = stage_dir / "svFlowSolver.e%j"
@@ -708,6 +708,10 @@ def _normalize_solver_runscript(script_path: Path, *, nodes: int, procs_per_node
     ]
     if account:
         header.insert(4, f"#SBATCH --account={{account}}")
+    if mail_user:
+        header.append(f"#SBATCH --mail-user={{mail_user}}")
+        for mail_type in mail_types or ["begin", "end"]:
+            header.append(f"#SBATCH --mail-type={{mail_type}}")
     total_tasks = nodes * procs_per_node
     rendered = "\\n".join(header) + "\\n\\n"
     if body:
@@ -728,6 +732,34 @@ def _normalize_solver_runscript(script_path: Path, *, nodes: int, procs_per_node
     rendered += f"srun -N {{nodes}} -n {{total_tasks}} {{svfsiplus_path}} svFSIplus.xml\\n"
     script_path.write_text(rendered, encoding="utf-8")
     script_path.chmod(0o755)
+
+
+def _resolve_slurm_mail_user(threed_config: dict) -> str | None:
+    execution = threed_config.get("execution") or {{}}
+    if not isinstance(execution, dict):
+        return None
+    slurm = execution.get("slurm") or {{}}
+    if not isinstance(slurm, dict):
+        return None
+    value = slurm.get("mail_user")
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
+def _resolve_slurm_mail_types(threed_config: dict) -> list[str]:
+    execution = threed_config.get("execution") or {{}}
+    if not isinstance(execution, dict):
+        return ["begin", "end"]
+    slurm = execution.get("slurm") or {{}}
+    if not isinstance(slurm, dict):
+        return ["begin", "end"]
+    value = slurm.get("mail_types", ["begin", "end"])
+    if not isinstance(value, list):
+        return ["begin", "end"]
+    normalized = [str(item).strip() for item in value if str(item).strip()]
+    return normalized or ["begin", "end"]
 
 
 def _sync_source_of_truth_inflow(sim_dir: SimulationDirectory) -> None:
@@ -936,6 +968,8 @@ try:
         hours=int(threed_config.get("hours", 20)),
         partition=partition,
         account=account,
+        mail_user=_resolve_slurm_mail_user(threed_config),
+        mail_types=_resolve_slurm_mail_types(threed_config),
         svfsiplus_path=cluster_svfsiplus_path,
     )
     _record_event(

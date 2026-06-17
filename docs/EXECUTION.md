@@ -108,6 +108,10 @@
   - `tissue_support.stiffness: 1000.0`
   - `tissue_support.damping: 10000.0`
   - `tissue_support.apply_along_normal_direction: true`
+- Optional Slurm email directives for `svZeroDTrees` solver scripts are configured under:
+  - `defaults.tuning.threed.execution.slurm.mail_user`
+  - `defaults.tuning.threed.execution.slurm.mail_types`
+  - optional `patients[].tuning.threed.execution.slurm.*` override
 - `prestress_file` supports:
   - absolute path: pass the prescribed VTU through as `Prestress_file_path`
   - `generate`: compute run-scoped prestress from iteration-1 seed-generation

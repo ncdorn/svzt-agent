@@ -22,7 +22,9 @@ package mode without requiring local upstream repo paths.
 3D simulation setup is resolved through `svztagent.config` and passed into the
 packaged iteration script as `threed_config`. The default setup is deformable CMM
 with uniform Robin tissue support; `svZeroDTrees` owns the svMultiPhysics XML
-emission for the wall `Tissue_support` block.
+emission for the wall `Tissue_support` block. Optional
+`threed.execution.slurm.mail_user` and `mail_types` stay in the typed config and
+flow through to the generated `run_solver.sh` files that `svZeroDTrees` writes.
 
 ## Execution layer
 All remote side effects are routed through typed adapters:

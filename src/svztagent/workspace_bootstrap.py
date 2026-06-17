@@ -50,6 +50,10 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
         wall_model: "deformable"
         prestress_file: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent/TST-STAN-1/prestress/1-procs/result_009.vtu"
         dt: 0.0004
+        execution:
+          slurm:
+            mail_user: "ndorn@stanford.edu"
+            mail_types: ["fail", "end"]
     adaptation:
       models:
         m1:
@@ -273,6 +277,10 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
       hours: 20
       wait_poll_seconds: 30
       wait_timeout_seconds: 43200
+      execution:
+        slurm:
+          mail_user: null
+          mail_types: ["begin", "end"]
   adaptation:
     default_model: "M2"
     territory_scheme: "lpa_rpa"
