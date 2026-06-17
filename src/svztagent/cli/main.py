@@ -23,6 +23,12 @@ from svztagent.core.manifest import update_run_progress
 from svztagent.core.paths import build_local_run_paths
 from svztagent.core.state import RunLifecycleState
 from svztagent.hpc.interfaces import ExecutionMode
+from svztagent.maintenance.update import (
+    DEFAULT_REMOTE_HOST,
+    DEFAULT_REMOTE_SVZERODTREES_PATH,
+    DEFAULT_REMOTE_USER,
+    update_software,
+)
 from svztagent.postprocess.cfd_results import write_run_cfd_results
 from svztagent.postprocess.tuning_progress import write_tuning_progress
 from svztagent.workflows.postop import (
@@ -180,6 +186,46 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor", help="Run local workspace diagnostics for config and checkout discovery"
     )
     doctor.set_defaults(handler=cmd_doctor)
+
+    update_cmd = subparsers.add_parser(
+        "update",
+        help="Commit/push local svzt-agent and svZeroDTrees changes, then refresh Sherlock svZeroDTrees",
+    )
+    mode_group_update = update_cmd.add_mutually_exclusive_group()
+    mode_group_update.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview commands only (default)",
+    )
+    mode_group_update.add_argument(
+        "--execute",
+        action="store_true",
+        help="Commit, push, and run remote refresh commands",
+    )
+    update_cmd.add_argument(
+        "--message",
+        default="svzt update",
+        help="Commit message used for both local repositories when changes are present",
+    )
+    update_cmd.add_argument(
+        "--remote-user",
+        default=DEFAULT_REMOTE_USER,
+        help=f"Remote Sherlock username (default: {DEFAULT_REMOTE_USER})",
+    )
+    update_cmd.add_argument(
+        "--remote-host",
+        default=DEFAULT_REMOTE_HOST,
+        help=f"Remote SSH host or alias (default: {DEFAULT_REMOTE_HOST})",
+    )
+    update_cmd.add_argument(
+        "--remote-svzerodtrees-path",
+        default=DEFAULT_REMOTE_SVZERODTREES_PATH,
+        help=(
+            "Remote svZeroDTrees checkout used for git pull and pip install -e "
+            f"(default: {DEFAULT_REMOTE_SVZERODTREES_PATH})"
+        ),
+    )
+    update_cmd.set_defaults(handler=cmd_update)
 
     status = subparsers.add_parser("status", help="Query scheduler status for a run")
     status.add_argument("run_id")
@@ -587,6 +633,35 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print("Warnings: none")
     print("Doctor: PASS")
+    return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    mode = _resolve_mode(args.execute)
+    result = update_software(
+        commit_message=args.message,
+        mode=mode,
+        workspace_root=args.workspace_root,
+        remote_user=args.remote_user,
+        remote_host=args.remote_host,
+        remote_svzerodtrees_path=args.remote_svzerodtrees_path,
+    )
+    print(f"Mode: {result.mode.value}")
+    print("Repositories:")
+    for repo in result.repositories:
+        print(
+            f"  - {repo.name}: branch={repo.branch} changes={'yes' if repo.had_changes else 'no'} "
+            f"committed={'yes' if repo.committed else 'no'} pushed={'yes' if repo.pushed else 'no'}"
+        )
+        print(f"    path: {repo.path}")
+        for command in repo.command_results:
+            print(f"    cmd: {' '.join(command.argv)}")
+    print(
+        "Remote refresh: "
+        f"{result.remote_user}@{result.remote_host}:{result.remote_svzerodtrees_path}"
+    )
+    for command in result.remote_results:
+        print(f"  - {' '.join(command.argv)}")
     return 0
 
 

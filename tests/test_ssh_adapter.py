@@ -5,7 +5,7 @@ import pytest
 from svztagent.core.errors import CommandRejectedError
 from svztagent.hpc.executor import CommandExecutor
 from svztagent.hpc.interfaces import ExecutionMode
-from svztagent.hpc.ssh import SshRemoteExecAdapter
+from svztagent.hpc.ssh import RemoteCommandPolicy, SshRemoteExecAdapter
 
 
 def _adapter() -> SshRemoteExecAdapter:
@@ -34,3 +34,18 @@ def test_ssh_rejects_shell_control_token():
     adapter = _adapter()
     with pytest.raises(CommandRejectedError):
         adapter.run(["mkdir", "&&", "/tmp/x"])
+
+
+def test_ssh_custom_policy_supports_git_pull_with_remote_cwd():
+    adapter = SshRemoteExecAdapter(
+        user="ndorn",
+        host="sherlock",
+        executor=CommandExecutor(mode=ExecutionMode.DRY_RUN),
+        policy=RemoteCommandPolicy(allowed_commands={"git", "pip"}),
+    )
+
+    result = adapter.run(["git", "pull"], cwd="/home/users/ndorn/svZeroDTrees")
+
+    assert result.argv[0] == "ssh"
+    assert result.argv[1] == "ndorn@sherlock"
+    assert "cd /home/users/ndorn/svZeroDTrees && git pull" in result.argv[2]

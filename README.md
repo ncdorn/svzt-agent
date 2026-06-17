@@ -44,6 +44,7 @@ svzt preop select --run-id demo-run --iteration 3 --reason "best tuned preop"
 svzt run postop --run-id demo-run --execute
 svzt postprocess cfd-results --run-id demo-run
 svzt campaign seed-sweep plan --cluster sherlock --campaign-id tst-stan-5-learned
+svzt update --message "sync local workflow changes" --execute
 ```
 
 Cluster configs must provide both `executables.svfsiplus_path` and
@@ -55,6 +56,12 @@ files, an `AGENTS.md` workspace router, plus `runs/`, `mirrors/`, and
 `templates/` directories. `svzt config validate` checks the required YAML
 config plus optional repository-location overrides, and `svzt doctor`
 summarizes local workspace diagnostics and checkout discovery warnings.
+
+`svzt update` is a local maintenance helper for the sibling-checkout setup. It
+uses one commit message for both `svzt-agent` and `svZeroDTrees`, pushes the
+current branch for each repo, then SSHes to Sherlock to run `git pull` in
+`/home/users/ndorn/svZeroDTrees` followed by `pip install -e
+/home/users/ndorn/svZeroDTrees`. Use `--dry-run` to preview the command list.
 
 Resistance-map frame mapping for selected-preop and explicit postop
 postprocessing is controlled by `defaults.postprocess.resistance_map.*`.
