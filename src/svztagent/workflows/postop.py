@@ -86,6 +86,109 @@ class PostopRunResult:
     command_previews: list[list[str]]
 
 
+_EMBEDDED_MEAN_WALL_TRACTION_HELPERS = """
+def _get_wall_nodes(path: Path) -> np.ndarray:
+    reader = vtk.vtkXMLPolyDataReader()
+    reader.SetFileName(str(path))
+    reader.Update()
+    model = reader.GetOutput()
+    model_id = model.GetPointData().GetArray("GlobalNodeID")
+    npts = model.GetNumberOfPoints()
+    ids = np.zeros((npts, 1), dtype="int32")
+    for i in range(npts):
+        ids[i] = int(model_id.GetTuple1(i))
+    return ids
+
+
+def _load_vtu(path: Path):
+    reader = vtk.vtkXMLUnstructuredGridReader()
+    reader.SetFileName(str(path))
+    reader.Update()
+    return reader.GetOutput()
+
+
+def _get_surface_data(mesh, surface_ids: np.ndarray, field: str) -> np.ndarray:
+    data = mesh.GetPointData().GetArray(field)
+    ncomp = data.GetNumberOfComponents()
+    n = np.size(surface_ids)
+    out = np.zeros((n, ncomp)) if ncomp > 1 else np.zeros((n,))
+    for i in range(n):
+        tup = data.GetTuple(int(surface_ids[i]) - 1)
+        if ncomp == 1:
+            out[i] = tup[0]
+        else:
+            for j in range(ncomp):
+                out[i, j] = tup[j]
+    return out
+
+
+def _write_wall_field(values: np.ndarray, *, out_path: Path, wall_path: Path, name: str) -> None:
+    reader = vtk.vtkXMLPolyDataReader()
+    reader.SetFileName(str(wall_path))
+    reader.Update()
+    model = reader.GetOutput()
+    npts = model.GetNumberOfPoints()
+
+    arr = vtk.vtkDoubleArray()
+    if values.ndim > 1:
+        arr.SetNumberOfComponents(values.shape[1])
+        arr.SetNumberOfTuples(npts)
+        arr.SetName(name)
+        for i in range(npts):
+            arr.SetTuple3(i, values[i, 0], values[i, 1], values[i, 2])
+    else:
+        arr.SetNumberOfComponents(1)
+        arr.SetNumberOfTuples(npts)
+        arr.SetName(name)
+        for i in range(npts):
+            arr.SetTuple1(i, values[i])
+
+    model.GetPointData().AddArray(arr)
+    writer = vtk.vtkXMLPolyDataWriter()
+    writer.SetInputData(model)
+    writer.SetFileName(str(out_path))
+    writer.Write()
+
+
+def _write_mean_wall_traction_and_pressure(
+    *,
+    result_dir: Path,
+    wall_path: Path,
+    start: int,
+    stop: int,
+    stride: int,
+    traction_path: Path,
+    pressure_path: Path,
+) -> None:
+    wall_ids = _get_wall_nodes(wall_path)
+    n_nodes = np.size(wall_ids)
+
+    mean_t = np.zeros((n_nodes, 3), dtype="float64")
+    mean_p = np.zeros((n_nodes,), dtype="float64")
+
+    steps = list(range(start, stop + 1, stride))
+    if not steps:
+        raise RuntimeError("No timesteps selected. Check start/stop/stride.")
+
+    for step in steps:
+        vtu = result_dir / f"result_{step:04d}.vtu"
+        if not vtu.exists():
+            vtu = result_dir / f"result_{step:03d}.vtu"
+        if not vtu.exists():
+            raise FileNotFoundError(f"Missing result file for step {step}: {vtu}")
+
+        mesh = _load_vtu(vtu)
+        mean_t += _get_surface_data(mesh, wall_ids, "Traction")
+        mean_p += _get_surface_data(mesh, wall_ids, "Pressure")
+
+    mean_t /= float(len(steps))
+    mean_p /= float(len(steps))
+
+    _write_wall_field(mean_t, out_path=traction_path, wall_path=wall_path, name="Traction")
+    _write_wall_field(mean_p, out_path=pressure_path, wall_path=wall_path, name="Pressure")
+"""
+
+
 def _load_mapping(path: Path, *, label: str) -> dict:
     if not path.exists():
         raise ConfigError(f"{label} is missing: {path}")
@@ -565,6 +668,7 @@ import time
 import xml.etree.ElementTree as ET
 
 import numpy as np
+import vtk
 
 from svzerodtrees.simulation import Simulation, SimulationDirectory
 
@@ -785,6 +889,9 @@ def _result_dir_from_latest(root: Path) -> Path:
     return latest.parent
 
 
+{_EMBEDDED_MEAN_WALL_TRACTION_HELPERS}
+
+
 def _force_xml_text(xml_path: Path, tag: str, value: str) -> None:
     if not xml_path.exists():
         raise RuntimeError(f"expected XML file missing: {{xml_path}}")
@@ -990,38 +1097,19 @@ def _generate_postop_prestress_file() -> Path:
         raise RuntimeError(f"wall file missing for postop prestress generation: {{wall_path}}")
     mean_result_dir = _result_dir_from_latest(mean_dir)
     start, stop, stride = _result_step_range(mean_result_dir)
-    traction_script = Path.home() / "scripts" / "calc_mean_wall_traction.py"
-    if not traction_script.exists():
-        raise RuntimeError(f"mean wall traction script missing: {{traction_script}}")
-
     traction_file = prestress_root / "rigid_wall_mean_traction.vtp"
-    proc = subprocess.run(
-        [
-            os.fspath(Path(os.sys.executable)),
-            str(traction_script),
-            "--result-dir",
-            str(mean_result_dir),
-            "--wall",
-            str(wall_path),
-            "--start",
-            str(start),
-            "--stop",
-            str(stop),
-            "--stride",
-            str(stride),
-        ],
-        cwd=prestress_root,
-        capture_output=True,
-        text=True,
-        check=False,
+    pressure_file = prestress_root / "rigid_wall_mean_pressure.vtp"
+    _write_mean_wall_traction_and_pressure(
+        result_dir=mean_result_dir,
+        wall_path=wall_path,
+        start=start,
+        stop=stop,
+        stride=stride,
+        traction_path=traction_file,
+        pressure_path=pressure_file,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            "mean wall traction calculation failed "
-            f"rc={{proc.returncode}}: {{proc.stderr.strip() or proc.stdout.strip()}}"
-        )
     if not traction_file.exists():
-        raise RuntimeError(f"mean wall traction script did not write {{traction_file}}")
+        raise RuntimeError(f"mean wall traction helper did not write {{traction_file}}")
 
     prestress_sim = SimulationDirectory.from_directory(
         path=str(prestress_root),

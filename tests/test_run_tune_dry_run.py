@@ -544,9 +544,10 @@ patients:
         in rendered_script
     )
     assert '"prestress_file=generate requires seed-generation mean steady VTUs under "' in rendered_script
-    assert 'Path.home() / "scripts" / "calc_mean_wall_traction.py"' in rendered_script
-    assert '"--result-dir"' in rendered_script
-    assert '"--wall"' in rendered_script
+    assert 'Path.home() / "scripts" / "calc_mean_wall_traction.py"' not in rendered_script
+    assert "import vtk" in rendered_script
+    assert "def _write_mean_wall_traction_and_pressure(" in rendered_script
+    assert 'pressure_file = prestress_dir / "rigid_wall_mean_pressure.vtp"' in rendered_script
     assert '"simulation_mode": "prestress"' in rendered_script
     assert '"n_tsteps": 20' in rendered_script
     assert '"dt": 0.001' in rendered_script
