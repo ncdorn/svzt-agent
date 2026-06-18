@@ -258,6 +258,15 @@ def _read_polydata(path: Path) -> vtk.vtkPolyData:
     return poly
 
 
+def _load_vtu(path: Path) -> vtk.vtkUnstructuredGrid:
+    reader = vtk.vtkXMLUnstructuredGridReader()
+    reader.SetFileName(str(path))
+    reader.Update()
+    grid = vtk.vtkUnstructuredGrid()
+    grid.DeepCopy(reader.GetOutput())
+    return grid
+
+
 def _write_polydata(poly: vtk.vtkPolyData, path: Path) -> None:
     writer = vtk.vtkXMLPolyDataWriter()
     writer.SetFileName(str(path))
@@ -761,7 +770,8 @@ def _write_stacked_centerline_timeseries(
         timestep_id = int(timestep_id_raw) if timestep_id_raw is not None else None
         poly = _read_polydata(mapped_path)
         if reference_poly is None:
-            reference_poly = poly
+            reference_poly = vtk.vtkPolyData()
+            reference_poly.DeepCopy(poly)
             _strip_timestep_point_fields(reference_poly.GetPointData())
         else:
             _validate_matching_geometry(reference_poly, poly, mapped_path)
