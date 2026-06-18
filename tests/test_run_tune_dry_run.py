@@ -654,6 +654,74 @@ patients:
     assert not reduced_seed.exists()
 
 
+def test_run_tune_dry_run_renders_rcr_tuning_path(sample_config_files):
+    (sample_config_files / "config" / "defaults.yaml").write_text(
+        """
+defaults:
+  tuning:
+    bc_type: "rcr"
+    rcr:
+      n_procs: 8
+      convert_to_cm: true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-dry-rcr",
+        mode=ExecutionMode.DRY_RUN,
+    )
+
+    rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
+    assert 'tuning_bc_type = "rcr".strip().lower() or "impedance"' in rendered_script
+    assert "run_rcr_tuning_for_iteration" in rendered_script
+    assert "tuning = run_rcr_tuning_for_iteration(" in rendered_script
+    assert '"n_procs": 8' in rendered_script
+    assert '"convert_to_cm": true' in rendered_script
+    assert 'optimized_tuning_filename = (\n        "optimized_rcr_params.csv" if tuning_bc_type == "rcr" else "optimized_params.csv"\n    )' in rendered_script
+    assert 'seed_filename = "simplified_nonlinear_zerod.json"' in rendered_script
+    staged_seed = (
+        sample_config_files
+        / "runs"
+        / "run-dry-rcr"
+        / "iterations"
+        / "iter-01"
+        / "inputs"
+        / "simplified_nonlinear_zerod.json"
+    )
+    assert staged_seed.exists()
+
+
+def test_run_tune_dry_run_renders_rcr_skip_tuning_artifacts(sample_config_files):
+    (sample_config_files / "config" / "defaults.yaml").write_text(
+        """
+defaults:
+  tuning:
+    bc_type: "rcr"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-dry-rcr-skip",
+        mode=ExecutionMode.DRY_RUN,
+        skip_zerod_tuning=True,
+    )
+
+    rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
+    assert 'str(remote_results_dir / optimized_tuning_filename)' in rendered_script
+    assert 'remote_results_dir / optimized_tuning_filename,' in rendered_script
+    assert "optimized_rcr_params.csv" in rendered_script
+
+
 def test_run_tune_dry_run_renders_patient_mesh_scale_override(sample_config_files):
     (sample_config_files / "config" / "patients.yaml").write_text(
         f"""

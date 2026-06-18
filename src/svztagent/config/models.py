@@ -662,6 +662,27 @@ class ImpedanceTuningConfig(BaseModel):
         return value
 
 
+class RCRTuningConfig(BaseModel):
+    solver: Literal["Nelder-Mead"] = "Nelder-Mead"
+    n_procs: int = 24
+    rescale_inflow: bool = True
+    convert_to_cm: bool = False
+
+    @field_validator("n_procs")
+    @classmethod
+    def _positive_n_procs(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("n_procs must be > 0")
+        return value
+
+
+class PatientRCROverrides(BaseModel):
+    solver: Literal["Nelder-Mead"] | None = None
+    n_procs: int | None = None
+    rescale_inflow: bool | None = None
+    convert_to_cm: bool | None = None
+
+
 class PatientImpedanceOverrides(BaseModel):
     solver: str | None = None
     nm_iter: int | None = None
@@ -681,15 +702,19 @@ class PatientImpedanceOverrides(BaseModel):
 
 
 class TuningDefaults(BaseModel):
+    bc_type: Literal["impedance", "rcr"] = "impedance"
     iteration1_seed: Iteration1SeedConfig = Field(default_factory=Iteration1SeedConfig)
     threed: ThreedTuningConfig = Field(default_factory=ThreedTuningConfig)
     impedance: ImpedanceTuningConfig = Field(default_factory=ImpedanceTuningConfig)
+    rcr: RCRTuningConfig = Field(default_factory=RCRTuningConfig)
 
 
 class PatientTuningOverrides(BaseModel):
+    bc_type: Literal["impedance", "rcr"] | None = None
     iteration1_seed: Iteration1SeedConfig | None = None
     threed: PatientThreedOverrides | None = None
     impedance: PatientImpedanceOverrides | None = None
+    rcr: PatientRCROverrides | None = None
 
 
 class AdaptationModelConfig(BaseModel):
@@ -873,8 +898,10 @@ class ResolvedPatient(BaseModel):
     remote_path: str
     permanent_remote_path: str | None = None
     patient_assets: PatientAssetPaths | None = None
+    bc_type: Literal["impedance", "rcr"] = "impedance"
     threed: ThreedTuningConfig
     impedance: ImpedanceTuningConfig
+    rcr: RCRTuningConfig
     adaptation: AdaptationDefaults
     mesh_scale_factor: float
     data_policy: str

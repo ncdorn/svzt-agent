@@ -109,6 +109,7 @@ defaults:
     require_dry_run_before_execute: true
     enforce_remote_write_root: true
   tuning:
+    bc_type: "impedance"
     iteration1_seed:
       source: "path"
       path: "simplified_nonlinear_zerod.json"
@@ -171,6 +172,11 @@ defaults:
           - name: "comp.rpa.k2"
             other: "comp.lpa.k2"
             fn: "identity"
+    rcr:
+      solver: "Nelder-Mead"
+      n_procs: 24
+      rescale_inflow: true
+      convert_to_cm: false
   patient_data_layout:
     clinical_targets_csv: "clinical_targets.csv"
     centerlines_vtp: "centerlines.vtp"

@@ -1228,6 +1228,12 @@ def run_adapt(
         raise ConfigError(
             f"run '{validated_run_id}' has no completed postop_run; run svzt run postop first"
         )
+    tuning_bc_type = str((manifest.remote or {}).get("tuning_bc_type") or "impedance").strip().lower()
+    if tuning_bc_type != "impedance":
+        raise ConfigError(
+            "adaptation currently requires impedance-tuned structured-tree outputs; "
+            f"selected run uses bc_type={tuning_bc_type!r}"
+        )
     if adaptation_mode not in {"predict", "retrospective_fit"}:
         raise ConfigError("adaptation_mode must be one of predict|retrospective_fit")
 

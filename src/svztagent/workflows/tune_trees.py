@@ -104,6 +104,24 @@ def _iteration_impedance_config(impedance_config: dict, iteration: int) -> dict:
     return rendered
 
 
+def _resolved_tuning_bc_type(bc_type: str | None) -> str:
+    normalized = str(bc_type or "impedance").strip().lower()
+    if normalized not in {"impedance", "rcr"}:
+        raise ConfigError(f"Unsupported tuning bc_type: {bc_type}")
+    return normalized
+
+
+def _seed_input_filename_for_tuning(
+    *,
+    bc_type: str | None,
+    tuning_model: str | None,
+    iteration: int,
+) -> str:
+    if _resolved_tuning_bc_type(bc_type) == "rcr":
+        return REDUCED_SEED_INPUT_FILENAME
+    return _seed_input_filename(tuning_model, iteration)
+
+
 def _emit_progress(
     progress_callback: Callable[[str], None] | None,
     message: str,
@@ -1097,7 +1115,8 @@ def _render_tune_job_script(
     remote_postop_mesh_complete_dir: str | None,
     cluster_svfsiplus_path: str,
     threed_config: dict,
-    impedance_config: dict,
+    tuning_bc_type: str,
+    tuning_config: dict,
     mesh_scale_factor: float,
     scheduler_defaults: dict,
     env_hooks: list[str],
@@ -1112,11 +1131,11 @@ def _render_tune_job_script(
     except (TypeError, ValueError):
         scheduler_cpus_int = None
     try:
-        impedance_n_procs = int(impedance_config.get("n_procs"))
+        tuning_n_procs = int(tuning_config.get("n_procs"))
     except (TypeError, ValueError):
-        impedance_n_procs = None
-    if impedance_n_procs is not None:
-        sbatch_cpus = str(max(scheduler_cpus_int or 0, impedance_n_procs))
+        tuning_n_procs = None
+    if tuning_n_procs is not None:
+        sbatch_cpus = str(max(scheduler_cpus_int or 0, tuning_n_procs))
     else:
         sbatch_cpus = str(scheduler_cpus)
 
@@ -1136,7 +1155,8 @@ def _render_tune_job_script(
         "{{REMOTE_POSTOP_MESH_COMPLETE_DIR}}": remote_postop_mesh_complete_dir or "",
         "{{CLUSTER_SVFSIPLUS_PATH}}": cluster_svfsiplus_path,
         "{{THREED_CONFIG_JSON}}": json.dumps(threed_config, sort_keys=True),
-        "{{IMPEDANCE_CONFIG_JSON}}": json.dumps(impedance_config, sort_keys=True),
+        "{{TUNING_BC_TYPE}}": tuning_bc_type,
+        "{{ZEROD_TUNING_CONFIG_JSON}}": json.dumps(tuning_config, sort_keys=True),
         "{{MESH_SCALE_FACTOR}}": str(mesh_scale_factor),
         "{{SKIP_ZEROD_TUNING_JSON}}": json.dumps(bool(skip_zerod_tuning)),
         "{{SBATCH_ACCOUNT}}": str(scheduler_defaults.get("account") or ""),
@@ -1471,9 +1491,10 @@ def run_tune_trees(
         patient_alias=patient_alias,
         iteration=resolved_iteration,
         seed_config_path=seed_config,
-        seed_input_filename=_seed_input_filename(
-            patient.impedance.tuning_model,
-            resolved_iteration,
+        seed_input_filename=_seed_input_filename_for_tuning(
+            bc_type=patient.bc_type,
+            tuning_model=patient.impedance.tuning_model,
+            iteration=resolved_iteration,
         ),
         patient_assets=(
             patient.patient_assets.model_dump(mode="json")
@@ -1492,6 +1513,15 @@ def run_tune_trees(
         configured_path=cluster.executables.svfsiplus_path,
     )
     _emit_progress(progress_callback, "[svzt] Rendering job script")
+    tuning_bc_type = _resolved_tuning_bc_type(patient.bc_type)
+    tuning_config = (
+        _iteration_impedance_config(
+            patient.impedance.model_dump(mode="json"),
+            resolved_iteration,
+        )
+        if tuning_bc_type == "impedance"
+        else patient.rcr.model_dump(mode="json")
+    )
     script_body = _render_tune_job_script(
         run_id=resolved_run_id,
         iteration=resolved_iteration,
@@ -1518,10 +1548,8 @@ def run_tune_trees(
             configured_path=cluster.executables.svzerodsolver_build_dir,
             threed_config=patient.threed.model_dump(mode="json"),
         ),
-        impedance_config=_iteration_impedance_config(
-            patient.impedance.model_dump(mode="json"),
-            resolved_iteration,
-        ),
+        tuning_bc_type=tuning_bc_type,
+        tuning_config=tuning_config,
         mesh_scale_factor=patient.mesh_scale_factor,
         scheduler_defaults=config.defaults.scheduler.model_dump(mode="json"),
         env_hooks=config.defaults.execution.env_activation_hooks,

@@ -1043,12 +1043,14 @@ def create_manifest(
                 "postop_mesh_complete": patient.patient_assets.postop_mesh_complete_dir
                 if patient.patient_assets
                 else None,
-                "centerlines": patient.patient_assets.centerlines
+            "centerlines": patient.patient_assets.centerlines
                 if patient.patient_assets
                 else None,
             },
+            "tuning_bc_type": patient.bc_type,
             "threed_defaults": patient.threed.model_dump(mode="json"),
             "impedance_defaults": patient.impedance.model_dump(mode="json"),
+            "rcr_defaults": patient.rcr.model_dump(mode="json"),
             "adaptation_defaults": patient.adaptation.model_dump(mode="json"),
             "scheduler_defaults": config.defaults.scheduler.model_dump(mode="json"),
             "monitoring_defaults": config.defaults.monitoring.model_dump(mode="json"),

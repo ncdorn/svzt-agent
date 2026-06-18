@@ -74,6 +74,7 @@ required_symbols = [
     "evaluate_iteration_gate",
     "generate_reduced_pa_from_iteration",
     "run_impedance_tuning_for_iteration",
+    "run_rcr_tuning_for_iteration",
     "write_iteration_decision",
     "write_iteration_metrics",
 ]
@@ -130,6 +131,7 @@ from svzerodtrees.tuning import (
     evaluate_iteration_gate,
     generate_reduced_pa_from_iteration,
     run_impedance_tuning_for_iteration,
+    run_rcr_tuning_for_iteration,
     summarize_pulmonary_zerod_config,
     write_iteration_decision,
     write_iteration_metrics,
@@ -158,7 +160,8 @@ solver_execution["executable"] = cluster_svfsiplus_path
 solver_execution["submit_command"] = "bash"
 solver_execution["svfsiplus_path"] = cluster_svfsiplus_path
 threed_config["execution"] = solver_execution
-impedance_config = json.loads(r'''{{IMPEDANCE_CONFIG_JSON}}''')
+tuning_bc_type = "{{TUNING_BC_TYPE}}".strip().lower() or "impedance"
+zerod_tuning_config = json.loads(r'''{{ZEROD_TUNING_CONFIG_JSON}}''')
 skip_zerod_tuning = json.loads(r'''{{SKIP_ZEROD_TUNING_JSON}}''')
 mesh_scale_factor = float("{{MESH_SCALE_FACTOR}}")
 scheduler_defaults = {
@@ -207,6 +210,9 @@ decision_payload = {
     "postop_job_id": None,
     "needs_review_reason": None,
 }
+
+if tuning_bc_type not in {"impedance", "rcr"}:
+    raise RuntimeError(f"Unsupported tuning bc_type: {tuning_bc_type}")
 
 
 def _mark_needs_review(reason: str) -> None:
@@ -1013,21 +1019,27 @@ try:
     poll_seconds = int(threed_config.get("wait_poll_seconds", 30))
     timeout_seconds = int(threed_config.get("wait_timeout_seconds", 43200))
     tuned_config_path: Path | None = None
-    tuning_model = str(impedance_config.get("tuning_model", "rri")).strip().lower()
-    seed_filename = "full_pa_zerod.json" if tuning_model == "full_pa" else "simplified_nonlinear_zerod.json"
+    tuning_model = "rri"
+    seed_filename = "simplified_nonlinear_zerod.json"
+    if tuning_bc_type == "impedance":
+        tuning_model = str(zerod_tuning_config.get("tuning_model", "rri")).strip().lower()
+        seed_filename = "full_pa_zerod.json" if tuning_model == "full_pa" else "simplified_nonlinear_zerod.json"
+    optimized_tuning_filename = (
+        "optimized_rcr_params.csv" if tuning_bc_type == "rcr" else "optimized_params.csv"
+    )
     staged_seed_path = remote_inputs_dir / seed_filename
     if skip_zerod_tuning:
         log["steps"].append("0d_tuning_skipped")
         tuned_config_path = remote_results_dir / "svzerod_3d_coupling_tuned.json"
         decision_payload["tuning_artifacts"].update(
             {
-                "optimized_params_csv": str(remote_results_dir / "optimized_params.csv"),
+                "optimized_params_csv": str(remote_results_dir / optimized_tuning_filename),
                 "pa_config_snapshot": str(remote_results_dir / "pa_config_tuning_snapshot.json"),
                 "tuned_zerod_config": str(tuned_config_path),
             }
         )
         required_tuning_artifacts = [
-            remote_results_dir / "optimized_params.csv",
+            remote_results_dir / optimized_tuning_filename,
             remote_results_dir / "pa_config_tuning_snapshot.json",
             tuned_config_path,
         ]
@@ -1067,7 +1079,7 @@ try:
         # Seed structured-tree tuning from the previous iteration's optimized params when
         # available (iteration 1 always starts from tune_space.init defaults).
         previous_optimized_params = None
-        if iteration > 1:
+        if tuning_bc_type == "impedance" and iteration > 1:
             prev_iter_label = f"iter-{iteration - 1:02d}"
             _prev_csv = remote_run_dir / "iterations" / prev_iter_label / "results" / "optimized_params.csv"
             if _prev_csv.exists():
@@ -1082,21 +1094,31 @@ try:
 
         if not mesh_surfaces_path.exists():
             _mark_needs_review(f"mesh-surfaces directory missing: {mesh_surfaces_path}")
-        elif bool(impedance_config.get("rescale_inflow")) and resolved_inflow_path is None:
+        elif bool(zerod_tuning_config.get("rescale_inflow")) and resolved_inflow_path is None:
             _mark_needs_review(
                 "rescale_inflow=True but no inflow.csv was available for iteration tuning "
                 f"(staged={staged_inflow_path}, patient={remote_inflow_path})"
             )
         else:
-            tuning = run_impedance_tuning_for_iteration(
-                iteration_dir=remote_iter_dir,
-                seed_config=staged_seed_path,
-                mesh_surfaces=mesh_surfaces_path,
-                clinical_targets=clinical_targets_path,
-                inflow_path=resolved_inflow_path,
-                impedance_config=impedance_config,
-                previous_optimized_params=previous_optimized_params,
-            )
+            if tuning_bc_type == "impedance":
+                tuning = run_impedance_tuning_for_iteration(
+                    iteration_dir=remote_iter_dir,
+                    seed_config=staged_seed_path,
+                    mesh_surfaces=mesh_surfaces_path,
+                    clinical_targets=clinical_targets_path,
+                    inflow_path=resolved_inflow_path,
+                    impedance_config=zerod_tuning_config,
+                    previous_optimized_params=previous_optimized_params,
+                )
+            else:
+                tuning = run_rcr_tuning_for_iteration(
+                    iteration_dir=remote_iter_dir,
+                    seed_config=staged_seed_path,
+                    mesh_surfaces=mesh_surfaces_path,
+                    clinical_targets=clinical_targets_path,
+                    inflow_path=resolved_inflow_path,
+                    rcr_config=zerod_tuning_config,
+                )
             decision_payload["tuning_artifacts"].update(
                 {
                     "optimized_params_csv": tuning.get("optimized_params_csv"),
@@ -1162,9 +1184,11 @@ try:
         if decision_payload["decision"] == "needs_review":
             tuned_config_path = None
         elif tuned_config_path is None:
-            _mark_needs_review("impedance tuning did not return tuned_zerod_config")
+            _mark_needs_review(f"{tuning_bc_type} tuning did not return tuned_zerod_config")
         elif not tuned_config_path.exists():
-            _mark_needs_review(f"tuned 0D config missing after tuning: {tuned_config_path}")
+            _mark_needs_review(
+                f"tuned 0D config missing after {tuning_bc_type} tuning: {tuned_config_path}"
+            )
 
     if decision_payload["decision"] != "needs_review" and tuned_config_path is not None:
         log["steps"].append("preop_3d_setup_started")

@@ -124,13 +124,19 @@ input remains versioned with the rest of the patient reference data.
 ## Impedance Tuning Runtime Config
 
 Impedance defaults are centrally configured at:
+- `defaults.tuning.bc_type`
 - `defaults.tuning.impedance`
+- `defaults.tuning.rcr`
 
 Optional per-patient overrides are supported at:
+- `patients[].tuning.bc_type`
 - `patients[].tuning.impedance`
+- `patients[].tuning.rcr`
 
 Merged values are resolved into the run context and used by the iteration script to run:
-1. 0D impedance BC tuning (`optimized_params.csv`, `stree_impedance_optimization.log`)
+1. 0D BC tuning
+   - impedance: `optimized_params.csv`, `stree_impedance_optimization.log`
+   - RCR: `optimized_rcr_params.csv`
 2. BC-to-3D mapping (`pa_config_tuning_snapshot.json`, `svzerod_3d_coupling_tuned.json`)
 
 `tuning_model` selects whether svZeroDTrees tunes a reduced RRI PA model (`rri`)

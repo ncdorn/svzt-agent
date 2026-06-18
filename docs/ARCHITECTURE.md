@@ -29,6 +29,13 @@ Cluster-level `executables.svzerodsolver_build_dir` is injected alongside that
 config so `svZeroDTrees` can resolve the `libsvzero_interface.so` path while
 writing coupled svMultiPhysics XML.
 
+The tuning config now resolves three coupled pieces per patient: `bc_type`
+(`impedance` or `rcr`), the impedance-specific tuning block, and the
+RCR-specific tuning block. The iteration driver dispatches to the matching
+`svZeroDTrees` helper at runtime and expects the matching tuning artifact
+filename (`optimized_params.csv` for impedance, `optimized_rcr_params.csv` for
+RCR).
+
 ## Execution layer
 All remote side effects are routed through typed adapters:
 

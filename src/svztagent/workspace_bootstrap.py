@@ -43,6 +43,7 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
     data_policy: "read_only"
     mesh_scale_factor: 1.147
     tuning:
+      bc_type: "impedance"
       iteration1_seed:
         source: "generate"
       impedance:
@@ -73,6 +74,7 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
     data_policy: "read_only"
     mesh_scale_factor: 1.0
     tuning:
+      bc_type: "impedance"
       iteration1_seed:
         source: "generate"
       impedance:
@@ -95,6 +97,7 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
     data_policy: "read_only"
     mesh_scale_factor: 1.0
     tuning:
+      bc_type: "impedance"
       iteration1_seed:
         source: "generate"
       impedance:
@@ -118,6 +121,7 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
     mesh_scale_factor: 1.0
     notes: "Active simulation input directory on scratch"
     tuning:
+      bc_type: "impedance"
       iteration1_seed:
         source: "generate"
       impedance:
@@ -139,6 +143,7 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
     data_policy: "read_only"
     mesh_scale_factor: 1.425
     tuning:
+      bc_type: "impedance"
       iteration1_seed:
         source: "generate"
       impedance:
@@ -199,6 +204,7 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
     enforce_remote_write_root: true
   mesh_scale_factor: 1.0
   tuning:
+    bc_type: "impedance"
     iteration1_seed:
       source: "path"
       path: "simplified_nonlinear_zerod.json"
@@ -256,6 +262,11 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
           - name: "comp.rpa.k2"
             other: "comp.lpa.k2"
             fn: "identity"
+    rcr:
+      solver: "Nelder-Mead"
+      n_procs: 24
+      rescale_inflow: true
+      convert_to_cm: false
     threed:
       wall_model: "deformable"
       inflow_boundary_condition: "dirichlet"

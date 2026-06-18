@@ -72,8 +72,16 @@
 - Dry-run preview only generates the seed locally when the required patient assets are mounted locally.
 - When those assets only exist on Sherlock/Oak, `svzt run tune` leaves `inputs/simplified_nonlinear_zerod.json` unstaged and the remote iteration driver generates it during execution.
 
+## 0D Tuning Configuration
+- Select the BC tuning mode in YAML:
+  - `defaults.tuning.bc_type`
+  - optional `patients[].tuning.bc_type` override
+- Supported values:
+  - `impedance`
+  - `rcr`
+
 ## Impedance Tuning Configuration
-- Configure impedance tuning defaults in YAML:
+- Configure impedance tuning defaults in YAML when `bc_type: impedance`:
   - `defaults.tuning.impedance`
   - optional `patients[].tuning.impedance` override
 - Key controls:
@@ -87,6 +95,20 @@
   `full_pa_zerod.json`.
 - The default Nelder-Mead repeat count is `nm_iter: 5`.
 - Full learned 0D seeds with many outlet BCs require deterministic cap-to-BC mapping by matching BC names or outlet metadata. Order-only mapping is rejected unless `allow_ordered_outlet_mapping: true` is set for a legacy run.
+
+## RCR Tuning Configuration
+- Configure RCR tuning defaults in YAML when `bc_type: rcr`:
+  - `defaults.tuning.rcr`
+  - optional `patients[].tuning.rcr` override
+- Key controls:
+  - `solver` (currently `Nelder-Mead` only)
+  - `n_procs`
+  - `rescale_inflow`
+  - `convert_to_cm`
+- Policy: RCR iteration tuning always stages the reduced seed
+  `simplified_nonlinear_zerod.json`.
+- RCR tuning writes `optimized_rcr_params.csv`, `pa_config_tuning_snapshot.json`,
+  and `svzerod_3d_coupling_tuned.json`.
 
 ## Seed-Sweep Campaigns
 - `svzt campaign seed-sweep plan` creates `runs/campaigns/<campaign-id>/campaign_manifest.yaml` plus one child workspace per patient/case.

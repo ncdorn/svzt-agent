@@ -17,6 +17,7 @@ from svztagent.config.models import (
     PatientAssetPaths,
     PatientDataLayoutDefaults,
     PatientConfig,
+    RCRTuningConfig,
     ResolvedPatient,
     ThreedTuningConfig,
     WorkspaceConfig,
@@ -261,6 +262,33 @@ def _resolve_patient_impedance_config(
     return ImpedanceTuningConfig.model_validate(merged)
 
 
+def _resolve_patient_rcr_config(
+    config: WorkspaceConfig,
+    patient: PatientConfig,
+) -> RCRTuningConfig:
+    merged = config.defaults.tuning.rcr.model_dump(mode="json")
+    override = (
+        patient.tuning.rcr
+        if patient.tuning is not None and patient.tuning.rcr is not None
+        else None
+    )
+    if override is not None:
+        merged.update(override.model_dump(mode="json", exclude_none=True))
+    return RCRTuningConfig.model_validate(merged)
+
+
+def _resolve_patient_bc_type(
+    config: WorkspaceConfig,
+    patient: PatientConfig,
+) -> str:
+    override = (
+        patient.tuning.bc_type
+        if patient.tuning is not None and patient.tuning.bc_type is not None
+        else None
+    )
+    return str(override or config.defaults.tuning.bc_type)
+
+
 def _resolve_patient_adaptation_config(
     config: WorkspaceConfig,
     patient: PatientConfig,
@@ -383,8 +411,10 @@ def resolve_patient_alias(
         remote_path=patient.remote_path,
         permanent_remote_path=patient.permanent_remote_path,
         patient_assets=patient_assets,
+        bc_type=_resolve_patient_bc_type(config, patient),
         threed=_resolve_patient_threed_config(config, patient),
         impedance=_resolve_patient_impedance_config(config, patient),
+        rcr=_resolve_patient_rcr_config(config, patient),
         adaptation=_resolve_patient_adaptation_config(config, patient),
         mesh_scale_factor=_resolve_patient_mesh_scale_factor(config, patient),
         data_policy=patient.data_policy,

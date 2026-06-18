@@ -44,7 +44,7 @@ This command:
 3. Submits the SLURM driver job and prints the job ID
 
 The SLURM driver job is long-running. For each iteration it:
-- Runs 0D impedance tuning (Nelder-Mead on the staged seed)
+- Runs 0D BC tuning (impedance or RCR on the staged seed)
 - Submits the preop 3D CMM job and waits for it
 - Post-processes `result_*.vtu` files against the MPA centerline to generate `mpa_pressure_vs_time.csv`
 - Evaluates the clinical gate against `clinical_targets.csv`

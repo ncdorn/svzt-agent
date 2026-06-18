@@ -27,6 +27,7 @@ def test_resolve_patient_alias_success(sample_config_files):
         "/TST-STAN-x/simplified_nonlinear_zerod.json"
     )
     assert patient.patient_assets.postop_mesh_complete_dir is None
+    assert patient.bc_type == "impedance"
     assert patient.threed.wall_model == "deformable"
     assert patient.threed.inflow_boundary_condition == "neumann"
     assert patient.threed.prestress_file == "auto"
@@ -179,6 +180,43 @@ patients:
     assert patient.impedance.tune_space.free[0].name == "comp.lpa.k2"
     assert patient.impedance.tune_space.fixed[0].name == "lrr"
     assert patient.impedance.tune_space.tied[0].name == "comp.rpa.k2"
+
+
+def test_patient_rcr_override_merges_with_defaults(sample_config_files):
+    (sample_config_files / "config" / "defaults.yaml").write_text(
+        """
+defaults:
+  tuning:
+    bc_type: "rcr"
+    rcr:
+      n_procs: 8
+      convert_to_cm: true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        f"""
+patients:
+  - alias: "TST-STAN-x"
+    remote_path: "{(sample_config_files / 'remote_data' / 'active' / 'TST-STAN-x').as_posix()}"
+    permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
+    data_policy: "read_only"
+    tuning:
+      rcr:
+        n_procs: 12
+        rescale_inflow: false
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_workspace_config(sample_config_files)
+    patient = resolve_patient_alias(config, "sherlock", "TST-STAN-x")
+    assert patient.bc_type == "rcr"
+    assert patient.rcr.n_procs == 12
+    assert patient.rcr.rescale_inflow is False
+    assert patient.rcr.convert_to_cm is True
 
 
 def test_patient_mesh_scale_override_wins_over_default(sample_config_files):

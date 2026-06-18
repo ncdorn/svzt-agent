@@ -23,6 +23,7 @@ def test_load_workspace_config_success(sample_config_files):
     assert config.defaults.patient_data_layout.clinical_targets_csv == "clinical_targets.csv"
     assert config.defaults.tuning.iteration1_seed.source == "path"
     assert config.defaults.tuning.iteration1_seed.path == "simplified_nonlinear_zerod.json"
+    assert config.defaults.tuning.bc_type == "impedance"
     assert config.defaults.tuning.threed.wall_model == "deformable"
     assert config.defaults.tuning.threed.inflow_boundary_condition == "neumann"
     assert config.defaults.tuning.threed.prestress_file == "auto"
@@ -43,6 +44,9 @@ def test_load_workspace_config_success(sample_config_files):
     assert config.defaults.tuning.impedance.tune_space.free[-1].name == "comp.lpa.k2"
     assert config.defaults.tuning.impedance.tune_space.tied[0].name == "comp.rpa.k2"
     assert config.defaults.tuning.impedance.use_mean is True
+    assert config.defaults.tuning.rcr.solver == "Nelder-Mead"
+    assert config.defaults.tuning.rcr.n_procs == 24
+    assert config.defaults.tuning.rcr.rescale_inflow is True
     assert config.defaults.execution.python_executable == "python3"
     assert config.defaults.postprocess.resistance_map.workers == "auto"
     assert config.defaults.postprocess.resistance_map.selected_preop_mem == "64G"
@@ -259,6 +263,45 @@ patients:
     assert config.patients[0].tuning.impedance.diameter_std_cap == pytest.approx(1.5)
 
 
+def test_load_workspace_config_supports_rcr_tuning_defaults_and_override(sample_config_files):
+    (sample_config_files / "config" / "defaults.yaml").write_text(
+        """
+defaults:
+  tuning:
+    bc_type: "rcr"
+    rcr:
+      n_procs: 8
+      convert_to_cm: true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        """
+patients:
+  - alias: "TST-STAN-x"
+    remote_path: "/tmp/active/TST-STAN-x"
+    permanent_remote_path: "/tmp/permanent/TST-STAN-x"
+    data_policy: "read_only"
+    tuning:
+      rcr:
+        n_procs: 12
+        rescale_inflow: false
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_workspace_config(sample_config_files)
+    assert config.defaults.tuning.bc_type == "rcr"
+    assert config.defaults.tuning.rcr.n_procs == 8
+    assert config.defaults.tuning.rcr.convert_to_cm is True
+    assert config.patients[0].tuning is not None
+    assert config.patients[0].tuning.rcr is not None
+    assert config.patients[0].tuning.rcr.n_procs == 12
+    assert config.patients[0].tuning.rcr.rescale_inflow is False
+
+
 def test_invalid_impedance_tuning_model_fails(sample_config_files):
     (sample_config_files / "config" / "defaults.yaml").write_text(
         """
@@ -272,6 +315,21 @@ defaults:
     )
 
     with pytest.raises(ConfigError, match="tuning_model"):
+        load_workspace_config(sample_config_files)
+
+
+def test_invalid_tuning_bc_type_fails(sample_config_files):
+    (sample_config_files / "config" / "defaults.yaml").write_text(
+        """
+defaults:
+  tuning:
+    bc_type: "windkessel"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="bc_type"):
         load_workspace_config(sample_config_files)
 
 

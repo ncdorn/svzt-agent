@@ -239,6 +239,29 @@ def test_run_adapt_requires_completed_postop(sample_config_files):
         raise AssertionError("expected ConfigError for missing postop run")
 
 
+def test_run_adapt_rejects_rcr_tuning_runs(sample_config_files):
+    _prepare_adaptable_run(sample_config_files, run_id="run-adapt-rcr")
+    manifest_path = sample_config_files / "runs" / "run-adapt-rcr" / "manifest.yaml"
+    manifest = read_manifest(manifest_path)
+    manifest.remote["tuning_bc_type"] = "rcr"
+    write_manifest(manifest, manifest_path)
+
+    try:
+        run_adapt(
+            workspace_root=sample_config_files,
+            run_id="run-adapt-rcr",
+            model="M1",
+            mode=ExecutionMode.DRY_RUN,
+            transfer_adapter=FakeFileTransferAdapter(),
+            scheduler_adapter=FakeSchedulerAdapter(),
+            remote_exec_adapter=FakeRemoteExecAdapter(),
+        )
+    except ConfigError as exc:
+        assert "bc_type='rcr'" in str(exc)
+    else:
+        raise AssertionError("expected ConfigError for unsupported RCR adaptation run")
+
+
 def test_fetch_run_artifacts_includes_adaptation_directories(sample_config_files):
     paths = _prepare_adaptable_run(sample_config_files, run_id="run-adapt-fetch")
     transfer = FakeFileTransferAdapter()
