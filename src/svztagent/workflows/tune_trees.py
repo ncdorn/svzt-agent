@@ -879,7 +879,7 @@ def _build_tune_plan_steps(
             local_paths={"pulled_outputs": str(local_paths.pulled_outputs)},
             safety_notes=["Postprocessing remains a command preview in this phase."],
             command_preview=[
-                "python",
+                "python3",
                 "-m",
                 "svztagent.postprocess.summarize",
                 str(local_paths.pulled_outputs),

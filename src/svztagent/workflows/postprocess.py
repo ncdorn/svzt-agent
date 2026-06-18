@@ -140,7 +140,7 @@ fi
 if [ "${{PYTHON_CANDIDATE#*/}}" != "${{PYTHON_CANDIDATE}}" ]; then
   PYTHON_BIN="${{PYTHON_CANDIDATE}}"
 else
-  PYTHON_BIN="$(command -v "${{PYTHON_CANDIDATE}}" || command -v python3 || command -v python)"
+  PYTHON_BIN="$(command -v "${{PYTHON_CANDIDATE}}" || command -v python3)"
 fi
 if [ -z "${{PYTHON_BIN}}" ]; then
   echo "[svzt] error: no Python interpreter found on PATH" >&2

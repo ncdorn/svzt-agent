@@ -32,8 +32,6 @@ else
     PYTHON_BIN="$(command -v "${PYTHON_CANDIDATE}")"
   elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="$(command -v python3)"
-  elif command -v python >/dev/null 2>&1; then
-    PYTHON_BIN="$(command -v python)"
   else
     echo "[svzt] error: no Python interpreter found on PATH" >&2
     exit 1
