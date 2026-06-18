@@ -10,9 +10,15 @@ from typing import Literal
 import yaml
 
 from svztagent.config.load import detect_workspace_root, load_workspace_config, resolve_cluster
-from svztagent.core.errors import ConfigError
+from svztagent.core.errors import AdapterExecutionError, ConfigError
 from svztagent.core.manifest import read_manifest, record_postprocess_submission, write_manifest
-from svztagent.core.paths import build_iteration_local_paths, build_local_run_paths, iteration_dir_name, validate_run_id
+from svztagent.core.paths import (
+    build_iteration_local_paths,
+    build_local_run_paths,
+    iteration_dir_name,
+    validate_remote_patient_read_path,
+    validate_run_id,
+)
 from svztagent.hpc.interfaces import (
     ExecutionMode,
     FileTransferAdapter,
@@ -73,6 +79,59 @@ def _resolved_postprocess_worker_count(
     if parsed_scheduler_cpus is not None:
         return parsed_scheduler_cpus
     return 4
+
+
+def _require_remote_centerline_path(
+    manifest,
+    *,
+    workflow_label: str,
+    remote_exec_adapter: RemoteExecAdapter | None = None,
+) -> str:
+    svzerodtrees_paths = manifest.remote.get("svzerodtrees_paths", {})
+    raw_centerline = str(svzerodtrees_paths.get("centerlines") or "").strip()
+    if not raw_centerline:
+        raise ConfigError(
+            f"manifest remote.svzerodtrees_paths.centerlines is required for {workflow_label}"
+        )
+
+    patient_root = str(manifest.patient.get("permanent_remote_path") or "").strip() or "/"
+    try:
+        validate_remote_patient_read_path(raw_centerline, patient_root)
+    except Exception as exc:
+        raise ConfigError(
+            f"{workflow_label} centerline path must be an absolute patient-data path: {raw_centerline}"
+        ) from exc
+
+    centerline_path = PurePosixPath(raw_centerline)
+    if centerline_path.suffix.lower() != ".vtp":
+        raise ConfigError(
+            f"{workflow_label} centerline path must reference a .vtp file: {raw_centerline}"
+        )
+    if centerline_path.name in {"", ".", ".."}:
+        raise ConfigError(
+            f"{workflow_label} centerline path must reference a concrete file: {raw_centerline}"
+        )
+
+    if remote_exec_adapter is not None:
+        try:
+            probe = remote_exec_adapter.run(["test", "-f", raw_centerline])
+        except AdapterExecutionError as exc:
+            if exc.returncode == 1:
+                raise ConfigError(
+                    f"{workflow_label} centerline path does not exist or is not a regular file: "
+                    f"{raw_centerline}"
+                ) from exc
+            detail = exc.stderr or exc.stdout or str(exc)
+            raise ConfigError(
+                f"failed to validate {workflow_label} centerline path on remote host: "
+                f"{raw_centerline} ({detail})"
+            ) from exc
+        if not probe.dry_run and probe.returncode != 0:
+            raise ConfigError(
+                f"{workflow_label} centerline path failed remote validation: {raw_centerline}"
+            )
+
+    return raw_centerline
 
 
 def _build_postprocess_scheduler_adapter(
@@ -186,6 +245,7 @@ def _render_postprocess_slurm_header(
 def _stacked_centerline_timeseries_python_source() -> str:
     return """
 import shutil
+import xml.etree.ElementTree as ET
 import vtk
 
 
@@ -289,6 +349,267 @@ def _cleanup_intermediate_centerlines(intermediate_dir: Path, original_rmtree) -
     shutil.rmtree = original_rmtree
     if intermediate_dir.exists():
         original_rmtree(intermediate_dir, ignore_errors=True)
+
+
+def _array_names(data) -> list[str]:
+    names = []
+    for array_index in range(data.GetNumberOfArrays()):
+        name = data.GetArrayName(array_index)
+        if name is not None:
+            names.append(str(name))
+    return names
+
+
+def _build_polyline_graph(poly: vtk.vtkPolyData) -> tuple[dict[int, set[int]], dict[int, int]]:
+    graph: dict[int, set[int]] = {}
+    incidence: dict[int, int] = {}
+    lines = poly.GetLines()
+    lines.InitTraversal()
+    ids = vtk.vtkIdList()
+    while lines.GetNextCell(ids):
+        n_ids = ids.GetNumberOfIds()
+        for point_index in range(n_ids):
+            point_id = int(ids.GetId(point_index))
+            incidence[point_id] = incidence.get(point_id, 0) + 1
+        for point_index in range(n_ids - 1):
+            left = int(ids.GetId(point_index))
+            right = int(ids.GetId(point_index + 1))
+            graph.setdefault(left, set()).add(right)
+            graph.setdefault(right, set()).add(left)
+    return graph, incidence
+
+
+def _reachable_nodes(graph: dict[int, set[int]], root_id: int) -> set[int]:
+    pending = [root_id]
+    visited: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if node in visited:
+            continue
+        visited.add(node)
+        pending.extend(neighbor for neighbor in graph.get(node, set()) if neighbor not in visited)
+    return visited
+
+
+def _first_reachable_bifurcation(
+    graph: dict[int, set[int]],
+    *,
+    root_id: int,
+    line_incidence: dict[int, int],
+) -> int | None:
+    reachable = _reachable_nodes(graph, root_id)
+    candidates = sorted(
+        node_id
+        for node_id, count in line_incidence.items()
+        if node_id != root_id and node_id in reachable and count >= 2
+    )
+    if candidates:
+        return candidates[0]
+    degree_candidates = sorted(
+        node_id
+        for node_id, neighbors in graph.items()
+        if node_id != root_id and node_id in reachable and len(neighbors) >= 3
+    )
+    if degree_candidates:
+        return degree_candidates[0]
+    return None
+
+
+def _discover_result_vtus(simulation_dir: Path) -> list[Path]:
+    result_files = sorted(simulation_dir.glob("*-procs/result_*.vtu"))
+    if result_files:
+        return result_files
+    return sorted(simulation_dir.glob("result_*.vtu"))
+
+
+def _path_snapshot(path: Path) -> dict[str, object]:
+    snapshot = {
+        "path": str(path),
+        "exists": path.exists(),
+        "is_file": path.is_file(),
+        "is_dir": path.is_dir(),
+        "suffix": path.suffix,
+    }
+    try:
+        snapshot["resolved"] = str(path.expanduser().resolve(strict=False))
+    except Exception as exc:
+        snapshot["resolve_error"] = f"{type(exc).__name__}: {exc}"
+    if path.exists():
+        try:
+            snapshot["size_bytes"] = int(path.stat().st_size)
+        except OSError as exc:
+            snapshot["stat_error"] = f"{type(exc).__name__}: {exc}"
+    return snapshot
+
+
+def _diagnose_centerline_input(centerline_path: Path) -> dict[str, object]:
+    diagnostics = _path_snapshot(centerline_path)
+    if not centerline_path.exists() or not centerline_path.is_file():
+        return diagnostics
+    try:
+        poly = _read_polydata(centerline_path)
+        graph, incidence = _build_polyline_graph(poly)
+        diagnostics.update(
+            {
+                "point_count": int(poly.GetNumberOfPoints()),
+                "cell_count": int(poly.GetNumberOfCells()),
+                "line_count": int(poly.GetNumberOfLines()),
+                "point_arrays": _array_names(poly.GetPointData()),
+                "cell_arrays": _array_names(poly.GetCellData()),
+                "graph_node_count": len(graph),
+            }
+        )
+        if 0 not in graph:
+            diagnostics["root_validation"] = "missing root point id 0 in polyline connectivity"
+        else:
+            bifurcation_id = _first_reachable_bifurcation(graph, root_id=0, line_incidence=incidence)
+            if bifurcation_id is None:
+                diagnostics["bifurcation_validation"] = (
+                    "no reachable bifurcation downstream of root point id 0"
+                )
+            else:
+                diagnostics["detected_bifurcation_id"] = int(bifurcation_id)
+    except Exception as exc:
+        diagnostics["read_error"] = f"{type(exc).__name__}: {exc}"
+    return diagnostics
+
+
+def _diagnose_result_vtu(path: Path, *, pressure_field: str) -> dict[str, object]:
+    diagnostics = _path_snapshot(path)
+    if not path.exists() or not path.is_file():
+        return diagnostics
+    try:
+        mesh = _load_vtu(path)
+        point_arrays = _array_names(mesh.GetPointData())
+        diagnostics.update(
+            {
+                "point_count": int(mesh.GetNumberOfPoints()),
+                "cell_count": int(mesh.GetNumberOfCells()),
+                "point_arrays": point_arrays,
+                "cell_arrays": _array_names(mesh.GetCellData()),
+                "has_pressure_field": pressure_field in point_arrays,
+            }
+        )
+    except Exception as exc:
+        diagnostics["read_error"] = f"{type(exc).__name__}: {exc}"
+    return diagnostics
+
+
+def _load_suite_metadata_snapshot(metadata_path: Path) -> dict[str, object] | None:
+    if not metadata_path.exists():
+        return None
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"read_error": f"{type(exc).__name__}: {exc}", "path": str(metadata_path)}
+    return {
+        "status": payload.get("status"),
+        "error": payload.get("error"),
+        "steps": payload.get("steps"),
+    }
+
+
+def _collect_mpa_pressure_failure_diagnostics(
+    *,
+    simulation_dir: Path,
+    centerline_path: Path,
+    pressure_field: str,
+    metadata_path: Path,
+) -> dict[str, object]:
+    diagnostics: dict[str, object] = {
+        "pressure_field": pressure_field,
+        "simulation_dir": _path_snapshot(simulation_dir),
+        "centerline": _diagnose_centerline_input(centerline_path),
+        "suite_metadata": _load_suite_metadata_snapshot(metadata_path),
+    }
+
+    xml_path = simulation_dir / "svFSIplus.xml"
+    diagnostics["svfsi_xml"] = _path_snapshot(xml_path)
+    if xml_path.exists() and xml_path.is_file():
+        try:
+            dt_text = ET.parse(xml_path).getroot().findtext(".//Time_step_size")
+            diagnostics["time_step_size"] = None if dt_text is None else float(dt_text)
+        except Exception as exc:
+            diagnostics["svfsi_xml_error"] = f"{type(exc).__name__}: {exc}"
+
+    result_files = _discover_result_vtus(simulation_dir)
+    diagnostics["result_file_count"] = len(result_files)
+    if result_files:
+        diagnostics["first_result_vtu"] = _diagnose_result_vtu(
+            result_files[0],
+            pressure_field=pressure_field,
+        )
+        diagnostics["last_result_vtu"] = _diagnose_result_vtu(
+            result_files[-1],
+            pressure_field=pressure_field,
+        )
+    return diagnostics
+
+
+def _validate_mpa_pressure_csv_inputs(
+    *,
+    simulation_dir: Path,
+    centerline_path: Path,
+    pressure_field: str,
+) -> dict[str, object]:
+    if not centerline_path.exists():
+        raise FileNotFoundError(f"centerline file not found for MPA pressure CSV generation: {centerline_path}")
+    if not centerline_path.is_file():
+        raise RuntimeError(
+            f"centerline path is not a regular file for MPA pressure CSV generation: {centerline_path}"
+        )
+
+    centerline = _read_polydata(centerline_path)
+    if centerline.GetNumberOfPoints() <= 0:
+        raise RuntimeError(f"centerline has no points: {centerline_path}")
+    if centerline.GetNumberOfLines() <= 0:
+        raise RuntimeError(f"centerline has no line cells: {centerline_path}")
+
+    graph, incidence = _build_polyline_graph(centerline)
+    if 0 not in graph:
+        raise RuntimeError(
+            f"centerline is missing root point id 0 in its polyline connectivity: {centerline_path}"
+        )
+    bifurcation_id = _first_reachable_bifurcation(graph, root_id=0, line_incidence=incidence)
+    if bifurcation_id is None:
+        raise RuntimeError(
+            "centerline does not contain a reachable bifurcation downstream of root point id 0: "
+            f"{centerline_path}"
+        )
+
+    xml_path = simulation_dir / "svFSIplus.xml"
+    if not xml_path.exists():
+        raise FileNotFoundError(f"svFSIplus.xml not found in simulation directory: {simulation_dir}")
+    try:
+        dt_text = ET.parse(xml_path).getroot().findtext(".//Time_step_size")
+        if dt_text is None:
+            raise RuntimeError(f"Time_step_size missing in {xml_path}")
+        dt = float(dt_text)
+    except ValueError as exc:
+        raise RuntimeError(f"invalid Time_step_size in {xml_path}: {dt_text}") from exc
+    if dt <= 0.0:
+        raise RuntimeError(f"Time_step_size must be positive in {xml_path}: {dt}")
+
+    result_files = _discover_result_vtus(simulation_dir)
+    if not result_files:
+        raise FileNotFoundError(f"no result_*.vtu files found in simulation directory: {simulation_dir}")
+
+    sample_mesh = _load_vtu(result_files[0])
+    point_arrays = _array_names(sample_mesh.GetPointData())
+    if pressure_field not in point_arrays:
+        raise KeyError(
+            f"pressure field '{pressure_field}' not found in sample result {result_files[0]}; "
+            f"available point arrays: {point_arrays}"
+        )
+
+    return {
+        "centerline_point_count": int(centerline.GetNumberOfPoints()),
+        "centerline_line_count": int(centerline.GetNumberOfLines()),
+        "detected_bifurcation_id": int(bifurcation_id),
+        "result_file_count": len(result_files),
+        "sample_result_vtu": str(result_files[0]),
+        "time_step_size": float(dt),
+    }
 
 
 def _is_unexpected_camera_kwarg_error(exc: Exception) -> bool:
@@ -576,12 +897,19 @@ try:
         "svslicer_path": {json.dumps(svslicer_path)},
         "clinical_targets": {clinical_targets_expr},
         "inflow_csv": {inflow_expr},
+        "pressure_field": "Pressure",
         "resistance_map_workers": {json.dumps(resistance_map_workers)},
     }}
     if {camera_offset_expr} is not None:
         postprocess_kwargs["camera_offset_dir"] = {camera_offset_expr}
     if {camera_view_up_expr} is not None:
         postprocess_kwargs["camera_view_up"] = {camera_view_up_expr}
+    pressure_field = str(postprocess_kwargs.get("pressure_field") or "Pressure")
+    _validate_mpa_pressure_csv_inputs(
+        simulation_dir=Path(postprocess_kwargs["simulation_dir"]),
+        centerline_path=Path(postprocess_kwargs["centerline"]),
+        pressure_field=pressure_field,
+    )
     preserved_centerlines = output_dir / "resistance_map" / "intermediate_centerlines"
     original_rmtree = _preserve_intermediate_centerlines(preserved_centerlines)
     try:
@@ -609,6 +937,12 @@ except Exception as exc:
             "message": str(exc),
         }},
         "metadata_json": str(metadata_path) if metadata_path.exists() else None,
+        "pressure_step_diagnostics": _collect_mpa_pressure_failure_diagnostics(
+            simulation_dir=Path(postprocess_kwargs["simulation_dir"]),
+            centerline_path=Path(postprocess_kwargs["centerline"]),
+            pressure_field=pressure_field,
+            metadata_path=metadata_path,
+        ),
     }}
     submission_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     raise
@@ -763,11 +1097,31 @@ def submit_selected_preop_postprocess(
     mem = None
     if cpus_per_task > 1:
         mem = config.defaults.postprocess.resistance_map.selected_preop_mem
+    if transfer_adapter is None or scheduler_adapter is None or remote_exec_adapter is None:
+        default_transfer, default_scheduler, default_remote = _build_default_adapters(
+            cluster=cluster,
+            config=config,
+            run_id=validated_run_id,
+            mode=ExecutionMode.EXECUTE,
+        )
+        transfer_adapter = transfer_adapter or default_transfer
+        remote_exec_adapter = remote_exec_adapter or default_remote
+        if scheduler_adapter is None:
+            scheduler_adapter = _build_postprocess_scheduler_adapter(
+                cluster=cluster,
+                config=config,
+                remote_exec=remote_exec_adapter,
+                run_id=validated_run_id,
+                cpus_per_task=cpus_per_task,
+                mem=mem,
+            )
     fallback_csv = svzerodtrees_paths.get("clinical_targets")
-    centerline = svzerodtrees_paths.get("centerlines")
     inflow_csv = svzerodtrees_paths.get("inflow")
-    if not centerline:
-        raise ConfigError("manifest remote.svzerodtrees_paths.centerlines is required for postprocessing")
+    centerline = _require_remote_centerline_path(
+        manifest,
+        workflow_label="postprocessing",
+        remote_exec_adapter=remote_exec_adapter,
+    )
 
     simulation_dir = str(PurePosixPath(remote_layout["remote_results_dir"]).parent.parent / "preop")
     camera_offset_dir, camera_view_up = _resolve_resistance_map_camera(
@@ -794,25 +1148,6 @@ def submit_selected_preop_postprocess(
         mem=mem,
     )
     local_layout["job_script"].write_text(script_body, encoding="utf-8")
-
-    if transfer_adapter is None or scheduler_adapter is None or remote_exec_adapter is None:
-        default_transfer, default_scheduler, default_remote = _build_default_adapters(
-            cluster=cluster,
-            config=config,
-            run_id=validated_run_id,
-            mode=ExecutionMode.EXECUTE,
-        )
-        transfer_adapter = transfer_adapter or default_transfer
-        remote_exec_adapter = remote_exec_adapter or default_remote
-        if scheduler_adapter is None:
-            scheduler_adapter = _build_postprocess_scheduler_adapter(
-                cluster=cluster,
-                config=config,
-                remote_exec=remote_exec_adapter,
-                run_id=validated_run_id,
-                cpus_per_task=cpus_per_task,
-                mem=mem,
-            )
 
     command_results = [
         transfer_adapter.ensure_remote_dir(remote_layout["remote_root"]),

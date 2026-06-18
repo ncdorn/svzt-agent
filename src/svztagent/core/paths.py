@@ -81,22 +81,17 @@ def ensure_under_remote_root(path: str, root: str) -> bool:
 def validate_remote_write_path(
     path: str,
     runs_root: str,
-    patient_data_root: str | None = None,
 ) -> None:
     if not ensure_under_remote_root(path, runs_root):
         raise PathPolicyError(
             f"remote write path '{path}' must stay under runs_root '{runs_root}'"
         )
-    if patient_data_root and ensure_under_remote_root(path, patient_data_root):
-        raise PathPolicyError(
-            f"remote write path '{path}' cannot target patient_data_root '{patient_data_root}'"
-        )
 
 
-def validate_remote_patient_read_path(path: str, patient_data_root: str) -> None:
-    if not ensure_under_remote_root(path, patient_data_root):
+def validate_remote_patient_read_path(path: str, patient_root: str) -> None:
+    if not ensure_under_remote_root(path, patient_root):
         raise PathPolicyError(
-            f"patient path '{path}' must stay under patient_data_root '{patient_data_root}'"
+            f"patient path '{path}' must stay under patient root '{patient_root}'"
         )
 
 

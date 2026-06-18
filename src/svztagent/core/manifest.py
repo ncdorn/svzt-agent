@@ -1015,7 +1015,6 @@ def create_manifest(
         },
         patient={
             "alias": patient.alias,
-            "remote_path": patient.remote_path,
             "permanent_remote_path": patient.permanent_remote_path,
             "mesh_scale_factor": patient.mesh_scale_factor,
             "patient_assets": patient.patient_assets.model_dump(mode="json")
@@ -1025,7 +1024,6 @@ def create_manifest(
         },
         repos=resolve_repository_locations(config, workspace_root),
         remote={
-            "patient_data_root": cluster.remote_roots.patient_data_root,
             "permanent_data_root": cluster.remote_roots.permanent_data_root,
             "runs_root": cluster.remote_roots.runs_root,
             "remote_run_dir": f"{cluster.remote_roots.runs_root}/{run_id}",

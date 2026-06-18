@@ -26,16 +26,13 @@ def temp_workspace(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def sample_config_files(temp_workspace: Path) -> Path:
-    patient_data_root = temp_workspace / "remote_data" / "active"
     permanent_data_root = temp_workspace / "remote_data" / "permanent"
     runs_root = temp_workspace / "remote_runs"
     patient_alias = "TST-STAN-x"
-    active_patient_path = patient_data_root / patient_alias
     permanent_patient_path = permanent_data_root / patient_alias
     preop_mesh_complete = permanent_patient_path / "preop-mesh-complete"
     mesh_surfaces = preop_mesh_complete / "mesh-surfaces"
 
-    active_patient_path.mkdir(parents=True, exist_ok=True)
     mesh_surfaces.mkdir(parents=True, exist_ok=True)
     runs_root.mkdir(parents=True, exist_ok=True)
     (permanent_patient_path / "clinical_targets.csv").write_text("target,value\n", encoding="utf-8")
@@ -59,7 +56,6 @@ clusters:
       svslicer_path: "/home/users/ndorn/bin/svslicer"
       pvpython_path: "/home/groups/amarsden/ParaView-5.13.3-osmesa-MPI-Linux-Python3.10-x86_64/bin/pvpython"
     remote_roots:
-      patient_data_root: "{patient_data_root.as_posix()}"
       permanent_data_root: "{permanent_data_root.as_posix()}"
       runs_root: "{runs_root.as_posix()}"
 """.strip()
@@ -71,7 +67,6 @@ clusters:
         f"""
 patients:
   - alias: "{patient_alias}"
-    remote_path: "{active_patient_path.as_posix()}"
     permanent_remote_path: "{permanent_patient_path.as_posix()}"
     data_policy: "read_only"
 """.strip()

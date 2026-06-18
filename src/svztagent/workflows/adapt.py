@@ -345,7 +345,6 @@ def _build_adapt_plan(
     validation = assert_valid_execution_plan(
         plan=plan,
         runs_root=cluster.remote_roots.runs_root,
-        patient_data_root=cluster.remote_roots.patient_data_root,
     )
     return plan.model_copy(update={"validation_results": validation})
 
@@ -1263,7 +1262,6 @@ def run_adapt(
         validate_remote_write_path(
             path,
             cluster.remote_roots.runs_root,
-            cluster.remote_roots.patient_data_root,
         )
 
     adaptation_paths = _adaptation_local_paths(

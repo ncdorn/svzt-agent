@@ -348,11 +348,6 @@ def resolve_patient_alias(
             f"Patient alias '{patient_alias}' has data_policy='{patient.data_policy}', expected 'read_only'"
         )
 
-    validate_remote_patient_read_path(
-        patient.remote_path,
-        cluster.remote_roots.patient_data_root,
-    )
-
     if cluster.remote_roots.permanent_data_root is None:
         raise ConfigError(
             "cluster remote_roots.permanent_data_root is required for durable patient asset resolution"
@@ -408,7 +403,6 @@ def resolve_patient_alias(
     return ResolvedPatient(
         cluster_name=cluster.name,
         alias=patient.alias,
-        remote_path=patient.remote_path,
         permanent_remote_path=patient.permanent_remote_path,
         patient_assets=patient_assets,
         bc_type=_resolve_patient_bc_type(config, patient),
@@ -418,7 +412,6 @@ def resolve_patient_alias(
         adaptation=_resolve_patient_adaptation_config(config, patient),
         mesh_scale_factor=_resolve_patient_mesh_scale_factor(config, patient),
         data_policy=patient.data_policy,
-        patient_data_root=cluster.remote_roots.patient_data_root,
         permanent_data_root=cluster.remote_roots.permanent_data_root,
         runs_root=cluster.remote_roots.runs_root,
     )

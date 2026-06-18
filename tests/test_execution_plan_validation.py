@@ -8,7 +8,6 @@ from svztagent.core.plan_validate import assert_valid_execution_plan, validate_e
 
 
 RUNS_ROOT = "/scratch/users/ndorn/svzt_runs"
-PATIENT_DATA_ROOT = "/scratch/users/ndorn/models/PPAS/tof-stent"
 
 
 def _step(
@@ -50,7 +49,7 @@ def test_execution_plan_validation_duplicate_step_ids_fail():
             _step("s01", StepCategory.FINALIZE_MANIFEST),
         ]
     )
-    results = validate_execution_plan(plan, runs_root=RUNS_ROOT, patient_data_root=PATIENT_DATA_ROOT)
+    results = validate_execution_plan(plan, runs_root=RUNS_ROOT)
     assert results.is_valid is False
     assert any(item.code == "duplicate_step_id" for item in results.errors)
 
@@ -63,7 +62,7 @@ def test_execution_plan_validation_duplicate_dependencies_fail():
         ]
     )
     with pytest.raises(PlanValidationError, match="duplicate_dependency"):
-        assert_valid_execution_plan(plan, runs_root=RUNS_ROOT, patient_data_root=PATIENT_DATA_ROOT)
+        assert_valid_execution_plan(plan, runs_root=RUNS_ROOT)
 
 
 def test_execution_plan_validation_missing_dependency_fails():
@@ -74,7 +73,7 @@ def test_execution_plan_validation_missing_dependency_fails():
         ]
     )
     with pytest.raises(PlanValidationError, match="missing_dependency"):
-        assert_valid_execution_plan(plan, runs_root=RUNS_ROOT, patient_data_root=PATIENT_DATA_ROOT)
+        assert_valid_execution_plan(plan, runs_root=RUNS_ROOT)
 
 
 def test_execution_plan_validation_remote_write_outside_runs_root_fails():
@@ -90,23 +89,7 @@ def test_execution_plan_validation_remote_write_outside_runs_root_fails():
         ]
     )
     with pytest.raises(PlanValidationError, match="remote_write_outside_runs_root"):
-        assert_valid_execution_plan(plan, runs_root=RUNS_ROOT, patient_data_root=PATIENT_DATA_ROOT)
-
-
-def test_execution_plan_validation_remote_write_under_patient_root_fails():
-    plan = _base_plan(
-        [
-            _step("s01", StepCategory.RESOLVE_PATHS),
-            _step(
-                "s02",
-                StepCategory.PULL_ARTIFACTS,
-                dependencies=["s01"],
-                remote_write=[f"{PATIENT_DATA_ROOT}/TST-STAN-x/run-123"],
-            ),
-        ]
-    )
-    with pytest.raises(PlanValidationError, match="remote_write_under_patient_data_root"):
-        assert_valid_execution_plan(plan, runs_root=RUNS_ROOT, patient_data_root=PATIENT_DATA_ROOT)
+        assert_valid_execution_plan(plan, runs_root=RUNS_ROOT)
 
 
 def test_execution_plan_validation_missing_terminal_step_fails():
@@ -117,4 +100,4 @@ def test_execution_plan_validation_missing_terminal_step_fails():
         ]
     )
     with pytest.raises(PlanValidationError, match="missing_terminal_step"):
-        assert_valid_execution_plan(plan, runs_root=RUNS_ROOT, patient_data_root=PATIENT_DATA_ROOT)
+        assert_valid_execution_plan(plan, runs_root=RUNS_ROOT)

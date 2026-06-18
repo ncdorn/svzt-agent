@@ -4,7 +4,6 @@
 - Workspace root: `~/svz`
 - Config source: `~/svz/config/{clusters,patients,defaults}.yaml`
 - Local runs root: `~/svz/runs/<run_id>/`
-- Remote active patient root (`patient_data_root`) is read-only.
 - Remote permanent patient root (`permanent_data_root`) is read-only when configured.
 - Remote writes are restricted to configured `runs_root`.
 - Canonical patient asset layout is resolved from `defaults.patient_data_layout`.

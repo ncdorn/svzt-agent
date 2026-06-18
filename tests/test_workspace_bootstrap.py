@@ -22,12 +22,10 @@ def _configure_bootstrapped_workspace(workspace: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
 
     patient_alias = "TST-STAN-x"
-    active_patient_path = workspace / "remote_data" / "active" / patient_alias
     permanent_patient_path = workspace / "remote_data" / "permanent" / patient_alias
     (permanent_patient_path / "preop-mesh-complete" / "mesh-surfaces").mkdir(
         parents=True, exist_ok=True
     )
-    active_patient_path.mkdir(parents=True, exist_ok=True)
     (permanent_patient_path / "clinical_targets.csv").write_text(
         "target,value\n",
         encoding="utf-8",
@@ -52,7 +50,6 @@ clusters:
       svzerodsolver_build_dir: "/home/users/ndorn/svZeroDSolver-build"
       svslicer_path: "/home/users/ndorn/bin/svslicer"
     remote_roots:
-      patient_data_root: "{(workspace / 'remote_data' / 'active').as_posix()}"
       permanent_data_root: "{(workspace / 'remote_data' / 'permanent').as_posix()}"
       runs_root: "{(workspace / 'remote_runs').as_posix()}"
 """.strip()
@@ -63,7 +60,6 @@ clusters:
         f"""
 patients:
   - alias: "{patient_alias}"
-    remote_path: "{active_patient_path.as_posix()}"
     permanent_remote_path: "{permanent_patient_path.as_posix()}"
     data_policy: "read_only"
 """.strip()

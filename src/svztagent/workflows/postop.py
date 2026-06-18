@@ -48,6 +48,7 @@ from svztagent.workflows.postprocess import (
     _load_stage_target_payload,
     _parse_positive_int,
     _python_bootstrap,
+    _require_remote_centerline_path,
     _render_postprocess_script,
     _render_postprocess_slurm_header,
     _resolve_resistance_map_camera,
@@ -539,7 +540,6 @@ def _build_postop_plan(
     validation = assert_valid_execution_plan(
         plan=plan,
         runs_root=cluster.remote_roots.runs_root,
-        patient_data_root=cluster.remote_roots.patient_data_root,
     )
     return plan.model_copy(update={"validation_results": validation})
 
@@ -1293,7 +1293,6 @@ def run_postop(
         validate_remote_write_path(
             path,
             cluster.remote_roots.runs_root,
-            cluster.remote_roots.patient_data_root,
         )
 
     postop_paths = _postop_local_paths(local_paths, selected.iteration)
@@ -1315,6 +1314,23 @@ def run_postop(
         yaml.safe_dump(selected_payload, sort_keys=True),
         encoding="utf-8",
     )
+    if transfer_adapter is None or scheduler_adapter is None or remote_exec_adapter is None:
+        default_transfer, default_scheduler, default_remote = _build_default_adapters(
+            cluster=cluster,
+            config=config,
+            run_id=validated_run_id,
+            mode=mode,
+        )
+        transfer_adapter = transfer_adapter or default_transfer
+        scheduler_adapter = scheduler_adapter or default_scheduler
+        remote_exec_adapter = remote_exec_adapter or default_remote
+
+    _require_remote_centerline_path(
+        manifest,
+        workflow_label="postop postprocessing",
+        remote_exec_adapter=remote_exec_adapter,
+    )
+
     prepared_paraview_job = None
     resolved_paraview_skip_reason = _paraview_skip_reason(
         config=config,
@@ -1338,17 +1354,6 @@ def run_postop(
         paraview_skip_reason=resolved_paraview_skip_reason,
     )
     postop_paths["job_script"].write_text(script_body, encoding="utf-8")
-
-    if transfer_adapter is None or scheduler_adapter is None or remote_exec_adapter is None:
-        default_transfer, default_scheduler, default_remote = _build_default_adapters(
-            cluster=cluster,
-            config=config,
-            run_id=validated_run_id,
-            mode=mode,
-        )
-        transfer_adapter = transfer_adapter or default_transfer
-        scheduler_adapter = scheduler_adapter or default_scheduler
-        remote_exec_adapter = remote_exec_adapter or default_remote
 
     if isinstance(scheduler_adapter, SlurmSchedulerAdapter):
         scheduler_adapter = SlurmSchedulerAdapter(

@@ -248,7 +248,6 @@ clusters:
       svfsiplus_path: "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
       svzerodsolver_build_dir: "/home/users/ndorn/svZeroDSolver-build"
     remote_roots:
-      patient_data_root: "/scratch/users/ndorn/models/PPAS/tof-stent"
       permanent_data_root: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent"
       runs_root: "/scratch/users/ndorn/svzt_runs"
 """.strip()
@@ -259,7 +258,6 @@ clusters:
         """
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "/scratch/users/ndorn/models/PPAS/tof-stent/TST-STAN-x"
     permanent_remote_path: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent/TST-STAN-x"
     data_policy: "read_only"
     tuning:
@@ -445,7 +443,6 @@ clusters:
       svfsiplus_path: "/opt/svfsiplus/bin/svmultiphysics"
       svzerodsolver_build_dir: "/opt/svZeroDSolver-build"
     remote_roots:
-      patient_data_root: "{(sample_config_files / 'remote_data' / 'active').as_posix()}"
       permanent_data_root: "{(sample_config_files / 'remote_data' / 'permanent').as_posix()}"
       runs_root: "{(sample_config_files / 'remote_runs').as_posix()}"
 """.strip()
@@ -477,7 +474,6 @@ def test_run_tune_dry_run_renders_patient_threed_override(sample_config_files):
         f"""
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "{(sample_config_files / 'remote_data' / 'active' / 'TST-STAN-x').as_posix()}"
     permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
     data_policy: "read_only"
     tuning:
@@ -514,7 +510,6 @@ def test_run_tune_dry_run_renders_generate_prestress_from_seed_mean(sample_confi
         f"""
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "{(sample_config_files / 'remote_data' / 'active' / 'TST-STAN-x').as_posix()}"
     permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
     data_policy: "read_only"
     tuning:
@@ -572,7 +567,6 @@ def test_run_tune_dry_run_preserves_explicit_prestress_path(sample_config_files)
         f"""
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "{(sample_config_files / 'remote_data' / 'active' / 'TST-STAN-x').as_posix()}"
     permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
     data_policy: "read_only"
     tuning:
@@ -604,7 +598,6 @@ def test_run_tune_dry_run_renders_patient_impedance_override(sample_config_files
         f"""
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "{(sample_config_files / 'remote_data' / 'active' / 'TST-STAN-x').as_posix()}"
     permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
     data_policy: "read_only"
     tuning:
@@ -727,7 +720,6 @@ def test_run_tune_dry_run_renders_patient_mesh_scale_override(sample_config_file
         f"""
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "{(sample_config_files / 'remote_data' / 'active' / 'TST-STAN-x').as_posix()}"
     permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
     data_policy: "read_only"
     mesh_scale_factor: 2.5

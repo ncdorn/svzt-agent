@@ -170,5 +170,5 @@ Gate behavior remains unchanged: it still requires `results/mpa_pressure_vs_time
 ## Why This Scales
 
 - One global layout definition in defaults; no per-patient filename drift.
-- Per-patient entries only provide roots (`remote_path`, `permanent_remote_path`).
+- Per-patient entries only provide the durable patient root (`permanent_remote_path`).
 - Run manifests capture resolved asset paths for reproducibility and audits.

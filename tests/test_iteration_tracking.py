@@ -356,7 +356,6 @@ def test_full_pa_advance_switches_to_reduced_rri_after_iteration1(sample_config_
         f"""
 patients:
   - alias: "{patient_alias}"
-    remote_path: "{active_patient_path.as_posix()}"
     permanent_remote_path: "{permanent_patient_path.as_posix()}"
     data_policy: "read_only"
     tuning:

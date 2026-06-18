@@ -1,10 +1,10 @@
 # HPC Safety Model
 
 ## Path safety
-- `patient_data_root` is read-only source-of-truth data.
+- `permanent_data_root` is read-only source-of-truth patient data.
 - `runs_root` is the only allowed remote write root for agent-generated artifacts.
 - Remote write paths are normalized and validated before command execution.
-- Any write path outside `runs_root` or under `patient_data_root` is rejected.
+- Any write path outside `runs_root` is rejected.
 
 ## Command safety
 - Remote commands are validated against an allowlist (`mkdir`, `test`, `sbatch`, `squeue`, `sacct`, `scancel`, `bash`).

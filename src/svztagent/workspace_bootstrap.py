@@ -31,14 +31,12 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
       svslicer_path: "/home/users/ndorn/svSlicer/Release-sherlock/svslicer" # absolute svSlicer executable path on cluster for resistance-map postprocessing
       pvpython_path: "/home/groups/amarsden/ParaView-5.13.3-osmesa-MPI-Linux-Python3.10-x86_64/bin/pvpython" # OSMesa offscreen ParaView Python for 3D CFD visualization
     remote_roots:
-      patient_data_root: "/scratch/users/ndorn/models/PPAS/tof-stent" # read-only active data for simulation
       permanent_data_root: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent" # read-only long-term storage
       runs_root: "/scratch/users/ndorn/svzt_runs" # write allowed
     notes: "No secrets. Replace placeholders per environment."
 """,
     "config/patients.yaml": """patients:
   - alias: "TST-STAN-1"
-    remote_path: "/scratch/users/ndorn/models/PPAS/tof-stent/TST-STAN-1"
     permanent_remote_path: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent/TST-STAN-1"
     data_policy: "read_only"
     mesh_scale_factor: 1.147
@@ -69,7 +67,6 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
           [0.5705942973837406, -0.7293857273084497, 0.3773839008117323]
     notes: "Active simulation input directory on scratch"
   - alias: "TST-STAN-2"
-    remote_path: "/scratch/users/ndorn/models/PPAS/tof-stent/TST-STAN-2"
     permanent_remote_path: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent/TST-STAN-2"
     data_policy: "read_only"
     mesh_scale_factor: 1.0
@@ -92,7 +89,6 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
           [0.2017198545601613, -0.7336369592312861, 0.6489113285542947]
     notes: "Active simulation input directory on scratch"
   - alias: "TST-STAN-3"
-    remote_path: "/scratch/users/ndorn/models/PPAS/tof-stent/TST-STAN-3"
     permanent_remote_path: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent/TST-STAN-3"
     data_policy: "read_only"
     mesh_scale_factor: 1.0
@@ -115,7 +111,6 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
           [0.18205962045423338, -0.3850361222623854, -0.9047659803248606]
     notes: "Active simulation input directory on scratch"
   - alias: "TST-STAN-5"
-    remote_path: "/scratch/users/ndorn/models/PPAS/tof-stent/TST-STAN-5"
     permanent_remote_path: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent/TST-STAN-5"
     data_policy: "read_only"
     mesh_scale_factor: 1.0
@@ -138,7 +133,6 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
         camera_view_up:
           [0.2901210689043006, -0.8152983227207212, 0.5011171622950116]
   - alias: "TST-STAN-9"
-    remote_path: "/scratch/users/ndorn/models/PPAS/tof-stent/TST-STAN-9"
     permanent_remote_path: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent/TST-STAN-9"
     data_policy: "read_only"
     mesh_scale_factor: 1.425
@@ -324,7 +318,7 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
   source:
     type: "remote_csv"
     pulled_on: "2026-03-05"
-    patient_data_root: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent"
+    permanent_data_root: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent"
   units:
     pressure: "mmHg"
     flow: "mL/s"

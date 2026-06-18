@@ -26,7 +26,6 @@ class RsyncFileTransferAdapter(FileTransferAdapter):
         user: str,
         host: str,
         runs_root: str,
-        patient_data_root: str,
         remote_exec: SshRemoteExecAdapter,
         executor: CommandExecutor,
         permanent_data_root: str | None = None,
@@ -36,7 +35,6 @@ class RsyncFileTransferAdapter(FileTransferAdapter):
         self.user = user
         self.host = host
         self.runs_root = runs_root
-        self.patient_data_root = patient_data_root
         self.permanent_data_root = permanent_data_root
         self.remote_exec = remote_exec
         self.executor = executor
@@ -61,13 +59,12 @@ class RsyncFileTransferAdapter(FileTransferAdapter):
         validate_remote_write_path(
             path=normalized,
             runs_root=self.runs_root,
-            patient_data_root=self.patient_data_root,
         )
         return normalized
 
     def _validate_remote_read_path(self, remote_path: str) -> str:
         normalized = str(PurePosixPath(remote_path))
-        allowed_roots = [self.runs_root, self.patient_data_root]
+        allowed_roots = [self.runs_root]
         if self.permanent_data_root:
             allowed_roots.append(self.permanent_data_root)
 

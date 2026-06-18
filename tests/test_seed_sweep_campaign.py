@@ -29,7 +29,6 @@ def _add_campaign_patients(workspace: Path) -> None:
     for alias in ("TST-STAN-1", "TST-STAN-5"):
         entry = dict(template)
         entry["alias"] = alias
-        entry["remote_path"] = str(Path(template["remote_path"]).parent / alias)
         entry["permanent_remote_path"] = str(
             Path(template["permanent_remote_path"]).parent / alias
         )
@@ -45,7 +44,6 @@ def _add_campaign_patients(workspace: Path) -> None:
         (permanent / "simplified_nonlinear_zerod.json").write_text(
             "{\"seed\": true}", encoding="utf-8"
         )
-        Path(entry["remote_path"]).mkdir(parents=True, exist_ok=True)
 
     patients_path.write_text(
         yaml.safe_dump({"patients": patients}, sort_keys=False),

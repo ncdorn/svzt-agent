@@ -17,7 +17,6 @@
 - duplicate dependencies within a step fail
 - dependency references to missing step IDs fail
 - remote write paths must remain under `runs_root`
-- remote write paths may not target `patient_data_root`
 - plan must include at least one terminal step: `pull_artifacts` or `finalize_manifest`
 
 Validation failures raise `PlanValidationError` with explicit error codes.

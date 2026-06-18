@@ -59,6 +59,61 @@ def _write_centerline_frame(
     assert writer.Write() == 1
 
 
+def _write_centerline_tree(path: Path) -> None:
+    points = vtk.vtkPoints()
+    points.InsertNextPoint(0.0, 0.0, 0.0)
+    points.InsertNextPoint(1.0, 0.0, 0.0)
+    points.InsertNextPoint(2.0, 0.0, 0.0)
+    points.InsertNextPoint(1.0, 1.0, 0.0)
+
+    trunk = vtk.vtkPolyLine()
+    trunk.GetPointIds().SetNumberOfIds(3)
+    trunk.GetPointIds().SetId(0, 0)
+    trunk.GetPointIds().SetId(1, 1)
+    trunk.GetPointIds().SetId(2, 2)
+
+    branch = vtk.vtkPolyLine()
+    branch.GetPointIds().SetNumberOfIds(2)
+    branch.GetPointIds().SetId(0, 1)
+    branch.GetPointIds().SetId(1, 3)
+
+    lines = vtk.vtkCellArray()
+    lines.InsertNextCell(trunk)
+    lines.InsertNextCell(branch)
+
+    poly = vtk.vtkPolyData()
+    poly.SetPoints(points)
+    poly.SetLines(lines)
+
+    writer = vtk.vtkXMLPolyDataWriter()
+    writer.SetFileName(str(path))
+    writer.SetInputData(poly)
+    assert writer.Write() == 1
+
+
+def _write_result_vtu(path: Path, *, point_array_name: str) -> None:
+    points = vtk.vtkPoints()
+    points.InsertNextPoint(0.0, 0.0, 0.0)
+
+    grid = vtk.vtkUnstructuredGrid()
+    grid.SetPoints(points)
+
+    vertex = vtk.vtkVertex()
+    vertex.GetPointIds().SetId(0, 0)
+    grid.InsertNextCell(vertex.GetCellType(), vertex.GetPointIds())
+
+    values = vtk.vtkDoubleArray()
+    values.SetName(point_array_name)
+    values.SetNumberOfValues(1)
+    values.SetValue(0, 1.0)
+    grid.GetPointData().AddArray(values)
+
+    writer = vtk.vtkXMLUnstructuredGridWriter()
+    writer.SetFileName(str(path))
+    writer.SetInputData(grid)
+    assert writer.Write() == 1
+
+
 def _load_embedded_writer_namespace() -> dict[str, object]:
     namespace: dict[str, object] = {"Path": Path, "json": json}
     exec(_stacked_centerline_timeseries_python_source(), namespace)
@@ -139,3 +194,25 @@ def test_stacked_centerline_writer_uses_one_geometry_with_timestep_arrays(tmp_pa
         "pressure_1",
         "velocity_1",
     ]
+
+
+def test_pressure_input_validation_reports_available_result_arrays(tmp_path: Path) -> None:
+    centerline = tmp_path / "centerlines.vtp"
+    _write_centerline_tree(centerline)
+
+    simulation_dir = tmp_path / "simulation"
+    simulation_dir.mkdir()
+    (simulation_dir / "svFSIplus.xml").write_text(
+        "<root><Time_step_size>0.1</Time_step_size></root>\n",
+        encoding="utf-8",
+    )
+    _write_result_vtu(simulation_dir / "result_0001.vtu", point_array_name="Velocity")
+
+    namespace = _load_embedded_writer_namespace()
+
+    with pytest.raises(KeyError, match="available point arrays: \\['Velocity'\\]"):
+        namespace["_validate_mpa_pressure_csv_inputs"](
+            simulation_dir=simulation_dir,
+            centerline_path=centerline,
+            pressure_field="Pressure",
+        )

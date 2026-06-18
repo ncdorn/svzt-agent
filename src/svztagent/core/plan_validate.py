@@ -32,7 +32,6 @@ def _error(
 def validate_execution_plan(
     plan: ExecutionPlan,
     runs_root: str,
-    patient_data_root: str,
 ) -> PlanValidationResults:
     errors: list[PlanValidationMessage] = []
     warnings: list[PlanValidationMessage] = []
@@ -78,14 +77,6 @@ def validate_execution_plan(
                         step_id=step.step_id,
                     )
                 )
-            if ensure_under_remote_root(remote_write_path, patient_data_root):
-                errors.append(
-                    _error(
-                        "remote_write_under_patient_data_root",
-                        f"remote write path '{remote_write_path}' cannot target patient_data_root '{patient_data_root}'",
-                        step_id=step.step_id,
-                    )
-                )
 
     terminal_categories = {StepCategory.PULL_ARTIFACTS, StepCategory.FINALIZE_MANIFEST}
     if not any(step.category in terminal_categories for step in plan.steps):
@@ -106,12 +97,10 @@ def validate_execution_plan(
 def assert_valid_execution_plan(
     plan: ExecutionPlan,
     runs_root: str,
-    patient_data_root: str,
 ) -> PlanValidationResults:
     results = validate_execution_plan(
         plan=plan,
         runs_root=runs_root,
-        patient_data_root=patient_data_root,
     )
     if results.is_valid:
         return results

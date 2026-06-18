@@ -7,7 +7,7 @@ This document is the practical start-to-finish guide for running a pulmonary BC 
 Before starting:
 
 - The workspace YAML is configured with your cluster, patient alias, and defaults (see [`docs/PATIENT_DATA_CONTRACT.md`](./PATIENT_DATA_CONTRACT.md)).
-- Patient data is present on Sherlock at the configured `remote_path`: `mesh-complete/`, `centerlines.vtp`, `inflow.csv`, `clinical_targets.csv`.
+- Patient data is present on Sherlock under the configured `permanent_remote_path`: `mesh-complete/`, `centerlines.vtp`, `inflow.csv`, `clinical_targets.csv`.
 - `svzt` is installed and either `SVZ_WORKSPACE_ROOT` is set or you pass `--workspace-root` to every command.
 
 ---

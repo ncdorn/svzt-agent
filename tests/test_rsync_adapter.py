@@ -20,7 +20,6 @@ def _build_adapter() -> RsyncFileTransferAdapter:
         user="ndorn",
         host="sherlock.stanford.edu",
         runs_root="/scratch/users/ndorn/svzt_runs",
-        patient_data_root="/scratch/users/ndorn/models/PPAS/tof-stent",
         permanent_data_root="/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent",
         remote_exec=remote,
         executor=executor,
@@ -66,14 +65,13 @@ def test_rsync_sync_pull_command_construction():
     assert result.argv[-1] == "/tmp/pulled/"
 
 
-def test_rsync_pull_allows_patient_data_read_path():
+def test_rsync_pull_rejects_non_durable_patient_data_read_path():
     adapter = _build_adapter()
-    result = adapter.pull(
-        remote_path="/scratch/users/ndorn/models/PPAS/tof-stent/TST-STAN-x/simplified_nonlinear_zerod.json",
-        local_path="/tmp/pulled",
-    )
-    assert result.argv[0] == "rsync"
-    assert result.argv[-1] == "/tmp/pulled/"
+    with pytest.raises(PathPolicyError):
+        adapter.pull(
+            remote_path="/scratch/users/ndorn/models/PPAS/tof-stent/TST-STAN-x/simplified_nonlinear_zerod.json",
+            local_path="/tmp/pulled",
+        )
 
 
 def test_rsync_pull_allows_permanent_data_read_path():

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class SchedulerConfig(BaseModel):
@@ -13,11 +13,12 @@ class SchedulerConfig(BaseModel):
 
 
 class RemoteRoots(BaseModel):
-    patient_data_root: str
+    model_config = ConfigDict(extra="forbid")
+
     permanent_data_root: str | None = None
     runs_root: str
 
-    @field_validator("patient_data_root", "permanent_data_root", "runs_root")
+    @field_validator("permanent_data_root", "runs_root")
     @classmethod
     def _must_be_absolute(cls, value: str | None) -> str | None:
         if value is None:
@@ -100,8 +101,9 @@ class PatientPostprocessOverrides(BaseModel):
 
 
 class PatientConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     alias: str
-    remote_path: str
     permanent_remote_path: str | None = None
     data_policy: Literal["read_only", "mutable"] = "read_only"
     mesh_scale_factor: float | None = None
@@ -110,7 +112,7 @@ class PatientConfig(BaseModel):
     postprocess: PatientPostprocessOverrides | None = None
     notes: str | None = None
 
-    @field_validator("remote_path", "permanent_remote_path")
+    @field_validator("permanent_remote_path")
     @classmethod
     def _patient_path_absolute(cls, value: str | None) -> str | None:
         if value is None:
@@ -895,7 +897,6 @@ class PatientAssetPaths(BaseModel):
 class ResolvedPatient(BaseModel):
     cluster_name: str
     alias: str
-    remote_path: str
     permanent_remote_path: str | None = None
     patient_assets: PatientAssetPaths | None = None
     bc_type: Literal["impedance", "rcr"] = "impedance"
@@ -905,6 +906,5 @@ class ResolvedPatient(BaseModel):
     adaptation: AdaptationDefaults
     mesh_scale_factor: float
     data_policy: str
-    patient_data_root: str
     permanent_data_root: str | None = None
     runs_root: str

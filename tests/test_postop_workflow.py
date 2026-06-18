@@ -6,7 +6,7 @@ import shutil
 
 import pytest
 
-from svztagent.core.errors import ConfigError
+from svztagent.core.errors import AdapterExecutionError, ConfigError
 from svztagent.core.manifest import (
     mark_iteration_decision,
     mark_iteration_submitted,
@@ -18,6 +18,18 @@ from svztagent.hpc.interfaces import CommandResult, ExecutionMode, SubmitResult
 from svztagent.workflows.postprocess import _load_stage_target_payload
 from svztagent.workflows.postop import run_postop, select_converged_preop_iteration
 from svztagent.workflows.tune_trees import init_run_workspace
+
+
+class MissingCenterlineRemoteExecAdapter(FakeRemoteExecAdapter):
+    def run(self, command: list[str], cwd: str | None = None) -> CommandResult:
+        if command[:2] == ["test", "-f"]:
+            raise AdapterExecutionError(
+                argv=list(command),
+                returncode=1,
+                stdout="",
+                stderr="",
+            )
+        return super().run(command, cwd=cwd)
 
 
 def _switch_to_sibling_repo_layout(workspace: Path) -> dict[str, Path]:
@@ -261,6 +273,8 @@ def test_preop_select_submits_selected_preop_postprocess(sample_config_files):
     assert "centerline_timeseries_last_cycle_metadata.json" in script_text
     assert "_preserve_intermediate_centerlines" in script_text
     assert "_cleanup_intermediate_centerlines" in script_text
+    assert "_validate_mpa_pressure_csv_inputs(" in script_text
+    assert "pressure_step_diagnostics" in script_text
 
 
 def test_preop_select_skips_duplicate_paraview_submission(sample_config_files):
@@ -448,6 +462,37 @@ def test_preop_select_fails_without_completed_preop_evidence(sample_config_files
         )
 
 
+def test_preop_select_fails_fast_when_centerline_file_is_missing(sample_config_files):
+    _enable_postop_mesh(sample_config_files)
+    paths, _ctx = init_run_workspace(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-preop-missing-centerline",
+    )
+    manifest = read_manifest(paths.manifest)
+    manifest = mark_iteration_submitted(
+        manifest,
+        iteration=2,
+        tune_job_id="990002",
+        local_dir=str(paths.run_dir / "iterations" / "iter-02"),
+        remote_dir="/scratch/users/ndorn/svzt_runs/run-preop-missing-centerline/iterations/iter-02",
+        job_script_path="/scratch/users/ndorn/svzt_runs/run-preop-missing-centerline/iterations/iter-02/run_tune_iter.sh",
+    )
+    write_manifest(manifest, paths.manifest)
+    _write_completed_iteration_artifacts(paths, iteration=2, decision="converged")
+
+    with pytest.raises(ConfigError, match="centerline path does not exist or is not a regular file"):
+        select_converged_preop_iteration(
+            workspace_root=sample_config_files,
+            run_id="run-preop-missing-centerline",
+            iteration=2,
+            transfer_adapter=FakeFileTransferAdapter(),
+            scheduler_adapter=FakeSchedulerAdapter(),
+            remote_exec_adapter=MissingCenterlineRemoteExecAdapter(),
+        )
+
+
 def test_run_postop_fails_without_converged_preop_iteration(sample_config_files):
     _enable_postop_mesh(sample_config_files)
     init_run_workspace(
@@ -528,6 +573,8 @@ def test_run_postop_dry_run_writes_plan_without_manifest_submission(sample_confi
     assert "paraview_viz_job_id" in script_text
     assert "_write_stacked_centerline_timeseries(" in script_text
     assert "centerline_timeseries_last_cycle_vtp" in script_text
+    assert "_validate_mpa_pressure_csv_inputs(" in script_text
+    assert "pressure_step_diagnostics" in script_text
 
     manifest = read_manifest(paths.manifest)
     assert manifest.postop_run is None
@@ -600,6 +647,25 @@ def test_run_postop_execute_first_generates_plan_and_records_job(sample_config_f
     assert "ParaView visualization job submitted" in script_text
     assert "_write_stacked_centerline_timeseries(" in script_text
     assert "centerline_timeseries_last_cycle_metadata.json" in script_text
+    assert "_validate_mpa_pressure_csv_inputs(" in script_text
+    assert "pressure_step_diagnostics" in script_text
+
+
+def test_run_postop_fails_fast_for_invalid_centerline_path(sample_config_files):
+    paths = _prepare_selected_run(sample_config_files, run_id="run-postop-invalid-centerline")
+    manifest = read_manifest(paths.manifest)
+    manifest.remote["svzerodtrees_paths"]["centerlines"] = "relative/centerlines.vtp"
+    write_manifest(manifest, paths.manifest)
+
+    with pytest.raises(ConfigError, match="centerline path must be an absolute patient-data path"):
+        run_postop(
+            workspace_root=sample_config_files,
+            run_id="run-postop-invalid-centerline",
+            mode=ExecutionMode.DRY_RUN,
+            transfer_adapter=FakeFileTransferAdapter(),
+            scheduler_adapter=FakeSchedulerAdapter(),
+            remote_exec_adapter=FakeRemoteExecAdapter(),
+        )
 
 
 def test_run_postop_refreshes_stale_selected_tuned_config_from_local_decision(sample_config_files):

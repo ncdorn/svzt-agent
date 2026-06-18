@@ -968,7 +968,7 @@ def plan_tune_trees(
         remote_results_dir=remote_results_dir,
         remote_logs_dir=remote_logs_dir,
         remote_script_path=remote_script_path,
-        patient_path=patient.remote_path,
+        patient_path=str(patient.permanent_remote_path),
         local_paths=local_paths,
         iteration=iteration,
         local_iteration_inputs_dir=local_iteration_paths["staged_inputs"],
@@ -1000,7 +1000,6 @@ def plan_tune_trees(
     validation_results = assert_valid_execution_plan(
         plan=plan,
         runs_root=cluster.remote_roots.runs_root,
-        patient_data_root=cluster.remote_roots.patient_data_root,
     )
     plan = plan.model_copy(update={"validation_results": validation_results})
 
@@ -1063,7 +1062,6 @@ def _load_or_generate_valid_plan(
     assert_valid_execution_plan(
         plan=plan,
         runs_root=cluster.remote_roots.runs_root,
-        patient_data_root=cluster.remote_roots.patient_data_root,
     )
     return plan
 
@@ -1107,7 +1105,6 @@ def _render_tune_job_script(
     remote_inputs_dir: str,
     remote_results_dir: str,
     remote_logs_dir: str,
-    remote_patient_path: str,
     remote_clinical_targets_path: str | None,
     remote_centerline_path: str | None,
     remote_inflow_path: str | None,
@@ -1147,7 +1144,6 @@ def _render_tune_job_script(
         "{{REMOTE_INPUTS_DIR}}": remote_inputs_dir,
         "{{REMOTE_RESULTS_DIR}}": remote_results_dir,
         "{{REMOTE_LOGS_DIR}}": remote_logs_dir,
-        "{{REMOTE_PATIENT_PATH}}": remote_patient_path,
         "{{REMOTE_CLINICAL_TARGETS_PATH}}": remote_clinical_targets_path or "",
         "{{REMOTE_CENTERLINE_PATH}}": remote_centerline_path or "",
         "{{REMOTE_INFLOW_PATH}}": remote_inflow_path or "",
@@ -1370,7 +1366,6 @@ def _build_default_adapters(
         user=cluster.user,
         host=cluster.host,
         runs_root=cluster.remote_roots.runs_root,
-        patient_data_root=cluster.remote_roots.patient_data_root,
         permanent_data_root=cluster.remote_roots.permanent_data_root,
         remote_exec=remote,
         executor=executor,
@@ -1447,17 +1442,14 @@ def run_tune_trees(
     validate_remote_write_path(
         remote_run_dir,
         cluster.remote_roots.runs_root,
-        cluster.remote_roots.patient_data_root,
     )
     validate_remote_write_path(
         remote_iter_dir,
         cluster.remote_roots.runs_root,
-        cluster.remote_roots.patient_data_root,
     )
     validate_remote_write_path(
         remote_job_script_path,
         cluster.remote_roots.runs_root,
-        cluster.remote_roots.patient_data_root,
     )
 
     _emit_progress(progress_callback, "[svzt] Preparing transfer and scheduler adapters")
@@ -1530,7 +1522,6 @@ def run_tune_trees(
         remote_inputs_dir=remote_inputs_dir,
         remote_results_dir=remote_results_dir,
         remote_logs_dir=remote_logs_dir,
-        remote_patient_path=patient.remote_path,
         remote_clinical_targets_path=patient.patient_assets.clinical_targets
         if patient.patient_assets
         else None,

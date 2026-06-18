@@ -11,7 +11,6 @@ from svztagent.core.errors import ConfigError
 def test_resolve_patient_alias_success(sample_config_files):
     config = load_workspace_config(sample_config_files)
     patient = resolve_patient_alias(config, "sherlock", "TST-STAN-x")
-    assert patient.remote_path.endswith("/TST-STAN-x")
     assert patient.permanent_remote_path is not None
     assert patient.permanent_remote_path.endswith("/TST-STAN-x")
     assert patient.patient_assets is not None
@@ -54,7 +53,6 @@ def test_iteration1_seed_absolute_override_is_preserved(sample_config_files):
         f"""
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "/tmp/active/TST-STAN-x"
     permanent_remote_path: "/tmp/permanent/TST-STAN-x"
     data_policy: "read_only"
     tuning:
@@ -76,7 +74,6 @@ clusters:
     executables:
       svfsiplus_path: "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
     remote_roots:
-      patient_data_root: "/tmp/active"
       permanent_data_root: "/tmp/permanent"
       runs_root: "/tmp/runs"
 """.strip()
@@ -96,7 +93,6 @@ def test_patient_threed_override_merges_with_defaults(sample_config_files):
         f"""
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "{(sample_config_files / 'remote_data' / 'active' / 'TST-STAN-x').as_posix()}"
     permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
     data_policy: "read_only"
     tuning:
@@ -127,7 +123,6 @@ def test_patient_impedance_override_merges_with_defaults(sample_config_files):
         f"""
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "{(sample_config_files / 'remote_data' / 'active' / 'TST-STAN-x').as_posix()}"
     permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
     data_policy: "read_only"
     tuning:
@@ -151,7 +146,6 @@ def test_patient_impedance_tune_space_override_replaces_defaults(sample_config_f
         f"""
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "{(sample_config_files / 'remote_data' / 'active' / 'TST-STAN-x').as_posix()}"
     permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
     data_policy: "read_only"
     tuning:
@@ -199,7 +193,6 @@ defaults:
         f"""
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "{(sample_config_files / 'remote_data' / 'active' / 'TST-STAN-x').as_posix()}"
     permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
     data_policy: "read_only"
     tuning:
@@ -224,7 +217,6 @@ def test_patient_mesh_scale_override_wins_over_default(sample_config_files):
         f"""
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "{(sample_config_files / 'remote_data' / 'active' / 'TST-STAN-x').as_posix()}"
     permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
     data_policy: "read_only"
     mesh_scale_factor: 2.2
@@ -300,7 +292,6 @@ clusters:
     executables:
       svfsiplus_path: "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
     remote_roots:
-      patient_data_root: "/scratch/users/ndorn/models/PPAS/tof-stent"
       runs_root: "/scratch/users/ndorn/svzt_runs"
 """.strip()
         + "\n",
@@ -310,7 +301,6 @@ clusters:
         """
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "/scratch/users/ndorn/models/PPAS/tof-stent/TST-STAN-x"
     permanent_remote_path: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent/TST-STAN-x"
     data_policy: "read_only"
 """.strip()
@@ -355,7 +345,6 @@ clusters:
     executables:
       svfsiplus_path: "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
     remote_roots:
-      patient_data_root: "/scratch/users/ndorn/models/PPAS/tof-stent"
       permanent_data_root: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent"
       runs_root: "/scratch/users/ndorn/svzt_runs"
 """.strip()
@@ -366,7 +355,6 @@ clusters:
         """
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "/scratch/users/ndorn/models/PPAS/tof-stent/TST-STAN-x"
     data_policy: "read_only"
 """.strip()
         + "\n",

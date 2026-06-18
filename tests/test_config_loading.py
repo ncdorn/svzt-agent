@@ -57,7 +57,6 @@ def test_load_workspace_config_supports_patient_seed_override(sample_config_file
         """
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "/tmp/active/TST-STAN-x"
     permanent_remote_path: "/tmp/permanent/TST-STAN-x"
     data_policy: "read_only"
     tuning:
@@ -81,7 +80,6 @@ def test_load_workspace_config_supports_patient_threed_override(sample_config_fi
         """
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "/tmp/active/TST-STAN-x"
     permanent_remote_path: "/tmp/permanent/TST-STAN-x"
     data_policy: "read_only"
     tuning:
@@ -147,7 +145,6 @@ defaults:
         f"""
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "{active_patient_path.as_posix()}"
     permanent_remote_path: "{permanent_patient_path.as_posix()}"
     data_policy: "read_only"
     tuning:
@@ -171,7 +168,6 @@ def test_load_workspace_config_preserves_generate_prestress_mode(sample_config_f
         """
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "/tmp/active/TST-STAN-x"
     permanent_remote_path: "/tmp/permanent/TST-STAN-x"
     data_policy: "read_only"
     tuning:
@@ -194,7 +190,6 @@ def test_load_workspace_config_supports_patient_tissue_support_override(sample_c
         """
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "/tmp/active/TST-STAN-x"
     permanent_remote_path: "/tmp/permanent/TST-STAN-x"
     data_policy: "read_only"
     tuning:
@@ -238,7 +233,6 @@ def test_load_workspace_config_supports_patient_impedance_override(sample_config
         """
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "/tmp/active/TST-STAN-x"
     permanent_remote_path: "/tmp/permanent/TST-STAN-x"
     data_policy: "read_only"
     tuning:
@@ -280,7 +274,6 @@ defaults:
         """
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "/tmp/active/TST-STAN-x"
     permanent_remote_path: "/tmp/permanent/TST-STAN-x"
     data_policy: "read_only"
     tuning:
@@ -354,7 +347,6 @@ def test_load_workspace_config_supports_patient_mesh_scale_override(sample_confi
         """
 patients:
   - alias: "TST-STAN-x"
-    remote_path: "/tmp/active/TST-STAN-x"
     permanent_remote_path: "/tmp/permanent/TST-STAN-x"
     data_policy: "read_only"
     mesh_scale_factor: 1.8
@@ -378,7 +370,6 @@ clusters:
     executables:
       svfsiplus_path: "relative/svmultiphysics"
     remote_roots:
-      patient_data_root: "/tmp/active"
       permanent_data_root: "/tmp/permanent"
       runs_root: "/tmp/runs"
 """.strip()
@@ -403,7 +394,6 @@ clusters:
       svfsiplus_path: "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
       svzerodsolver_build_dir: "relative/svZeroDSolver-build"
     remote_roots:
-      patient_data_root: "/tmp/active"
       permanent_data_root: "/tmp/permanent"
       runs_root: "/tmp/runs"
 """.strip()
@@ -428,7 +418,6 @@ clusters:
       svfsiplus_path: "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
       svslicer_path: "relative/svslicer"
     remote_roots:
-      patient_data_root: "/tmp/active"
       permanent_data_root: "/tmp/permanent"
       runs_root: "/tmp/runs"
 """.strip()
