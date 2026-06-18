@@ -52,6 +52,7 @@ from svztagent.workflows.postprocess import (
     _stacked_centerline_timeseries_python_source,
 )
 from svztagent.workflows.tune_trees import (
+    _apply_cluster_svzerodsolver_build_dir,
     _build_default_adapters,
     _resolve_cluster_svfsiplus_path,
 )
@@ -403,6 +404,11 @@ def _render_adapt_job_script(
     svfsiplus_path = _resolve_cluster_svfsiplus_path(
         cluster_name=str(cluster.name),
         configured_path=cluster.executables.svfsiplus_path,
+    )
+    threed_config = _apply_cluster_svzerodsolver_build_dir(
+        cluster_name=str(cluster.name),
+        configured_path=cluster.executables.svzerodsolver_build_dir,
+        threed_config=threed_config,
     )
     postprocess_workers = max(int(threed_config.get("procs_per_node", 4) or 4), 1)
     adapted_results_dir = PurePosixPath(remote_layout["remote_results_dir"])
@@ -785,6 +791,7 @@ def _sync_source_of_truth_inflow(sim_dir: SimulationDirectory) -> None:
         prestress_file=None,
         prestress_file_path=None,
         tissue_support=threed_config.get("tissue_support"),
+        solver_paths=threed_config.get("solver_paths"),
         inflow_path=str(inflow_source_path),
         execution_config=solver_execution,
     )

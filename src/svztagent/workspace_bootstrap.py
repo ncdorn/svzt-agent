@@ -27,6 +27,7 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
       type: "slurm" # slurm|pbs|other
     executables:
       svfsiplus_path: "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics" # absolute solver executable path on cluster
+      svzerodsolver_build_dir: "/home/users/ndorn/svZeroDSolver-build" # absolute svZeroDSolver build directory used to locate libsvzero_interface.so
       svslicer_path: "/home/users/ndorn/svSlicer/Release-sherlock/svslicer" # absolute svSlicer executable path on cluster for resistance-map postprocessing
       pvpython_path: "/home/groups/amarsden/ParaView-5.13.3-osmesa-MPI-Linux-Python3.10-x86_64/bin/pvpython" # OSMesa offscreen ParaView Python for 3D CFD visualization
     remote_roots:

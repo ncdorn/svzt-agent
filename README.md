@@ -47,9 +47,10 @@ svzt campaign seed-sweep plan --cluster sherlock --campaign-id tst-stan-5-learne
 svzt update --message "sync local workflow changes" --execute
 ```
 
-Cluster configs must provide both `executables.svfsiplus_path` and
-`executables.svslicer_path` for explicit postop and selected-preop 3D
-postprocessing.
+Cluster configs should provide `executables.svfsiplus_path`,
+`executables.svzerodsolver_build_dir`, and `executables.svslicer_path`.
+The `svZeroDSolver` build directory is injected into generated 3D configs so
+`svZeroDTrees` can resolve `libsvzero_interface.so` without hardcoded home-directory paths.
 
 `svzt init-workspace` bootstraps a local workspace with example `config/`
 files, an `AGENTS.md` workspace router, plus `runs/`, `mirrors/`, and

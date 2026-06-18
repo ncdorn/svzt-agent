@@ -49,6 +49,7 @@ clusters:
       type: "slurm"
     executables:
       svfsiplus_path: "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
+      svzerodsolver_build_dir: "/home/users/ndorn/svZeroDSolver-build"
       svslicer_path: "/home/users/ndorn/bin/svslicer"
     remote_roots:
       patient_data_root: "{(workspace / 'remote_data' / 'active').as_posix()}"
@@ -163,6 +164,10 @@ def test_init_workspace_creates_example_files(tmp_path: Path):
     assert repositories["repositories"]["svZeroDSolver"] == "../../svZeroDSolver"
     assert clusters["clusters"][0]["name"] == "sherlock"
     assert clusters["clusters"][0]["communication"]["ssh_alias"] == "sherlock"
+    assert (
+        clusters["clusters"][0]["executables"]["svzerodsolver_build_dir"]
+        == "/home/users/ndorn/svZeroDSolver-build"
+    )
     assert len(patients["patients"]) == 5
     assert patients["patients"][0]["alias"] == "TST-STAN-1"
     assert defaults["defaults"]["scheduler"]["partition"] == "amarsden"

@@ -55,6 +55,7 @@ clusters:
       type: "slurm"
     executables:
       svfsiplus_path: "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
+      svzerodsolver_build_dir: "/home/users/ndorn/svZeroDSolver-build"
       svslicer_path: "/home/users/ndorn/bin/svslicer"
       pvpython_path: "/home/groups/amarsden/ParaView-5.13.3-osmesa-MPI-Linux-Python3.10-x86_64/bin/pvpython"
     remote_roots:

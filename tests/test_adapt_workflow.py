@@ -208,6 +208,8 @@ def test_run_adapt_prefers_regenerated_reduced_seed_for_adaptation(sample_config
     assert (
         "/iterations/iter-03/results/simplified_zerod_tuned_RRI.json" in script_text
     )
+    assert "svzerodsolver_build_dir" in script_text
+    assert "/home/users/ndorn/svZeroDSolver-build" in script_text
 
 
 def test_run_adapt_requires_completed_postop(sample_config_files):
@@ -309,6 +311,8 @@ def test_run_adapt_renders_progress_logging(sample_config_files):
     assert '"adaptation_completed"' in script_text
     assert '"adaptation_summary_recorded"' in script_text
     assert '"adapted_cmm_submitted"' in script_text
+    assert "svzerodsolver_build_dir" in script_text
+    assert "/home/users/ndorn/svZeroDSolver-build" in script_text
     assert '"paraview_viz_submitted"' in script_text
     assert '"paraview_viz_skipped"' in script_text
     assert '"manager_failed"' in script_text

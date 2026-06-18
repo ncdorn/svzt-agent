@@ -56,6 +56,7 @@ from svztagent.workflows.postprocess import (
 )
 from svztagent.workflows.paraview_viz import _paraview_skip_reason, _prepare_postop_paraview_viz_job
 from svztagent.workflows.tune_trees import (
+    _apply_cluster_svzerodsolver_build_dir,
     _build_default_adapters,
     _resolve_cluster_svfsiplus_path,
 )
@@ -480,6 +481,11 @@ def _render_postop_job_script(
         cluster_name=cluster_name,
         configured_path=cluster.executables.svfsiplus_path,
     )
+    threed_config = _apply_cluster_svzerodsolver_build_dir(
+        cluster_name=cluster_name,
+        configured_path=cluster.executables.svzerodsolver_build_dir,
+        threed_config=threed_config,
+    )
     camera_offset_dir, camera_view_up = _resolve_resistance_map_camera(
         config,
         patient_alias=patient_alias,
@@ -635,6 +641,7 @@ def _sync_postop_inflow(sim_dir: SimulationDirectory) -> None:
         prestress_file=None,
         prestress_file_path=None,
         tissue_support=threed_config.get("tissue_support"),
+        solver_paths=threed_config.get("solver_paths"),
         inflow_path=resolved_inflow_path,
         execution_config=solver_execution,
     )
@@ -929,6 +936,7 @@ def _generate_postop_prestress_file() -> Path:
         prestress_file=None,
         prestress_file_path=None,
         tissue_support=threed_config.get("tissue_support"),
+        solver_paths=threed_config.get("solver_paths"),
         inflow_path={json.dumps(str(inflow_csv)) if inflow_csv else "None"},
         execution_config=solver_execution,
     )

@@ -1061,6 +1061,25 @@ def _resolve_cluster_svfsiplus_path(*, cluster_name: str, configured_path: str) 
     return configured_path
 
 
+def _apply_cluster_svzerodsolver_build_dir(
+    *,
+    cluster_name: str,
+    configured_path: str | None,
+    threed_config: dict,
+) -> dict:
+    if configured_path is None or not str(configured_path).strip():
+        raise ConfigError(
+            "cluster executables.svzerodsolver_build_dir is required for 3D "
+            f"svZeroDSolver-coupled workflows on cluster '{cluster_name}'"
+        )
+
+    resolved = dict(threed_config)
+    solver_paths = dict(resolved.get("solver_paths") or {})
+    solver_paths.setdefault("svzerodsolver_build_dir", configured_path)
+    resolved["solver_paths"] = solver_paths
+    return resolved
+
+
 def _render_tune_job_script(
     *,
     run_id: str,
@@ -1494,7 +1513,11 @@ def run_tune_trees(
         if patient.patient_assets
         else None,
         cluster_svfsiplus_path=cluster_svfsiplus_path,
-        threed_config=patient.threed.model_dump(mode="json"),
+        threed_config=_apply_cluster_svzerodsolver_build_dir(
+            cluster_name=cluster.name,
+            configured_path=cluster.executables.svzerodsolver_build_dir,
+            threed_config=patient.threed.model_dump(mode="json"),
+        ),
         impedance_config=_iteration_impedance_config(
             patient.impedance.model_dump(mode="json"),
             resolved_iteration,

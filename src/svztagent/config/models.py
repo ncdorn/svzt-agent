@@ -29,10 +29,16 @@ class RemoteRoots(BaseModel):
 
 class ClusterExecutables(BaseModel):
     svfsiplus_path: str
+    svzerodsolver_build_dir: str | None = None
     svslicer_path: str | None = None
     pvpython_path: str | None = None
 
-    @field_validator("svfsiplus_path", "svslicer_path", "pvpython_path")
+    @field_validator(
+        "svfsiplus_path",
+        "svzerodsolver_build_dir",
+        "svslicer_path",
+        "pvpython_path",
+    )
     @classmethod
     def _must_be_absolute(cls, value: str | None) -> str | None:
         if value is None:

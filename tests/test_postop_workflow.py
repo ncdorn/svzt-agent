@@ -498,6 +498,8 @@ def test_run_postop_dry_run_writes_plan_without_manifest_submission(sample_confi
     assert "run_postop_postprocess.sh" in script_text
     assert 'solver_execution["mode"] = "slurm"' in script_text
     assert 'solver_execution["submit_command"] = "bash"' in script_text
+    assert "svzerodsolver_build_dir" in script_text
+    assert "/home/users/ndorn/svZeroDSolver-build" in script_text
     assert "strip_existing_launch_tail = False" in script_text
     assert 'stripped.startswith("cd ")' in script_text
     assert 'threed_config.pop("prestress_file", None)' in script_text
@@ -585,6 +587,8 @@ def test_run_postop_execute_first_generates_plan_and_records_job(sample_config_f
     assert "run_postop_postprocess.sh" in script_text
     assert 'solver_execution["mode"] = "slurm"' in script_text
     assert 'solver_execution["submit_command"] = "bash"' in script_text
+    assert "svzerodsolver_build_dir" in script_text
+    assert "/home/users/ndorn/svZeroDSolver-build" in script_text
     assert "strip_existing_launch_tail = False" in script_text
     assert 'threed_config.pop("prestress_file", None)' in script_text
     assert "def _sync_postop_inflow(sim_dir: SimulationDirectory) -> None:" in script_text

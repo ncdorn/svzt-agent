@@ -106,6 +106,8 @@ def test_run_tune_iter_dry_run_can_skip_zerod_tuning(sample_config_files):
     rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
     assert "skip_zerod_tuning = json.loads" in rendered_script
     assert 'skip_zerod_tuning = json.loads(r\'\'\'true\'\'\')' in rendered_script
+    assert "svzerodsolver_build_dir" in rendered_script
+    assert "/home/users/ndorn/svZeroDSolver-build" in rendered_script
     assert 'log["steps"].append("0d_tuning_skipped")' in rendered_script
     assert 'remote_results_dir / "svzerod_3d_coupling_tuned.json"' in rendered_script
     assert 'remote_results_dir / "svzerod_3Dcoupling.json"' in rendered_script
@@ -244,6 +246,7 @@ clusters:
       type: "slurm"
     executables:
       svfsiplus_path: "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
+      svzerodsolver_build_dir: "/home/users/ndorn/svZeroDSolver-build"
     remote_roots:
       patient_data_root: "/scratch/users/ndorn/models/PPAS/tof-stent"
       permanent_data_root: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent"
@@ -385,7 +388,8 @@ def test_run_tune_dry_run_renders_threed_defaults_and_stage_paths(sample_config_
     assert 'PYTHON_CANDIDATE="python3"' in rendered_script
     assert "svzerodtrees.tuning missing required symbols" in rendered_script
     assert "sim.run_steady_sims()" in rendered_script
-    assert "execution_config=solver_execution," in rendered_script
+    assert 'solver_paths=threed_config.get("solver_paths")' in rendered_script
+    assert 'execution_config=threed_config.get("execution"),' in rendered_script
 
 
 def test_run_tune_dry_run_renders_slurm_mail_settings_for_svzerodtrees(sample_config_files):
@@ -439,6 +443,7 @@ clusters:
       type: "slurm"
     executables:
       svfsiplus_path: "/opt/svfsiplus/bin/svmultiphysics"
+      svzerodsolver_build_dir: "/opt/svZeroDSolver-build"
     remote_roots:
       patient_data_root: "{(sample_config_files / 'remote_data' / 'active').as_posix()}"
       permanent_data_root: "{(sample_config_files / 'remote_data' / 'permanent').as_posix()}"

@@ -343,6 +343,7 @@ def _generate_iteration_seed(seed_path: Path) -> None:
         postop_dir="postop",
         adapted_dir=None,
         inflow_path=str(remote_inflow_path) if remote_inflow_path is not None and remote_inflow_path.exists() else None,
+        solver_paths=threed_config.get("solver_paths"),
         execution_config=threed_config.get("execution"),
     )
     # Seed generation only needs steady solves and the reduced 0D seed.  The

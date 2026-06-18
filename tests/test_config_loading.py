@@ -14,6 +14,10 @@ def test_load_workspace_config_success(sample_config_files):
         config.clusters[0].executables.svfsiplus_path
         == "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
     )
+    assert (
+        config.clusters[0].executables.svzerodsolver_build_dir
+        == "/home/users/ndorn/svZeroDSolver-build"
+    )
     assert config.clusters[0].executables.svslicer_path == "/home/users/ndorn/bin/svslicer"
     assert config.defaults.validation.enforce_remote_write_root is True
     assert config.defaults.patient_data_layout.clinical_targets_csv == "clinical_targets.csv"
@@ -325,6 +329,31 @@ clusters:
     )
 
     with pytest.raises(ConfigError, match="svfsiplus_path"):
+        load_workspace_config(sample_config_files)
+
+
+def test_load_workspace_config_requires_absolute_svzerodsolver_build_dir(sample_config_files):
+    (sample_config_files / "config" / "clusters.yaml").write_text(
+        """
+clusters:
+  - name: "sherlock"
+    host: "sherlock.stanford.edu"
+    user: "ndorn"
+    scheduler:
+      type: "slurm"
+    executables:
+      svfsiplus_path: "/home/users/ndorn/svMP-build/svMultiPhysics-build/bin/svmultiphysics"
+      svzerodsolver_build_dir: "relative/svZeroDSolver-build"
+    remote_roots:
+      patient_data_root: "/tmp/active"
+      permanent_data_root: "/tmp/permanent"
+      runs_root: "/tmp/runs"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="svzerodsolver_build_dir"):
         load_workspace_config(sample_config_files)
 
 

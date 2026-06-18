@@ -25,6 +25,9 @@ with uniform Robin tissue support; `svZeroDTrees` owns the svMultiPhysics XML
 emission for the wall `Tissue_support` block. Optional
 `threed.execution.slurm.mail_user` and `mail_types` stay in the typed config and
 flow through to the generated `run_solver.sh` files that `svZeroDTrees` writes.
+Cluster-level `executables.svzerodsolver_build_dir` is injected alongside that
+config so `svZeroDTrees` can resolve the `libsvzero_interface.so` path while
+writing coupled svMultiPhysics XML.
 
 ## Execution layer
 All remote side effects are routed through typed adapters:
