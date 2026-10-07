@@ -188,8 +188,19 @@ def _load_stage_target_payload(
     }
 
 
+def render_env_activation_hooks(hooks: list[str] | None) -> str:
+    """Activation hooks for a ``set -euo pipefail`` script, with nounset paused.
+
+    Hooks such as ``source ~/.bashrc`` read unset shell variables (Sherlock's
+    /etc/bashrc reads PS1), which ``set -u`` turns into a fatal error.
+    """
+    if not hooks:
+        return ""
+    return "\n".join(["set +u", *hooks, "set -u"])
+
+
 def _python_bootstrap(config) -> str:
-    hooks = "\n".join(config.defaults.execution.env_activation_hooks)
+    hooks = render_env_activation_hooks(config.defaults.execution.env_activation_hooks)
     python_executable = config.defaults.execution.python_executable or "python3"
     return f"""PYTHON_CANDIDATE="{python_executable}"
 {hooks}

@@ -411,6 +411,12 @@ def test_driver_seed_generation_strategy_follows_policy(
     local_calibration = result.local_job_script_path.parent / "calibration"
     script = (local_calibration / "run_calibration.sh").read_text(encoding="utf-8")
     assert "--dependency" not in script
+    # Activation hooks run with nounset paused (Sherlock's /etc/bashrc reads PS1).
+    assert "set -euo pipefail\nset +u\nsource ~/.bashrc\nconda activate svz\nset -u\n" in script
+    postprocess_script = (
+        result.local_job_script_path.parent / "postprocess" / "run_postprocess.sh"
+    ).read_text(encoding="utf-8")
+    assert "set +u\nsource ~/.bashrc\nconda activate svz\nset -u\n" in postprocess_script
     request = json.loads((local_calibration / "inputs" / "calibration_request.json").read_text())
     assert request["calibration"]["data_source"]["postprocess_metadata_json"] == (
         f"{run_root}/results/postprocess/postprocess_suite_metadata.json"

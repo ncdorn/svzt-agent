@@ -106,3 +106,28 @@ def test_camera_retry_does_not_mask_other_type_errors() -> None:
             broken_suite,
             {"camera_offset_dir": [1.0, 0.0, 0.0]},
         )
+
+
+def test_env_activation_hooks_tolerate_unset_variables_under_nounset(tmp_path):
+    import shutil
+    import subprocess
+
+    from svztagent.workflows.postprocess import render_env_activation_hooks
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    # Stand-in for a login file that reads an unset variable, like /etc/bashrc's PS1.
+    rc = tmp_path / "fake_bashrc"
+    rc.write_text('if [ -z "$SVZT_TEST_UNSET_VAR" ]; then :; fi\n', encoding="utf-8")
+    hooks = render_env_activation_hooks([f"source {rc}"])
+    script = tmp_path / "job.sh"
+    script.write_text(
+        f"set -euo pipefail\n{hooks}\necho ok\necho \"$SVZT_TEST_STILL_UNSET\"\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run([bash, str(script)], capture_output=True, text=True)
+    assert proc.stdout.splitlines()[0] == "ok"
+    # nounset is restored after the hooks.
+    assert proc.returncode != 0 and "SVZT_TEST_STILL_UNSET" in proc.stderr
+    assert render_env_activation_hooks([]) == ""

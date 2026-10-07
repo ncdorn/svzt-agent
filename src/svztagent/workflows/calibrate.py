@@ -50,6 +50,7 @@ from svztagent.hpc.interfaces import (
     SyncDirection,
 )
 from svztagent.hpc.slurm import SlurmSchedulerAdapter, SlurmSubmitOptions
+from svztagent.workflows.postprocess import render_env_activation_hooks
 from svztagent.workflows.tune_trees import _build_default_adapters
 
 
@@ -306,7 +307,7 @@ def _render_calibration_script(
     for key, value in options.items():
         if value:
             header.append(f"#SBATCH --{key}={value}")
-    hooks = "\n".join(activation_hooks or [])
+    hooks = render_env_activation_hooks(activation_hooks)
     quoted_python = shlex.quote(str(python_executable))
     quoted_config = shlex.quote(str(remote_config_path))
     return "\n".join(
