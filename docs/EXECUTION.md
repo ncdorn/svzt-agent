@@ -646,6 +646,20 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
     prestress simulation, and passes the generated VTU to CMM as
     `Prestress_file_path`
   - preserves `svzerod_3d_coupling_tuned.json` as the tuned 0D source and generates canonical `svzerod_3Dcoupling.json` with `external_solver_coupling_blocks` before submitting the 3D solver
+    - Upstream contract (svZeroDTrees `docs/interface.md`, "3D coupler cap pairing"):
+      `generate_threed_coupler` takes each IMPEDANCE BC's coupling-block
+      `surface` from the tuned tree `outlet_mapping`. It no longer uses the BC's
+      position among the sorted mesh caps, which was wrong for `learned_zerod`
+      / centerline-ordered seeds.
+    - The preop job now fails with `ValueError` before the solver is submitted
+      when an IMPEDANCE BC has no mapped cap, a mapped cap is not in the preop
+      mesh, two BCs share a cap, or a mesh cap is left uncoupled.
+    - RCR/RESISTANCE BCs without tree metadata couple to the cap of the same
+      name; otherwise they keep the old order-based pairing and print a `WARNING`.
+    - Postop passes the selected preop coupler as an explicit `threed_coupler`,
+      and adaptation passes a copy with its BCs rewritten by name. Neither stage
+      regenerates surfaces, so they inherit the preop pairing, and the preop
+      caps must exist in the postop mesh under the same names.
   - validates the canonical `svzerod_3Dcoupling.json` directly; it does not require or generate deprecated `svZeroD_interface.dat`
   - links the generated coupling input into the patient preop 3D model directory for that iteration
   - submits preop 3D (`SimulationDirectory`) and waits up to the configured
