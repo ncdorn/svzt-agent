@@ -417,6 +417,9 @@ def test_driver_seed_generation_strategy_follows_policy(
         result.local_job_script_path.parent / "postprocess" / "run_postprocess.sh"
     ).read_text(encoding="utf-8")
     assert "set +u\nsource ~/.bashrc\nconda activate svz\nset -u\n" in postprocess_script
+    # The suite records the tuned model's lineage, which calibration requires.
+    assert f'tuned_zerod_config = "{run_root}/results/svzerod_3d_coupling_tuned.json"' in postprocess_script
+    assert 'postprocess_kwargs["tuned_zerod_config_path"] = tuned_zerod_config' in postprocess_script
     request = json.loads((local_calibration / "inputs" / "calibration_request.json").read_text())
     assert request["calibration"]["data_source"]["postprocess_metadata_json"] == (
         f"{run_root}/results/postprocess/postprocess_suite_metadata.json"

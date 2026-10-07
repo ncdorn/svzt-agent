@@ -188,6 +188,11 @@ def _load_stage_target_payload(
     }
 
 
+# The tune driver publishes the tuned full 0D model under this name in each
+# iteration's results directory; calibration consumes the same file.
+TUNED_ZEROD_CONFIG_FILENAME = "svzerod_3d_coupling_tuned.json"
+
+
 def render_env_activation_hooks(hooks: list[str] | None) -> str:
     """Activation hooks for a ``set -euo pipefail`` script, with nounset paused.
 
@@ -360,6 +365,7 @@ def _render_postprocess_script(
     account: str | None = None,
     partition: str | None = None,
     wall_time_hours: int | None = None,
+    tuned_zerod_config_path: str | None = None,
 ) -> str:
     clinical_targets_expr = (
         json.dumps(clinical_targets_payload, sort_keys=True)
@@ -413,6 +419,11 @@ try:
         postprocess_kwargs["camera_offset_dir"] = {camera_offset_expr}
     if {camera_view_up_expr} is not None:
         postprocess_kwargs["camera_view_up"] = {camera_view_up_expr}
+    # Full-PA calibration requires the suite descriptor to name (path + sha256)
+    # the tuned 0D model that drove this 3D run.
+    tuned_zerod_config = {json.dumps(tuned_zerod_config_path)}
+    if tuned_zerod_config is not None and Path(tuned_zerod_config).is_file():
+        postprocess_kwargs["tuned_zerod_config_path"] = tuned_zerod_config
     result = _run_postprocess_suite_with_optional_camera(
         run_pulmonary_threed_postprocess_suite,
         postprocess_kwargs,
@@ -633,6 +644,10 @@ def prepare_preop_postprocess_script(
         camera_view_up=camera_view_up,
         cpus_per_task=cpus_per_task,
         mem=mem,
+        tuned_zerod_config_path=str(
+            PurePosixPath(remote_layout["remote_results_dir"]).parent
+            / TUNED_ZEROD_CONFIG_FILENAME
+        ),
     )
     local_layout["job_script"].write_text(script_body, encoding="utf-8")
     submit_options = _build_postprocess_scheduler_adapter(

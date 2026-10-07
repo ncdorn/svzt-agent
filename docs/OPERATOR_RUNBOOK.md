@@ -174,6 +174,10 @@ allocation, and when more than one worker is requested they also request
 For every completed default-policy preoperative `full_pa` iteration
 (`not_close`, `converged`, or final; not `needs_review`), calibration consumes the exact tuned model plus the
 `postprocess_suite_metadata.json` produced by the upstream postprocess suite.
+The rendered postprocess job passes the iteration's
+`results/svzerod_3d_coupling_tuned.json` to the suite (when the file exists) so
+the descriptor declares that model's `lineage` (relative path + sha256);
+calibration rejects a descriptor without it.
 The agent only stages the request, submits it after the postprocess job with an
 `afterok` dependency, records paths/digests, and applies the final promotion
 gate. It does not parse VTP, stack centerlines, validate observations, or tune
