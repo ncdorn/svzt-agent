@@ -499,7 +499,11 @@ run—do not “repair” a failed stage by replacing its manifest evidence.
 - `prestress_file` supports:
   - absolute path: pass the prescribed VTU through as `Prestress_file_path`
   - `generate`: compute run-scoped prestress from iteration-1 seed-generation
-    `steady/mean` VTUs, then reuse `<runs_root>/<run_id>/prestress/*-procs/result_*.vtu`
+    `steady/mean` VTUs, then reuse `<runs_root>/<run_id>/prestress/*-procs/result_*.vtu`.
+    Seed sources that run no steady solves (`learned_zerod`, `path`) get a
+    single rigid mean-flow steady solve under `seed_generation/steady/mean/`
+    first, submitted and awaited by the iteration script
+    (`prestress_mean_steady_job_id` in `iteration_driver_log.json`)
   - `auto` / `from_steady_mean`: legacy unsupported modes in `svzt-agent`; the
     iteration script logs a warning and continues without `Prestress_file_path`
 - Set `patients[].tuning.threed.tissue_support.enabled: false` when overriding a patient to `wall_model: rigid`.

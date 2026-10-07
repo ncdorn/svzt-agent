@@ -119,9 +119,13 @@ Merged values are resolved into the manifest and used to render each iteration s
 - `auto` / `from_steady_mean`: legacy unsupported modes in `svzt-agent`; the
   iteration script logs a warning and continues without `Prestress_file_path`
 
-Generated prestress depends on seed-generation evidence already present under
-the run directory. If those `steady/mean` VTUs are missing, the iteration enters
-`needs_review` rather than creating an extra steady simulation.
+Generated prestress uses the iteration-1 seed-generation `steady/mean` VTUs.
+`source: generate` seeds produce them; for seed sources that run no steady
+solves (`learned_zerod`, `path`), the iteration script runs one rigid
+mean-flow steady solve into `seed_generation/steady/mean/` with the patient
+inflow, mesh-complete, and `mesh_scale_factor`, waits for it, and then builds
+the prestress. If that solve fails or writes no VTUs, the iteration enters
+`needs_review`.
 
 Explicit postop staging also consumes the same resolved `threed` config, but it
 must generate a fresh prestress field against the postop mesh for deformable

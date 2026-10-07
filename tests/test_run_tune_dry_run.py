@@ -1076,3 +1076,125 @@ patients:
 
     rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
     assert 'mesh_scale_factor = float("2.5")' in rendered_script
+
+
+def test_generate_prestress_runs_mean_steady_sim_when_seed_has_none(sample_config_files, tmp_path):
+    """Learned/path seeds run no steady solves; prestress=generate runs the mean one."""
+    import ast
+    import os
+
+    import numpy as np
+
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        f"""
+patients:
+  - alias: "TST-STAN-x"
+    permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
+    data_policy: "read_only"
+    tuning:
+      threed:
+        wall_model: "deformable"
+        prestress_file: "generate"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-dry-generate-prestress-mean-steady",
+        mode=ExecutionMode.DRY_RUN,
+    )
+    rendered = result.local_job_script_path.read_text(encoding="utf-8")
+    body = re.split(r"<<'PY'[^\n]*\n", rendered)[2]
+    tree = ast.parse(body[: body.index("\nPY\n")])
+    wanted = {
+        "_extract_result_step",
+        "_result_vtus",
+        "_seed_generation_mean_result_dirs",
+        "_run_seed_generation_mean_steady_sim",
+        "_seed_generation_mean_result_dir",
+    }
+    module = ast.Module(
+        body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted],
+        type_ignores=[],
+    )
+
+    calls: dict[str, object] = {}
+
+    class FakeSimulation:
+        convert_to_cm = False
+        inflow = type("Inflow", (), {"q": [10.0, 30.0, 50.0]})()
+        preop_dir = type("Preop", (), {"mesh_complete": type("MC", (), {"path": "/mesh"})()})()
+
+    class FakeSteadyDirectory:
+        solver_paths = None
+
+        def __init__(self, path):
+            self.path = Path(path)
+
+        @classmethod
+        def from_directory(cls, path, mesh_complete, convert_to_cm, mesh_scale_factor):
+            calls["from_directory"] = (path, mesh_complete, convert_to_cm, mesh_scale_factor)
+            return cls(path)
+
+        def generate_steady_sim(self, flow_rate=None, execution_config=None):
+            calls["flow_rate"] = flow_rate
+            (self.path / "run_solver.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+
+    def fake_simulation(workspace, **kwargs):
+        calls["sim_kwargs"] = kwargs
+        return FakeSimulation()
+
+    def fake_normalize(**kwargs):
+        calls["normalized"] = kwargs
+
+    def fake_submit(path):
+        calls["submitted"] = str(path)
+        return "9001"
+
+    def fake_wait(job_id, poll_seconds, timeout_seconds):
+        procs = tmp_path / "iterations" / "iter-01" / "seed_generation" / "steady" / "mean" / "48-procs"
+        procs.mkdir(parents=True)
+        for step in (100, 200, 300):
+            (procs / f"result_{step:03d}.vtu").write_text("", encoding="utf-8")
+        return True, "COMPLETED"
+
+    namespace = {
+        "np": np,
+        "re": re,
+        "os": os,
+        "Path": Path,
+        "remote_run_dir": tmp_path,
+        "mesh_scale_factor": 1.425,
+        "threed_config": {"nodes": 3, "procs_per_node": 24, "memory": 16},
+        "scheduler_defaults": {"partition": "amarsden"},
+        "cluster_svfsiplus_path": "/bin/svmp",
+        "log": {"steps": []},
+        "SimulationDirectory": FakeSteadyDirectory,
+        "_seed_generation_simulation": fake_simulation,
+        "_normalize_solver_runscript": fake_normalize,
+        "_resolve_slurm_mail_user": lambda cfg: None,
+        "_resolve_slurm_mail_types": lambda cfg: [],
+        "_submit_job": fake_submit,
+        "_wait_for_completion": fake_wait,
+    }
+    exec(compile(module, "driver", "exec"), namespace)
+
+    result_dir = namespace["_seed_generation_mean_result_dir"]()
+
+    mean_dir = tmp_path / "iterations" / "iter-01" / "seed_generation" / "steady" / "mean"
+    assert result_dir == mean_dir / "48-procs"
+    assert calls["flow_rate"] == pytest.approx(30.0)
+    assert calls["sim_kwargs"] == {"mesh_scale_factor": 1.425}
+    assert calls["from_directory"][3] == 1.425
+    assert calls["submitted"] == str(mean_dir / "run_solver.sh")
+    assert calls["normalized"]["nodes"] == 3
+    assert namespace["log"]["prestress_mean_steady_job_id"] == "9001"
+    assert "prestress_mean_steady_sim_completed" in namespace["log"]["steps"]
+
+    # Existing seed-generation VTUs are reused without another solve.
+    calls.clear()
+    assert namespace["_seed_generation_mean_result_dir"]() == mean_dir / "48-procs"
+    assert "submitted" not in calls

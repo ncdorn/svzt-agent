@@ -234,6 +234,7 @@ log = {
     "preop_job_id": None,
     "postop_job_id": None,
     "prestress_job_id": None,
+    "prestress_mean_steady_job_id": None,
     "prestress_file_path": None,
     "prestress_traction_source": None,
     "preop_terminal_state": None,
@@ -373,7 +374,7 @@ def _write_inflow_flow_from_patient_csv(
             ff.write(f"{t} {q}\n")
 
 
-def _generate_iteration_seed(seed_path: Path) -> None:
+def _seed_generation_simulation(seed_workspace: Path, **simulation_kwargs) -> Simulation:
     if preop_mesh_complete_path is None:
         raise RuntimeError("preop mesh-complete path is not configured")
     if clinical_targets_path is None:
@@ -383,7 +384,6 @@ def _generate_iteration_seed(seed_path: Path) -> None:
     if not clinical_targets_path.exists():
         raise RuntimeError(f"clinical targets file missing: {clinical_targets_path}")
 
-    seed_workspace = remote_iter_dir / "seed_generation"
     preop_dir = seed_workspace / "preop"
     postop_dir = seed_workspace / "postop"
     preop_dir.mkdir(parents=True, exist_ok=True)
@@ -392,7 +392,7 @@ def _generate_iteration_seed(seed_path: Path) -> None:
     mesh_complete_target = preop_dir / "mesh-complete"
     _link_or_copy_directory(preop_mesh_complete_path, mesh_complete_target)
 
-    sim = Simulation(
+    return Simulation(
         path=str(seed_workspace),
         clinical_targets=str(clinical_targets_path),
         preop_dir="preop",
@@ -401,7 +401,13 @@ def _generate_iteration_seed(seed_path: Path) -> None:
         inflow_path=str(remote_inflow_path) if remote_inflow_path is not None and remote_inflow_path.exists() else None,
         solver_paths=threed_config.get("solver_paths"),
         execution_config=threed_config.get("execution"),
+        **simulation_kwargs,
     )
+
+
+def _generate_iteration_seed(seed_path: Path) -> None:
+    seed_workspace = remote_iter_dir / "seed_generation"
+    sim = _seed_generation_simulation(seed_workspace)
     # Seed generation only needs steady solves and the reduced 0D seed.  The
     # full pipeline reads optimized_params.csv for impedance BCs even when
     # optimize_bcs=False, so avoid that tuning-artifact path here.
@@ -694,13 +700,78 @@ def _result_vtus(result_dir: Path) -> list[Path]:
     return sorted(result_dir.glob("result_*.vtu"), key=_extract_result_step)
 
 
-def _seed_generation_mean_result_dir() -> Path:
-    seed_mean_dir = remote_run_dir / "iterations" / "iter-01" / "seed_generation" / "steady" / "mean"
-    result_dirs = [
+def _seed_generation_mean_result_dirs(seed_mean_dir: Path) -> list[Path]:
+    return [
         path
         for path in sorted(seed_mean_dir.glob("*-procs"))
         if path.is_dir() and _result_vtus(path)
     ]
+
+
+def _run_seed_generation_mean_steady_sim(seed_mean_dir: Path) -> None:
+    """Run the rigid mean-flow steady 3D solve that prestress tractions need.
+
+    The reduced-seed path (source=generate) runs it as part of its sys/dia/mean
+    steady solves; learned-zerod and path seeds do not, so prestress
+    generation runs only the mean solve here, in the same directory, with the
+    same inflow and mesh-complete.  Submission goes through the iteration
+    script's scheduler helpers, as for the prestress solve.
+    """
+    seed_workspace = remote_run_dir / "iterations" / "iter-01" / "seed_generation"
+    sim = _seed_generation_simulation(seed_workspace, mesh_scale_factor=mesh_scale_factor)
+    mean_flow = float(np.mean(np.asarray(sim.inflow.q, dtype=float)))
+    seed_mean_dir.mkdir(parents=True, exist_ok=True)
+    steady_sim = SimulationDirectory.from_directory(
+        path=str(seed_mean_dir),
+        mesh_complete=sim.preop_dir.mesh_complete.path,
+        convert_to_cm=sim.convert_to_cm,
+        mesh_scale_factor=mesh_scale_factor,
+    )
+    steady_sim.solver_paths = threed_config.get("solver_paths")
+    previous_cwd = os.getcwd()
+    os.chdir(seed_mean_dir)
+    try:
+        steady_sim.generate_steady_sim(
+            flow_rate=mean_flow, execution_config=threed_config.get("execution")
+        )
+    finally:
+        os.chdir(previous_cwd)
+    log["steps"].append(f"prestress_mean_steady_sim_generated:flow={mean_flow:.6g}")
+
+    run_solver_path = seed_mean_dir / "run_solver.sh"
+    if not run_solver_path.exists():
+        raise RuntimeError(f"mean steady simulation did not write {run_solver_path}")
+    _normalize_solver_runscript(
+        script_path=run_solver_path,
+        nodes=int(threed_config.get("nodes", 2)),
+        procs_per_node=int(threed_config.get("procs_per_node", 24)),
+        memory_gb=int(threed_config.get("memory", 16)),
+        hours=6,
+        partition=str(scheduler_defaults.get("partition") or "amarsden"),
+        account=str(scheduler_defaults.get("account") or "").strip() or None,
+        mail_user=_resolve_slurm_mail_user(threed_config),
+        mail_types=_resolve_slurm_mail_types(threed_config),
+        svfsiplus_path=cluster_svfsiplus_path,
+    )
+    steady_job_id = _submit_job(run_solver_path)
+    log["prestress_mean_steady_job_id"] = steady_job_id
+    log["steps"].append("prestress_mean_steady_sim_submitted")
+    ok, terminal = _wait_for_completion(
+        steady_job_id,
+        poll_seconds=int(threed_config.get("wait_poll_seconds", 30)),
+        timeout_seconds=int(threed_config.get("wait_timeout_seconds", 43200)),
+    )
+    if not ok:
+        raise RuntimeError(f"mean steady simulation did not complete successfully: {terminal}")
+    log["steps"].append("prestress_mean_steady_sim_completed")
+
+
+def _seed_generation_mean_result_dir() -> Path:
+    seed_mean_dir = remote_run_dir / "iterations" / "iter-01" / "seed_generation" / "steady" / "mean"
+    result_dirs = _seed_generation_mean_result_dirs(seed_mean_dir)
+    if not result_dirs:
+        _run_seed_generation_mean_steady_sim(seed_mean_dir)
+        result_dirs = _seed_generation_mean_result_dirs(seed_mean_dir)
     if not result_dirs:
         raise RuntimeError(
             "prestress_file=generate requires seed-generation mean steady VTUs under "
