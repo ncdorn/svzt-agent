@@ -1,0 +1,131 @@
+{
+  "task_id": "TASK-002",
+  "status": "needs_review",
+  "summary": "Introduced one effective tune CPU resolver and routed its value to both the rendered Slurm directive and default Slurm submission options. Focused rendering and Slurm tests pass; the required configuration/iteration regression command remains partially blocked by two pre-existing iteration-tracking failures unrelated to this change.",
+  "files_changed": [
+    {
+      "path": "src/svztagent/workflows/tune_trees.py",
+      "change_type": "modified",
+      "previous_path": null,
+      "summary": "Resolve effective tune CPUs once and pass the resolved value to script rendering and default Slurm adapter construction."
+    },
+    {
+      "path": "tests/test_run_tune_dry_run.py",
+      "change_type": "modified",
+      "previous_path": null,
+      "summary": "Verify default submission options and the rendered tune script both request 24 CPUs when scheduler CPUs are 4 and tuning n_procs is 24."
+    },
+    {
+      "path": "docs/ARCHITECTURE.md",
+      "change_type": "modified",
+      "previous_path": null,
+      "summary": "Document the tune workflow's single effective CPU-resolution boundary."
+    }
+  ],
+  "tests_changed": [
+    {
+      "path": "tests/test_run_tune_dry_run.py",
+      "change_type": "modified",
+      "previous_path": null,
+      "summary": "Covers parity between default Slurm submission CPUs and the rendered #SBATCH CPU directive."
+    }
+  ],
+  "verification": {
+    "overall_status": "partial",
+    "checks": [
+      {
+        "verification_id": "VER-T002-01",
+        "kind": "test",
+        "procedure": "/Users/ndorn/Documents/Stanford/PhD/Marsden_Lab/SimVascular/ppas-dev/svzt-agent/.venv/bin/pytest -q tests/test_run_tune_dry_run.py tests/test_slurm_adapter.py",
+        "status": "passed",
+        "exit_code": 0,
+        "summary": "All focused tune rendering, default submission, injected-adapter, and generic Slurm adapter tests passed."
+      },
+      {
+        "verification_id": "VER-T002-02",
+        "kind": "test",
+        "procedure": "/Users/ndorn/Documents/Stanford/PhD/Marsden_Lab/SimVascular/ppas-dev/svzt-agent/.venv/bin/pytest -q tests/test_config_loading.py tests/test_iteration_tracking.py",
+        "status": "failed",
+        "exit_code": 1,
+        "summary": "Configuration tests passed, but the combined command reported two existing iteration-tracking failures: a full-PA calibration-policy expectation and a fixture writing to a missing remote_data/active directory. Neither failure exercises the TASK-002 CPU changes."
+      },
+      {
+        "verification_id": "VER-T002-03",
+        "kind": "inspection",
+        "procedure": "Inspect the final run_tune_trees call graph, _resolve_effective_tune_cpus, _render_tune_job_script, _build_default_adapters, and the focused submission-parity test.",
+        "status": "passed",
+        "exit_code": null,
+        "summary": "run_tune_trees computes one effective CPU value and passes it explicitly to both rendering and default adapter construction; other adapter call sites retain scheduler defaults."
+      },
+      {
+        "verification_id": null,
+        "kind": "command",
+        "procedure": "/Users/ndorn/Documents/Stanford/PhD/Marsden_Lab/SimVascular/ppas-dev/svzt-agent/.venv/bin/python -m compileall -q src/svztagent",
+        "status": "passed",
+        "exit_code": 0,
+        "summary": "All Python source compiled successfully with the compatible repository virtualenv."
+      },
+      {
+        "verification_id": null,
+        "kind": "command",
+        "procedure": "git diff --check before commit",
+        "status": "passed",
+        "exit_code": 0,
+        "summary": "No whitespace errors were found in the staged TASK-002 diff."
+      }
+    ],
+    "acceptance_criteria": [
+      {
+        "criterion_id": "AC-T002-01",
+        "criterion": "One shared resolver determines the effective tune-job CPU count used by both rendering and default Slurm adapter construction.",
+        "status": "passed",
+        "evidence": "VER-T002-03 confirms _resolve_effective_tune_cpus is called once and its result is passed to both consumers."
+      },
+      {
+        "criterion_id": "AC-T002-02",
+        "criterion": "With scheduler cpus=4 and impedance n_procs=24, the rendered script and submitted Slurm options both request 24 CPUs.",
+        "status": "passed",
+        "evidence": "VER-T002-01 passes the focused regression that parses the default sbatch preview and compares it with #SBATCH --cpus-per-task=24."
+      },
+      {
+        "criterion_id": "AC-T002-03",
+        "criterion": "Injected scheduler adapters remain supported and existing tune workflow tests pass.",
+        "status": "not_verified",
+        "evidence": "VER-T002-01 covers the focused injected-adapter/tune tests, but VER-T002-02 remains red because the broader iteration-tracking suite has two unrelated baseline failures."
+      },
+      {
+        "criterion_id": "AC-T002-04",
+        "criterion": "Architecture documentation explains that the workflow, not the generic Slurm adapter, owns effective tune CPU resolution.",
+        "status": "passed",
+        "evidence": "VER-T002-03 and the modified architecture documentation describe the workflow-owned resolver and unchanged generic adapter behavior."
+      }
+    ]
+  },
+  "deviations": [
+    {
+      "description": "The required VER-T002-02 regression command did not pass in the integrated baseline.",
+      "reason": "Two failures are outside TASK-002: one existing full-PA calibration-policy expectation and one fixture path setup failure.",
+      "impact": "The implementation is scoped and focused verification passes, but the Builder cannot claim a fully green required regression suite without resolving those baseline issues."
+    }
+  ],
+  "assumptions": [],
+  "unresolved_issues": [
+    {
+      "description": "tests/test_iteration_tracking.py still has the two failures reported by VER-T002-02.",
+      "impact": "The combined configuration/iteration regression command remains non-zero.",
+      "recommended_action": "Have the owning workflow/test task reconcile the calibration-policy expectation and create the missing remote_data/active fixture directory, then rerun VER-T002-02."
+    }
+  ],
+  "escalation": {
+    "required": false,
+    "category": null,
+    "reason": null,
+    "requested_action": null
+  },
+  "commit": {
+    "status": "created",
+    "sha": "c74f70ed97b572d2145becf7a77c4113176b0db8",
+    "message": "Align tune CPU rendering and submission",
+    "reason": null
+  }
+}

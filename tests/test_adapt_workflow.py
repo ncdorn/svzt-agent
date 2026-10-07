@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import shutil
+
+import pytest
 
 from svztagent.core.errors import ConfigError
 from svztagent.core.manifest import read_manifest
@@ -339,12 +342,13 @@ def test_run_adapt_renders_progress_logging(sample_config_files):
     assert '"paraview_viz_submitted"' in script_text
     assert '"paraview_viz_skipped"' in script_text
     assert '"manager_failed"' in script_text
-    assert script_text.count("_write_stacked_centerline_timeseries(") >= 3
+    assert script_text.count("_consume_upstream_suite_descriptor(") >= 3
+    assert "validate_centerline_timeseries_descriptor(suite_metadata_path)" in script_text
     assert script_text.count("_run_postprocess_suite_with_optional_camera(") >= 3
     assert '"simulation_dir": str(postop_simulation_dir)' in script_text
     assert '"simulation_dir": str(simulation_dir)' in script_text
-    assert "centerline_timeseries_last_cycle.vtp" in script_text
-    assert script_text.count("_preserve_intermediate_centerlines(") >= 3
+    assert "_preserve_intermediate_centerlines" not in script_text
+    assert "_cleanup_intermediate_centerlines" not in script_text
 
 
 def test_run_adapt_renders_adaptation_paraview_submission(sample_config_files):
@@ -404,3 +408,100 @@ def test_submit_adaptation_paraview_viz_records_manifest(sample_config_files):
     record = manifest.paraview_viz_runs[-1]
     assert record.stage == "adaptation-m1"
     assert record.remote_dir.endswith("/adaptation/from-iter-03/m1/results/paraview_viz")
+
+
+def _adapt_manager_python(script_text: str) -> str:
+    return re.split(r"<<'PY'[^\n]*\n", script_text)[1].split("\nPY\n", 1)[0]
+
+
+def _set_selected_tuning_model(paths, tuning_model: str) -> None:
+    manifest = read_manifest(paths.manifest)
+    manifest.remote.setdefault("impedance_defaults", {})["tuning_model"] = tuning_model
+    write_manifest(manifest, paths.manifest)
+
+
+def test_run_adapt_passes_selected_tuned_config_to_adaptation(sample_config_files):
+    _prepare_adaptable_run(sample_config_files, run_id="run-adapt-tuned-inputs")
+
+    result = run_adapt(
+        workspace_root=sample_config_files,
+        run_id="run-adapt-tuned-inputs",
+        model="M2",
+        mode=ExecutionMode.DRY_RUN,
+        transfer_adapter=FakeFileTransferAdapter(),
+        scheduler_adapter=FakeSchedulerAdapter(),
+        remote_exec_adapter=FakeRemoteExecAdapter(),
+    )
+
+    script_text = result.local_job_script_path.read_text(encoding="utf-8")
+    results_dir = "/scratch/users/ndorn/svzt_runs/run-adapt-tuned-inputs/iterations/iter-03/results"
+    assert f'tuned_config_path = Path("{results_dir}/svzerod_3d_coupling_tuned.json")' in script_text
+    assert f'outlet_cap_mapping_path = Path("{results_dir}/outlet_cap_mapping.json")' in script_text
+    assert "require_outlet_cap_mapping = False" in script_text
+    assert "tuned_config=str(tuned_config_path)," in script_text
+    assert "outlet_cap_mapping=outlet_cap_mapping," in script_text
+    compile(_adapt_manager_python(script_text), "<adapt-manager>", "exec")
+    plan = json.loads(result.plan_path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert plan["summary"]["tuned_config"] == f"{results_dir}/svzerod_3d_coupling_tuned.json"
+    assert plan["summary"]["outlet_cap_mapping"] == f"{results_dir}/outlet_cap_mapping.json"
+    assert plan["summary"]["outlet_cap_mapping_required"] is False
+
+
+def test_run_adapt_requires_outlet_cap_mapping_for_full_pa_tuning(sample_config_files):
+    paths = _prepare_adaptable_run(sample_config_files, run_id="run-adapt-full-pa")
+    _set_selected_tuning_model(paths, "full_pa")
+
+    result = run_adapt(
+        workspace_root=sample_config_files,
+        run_id="run-adapt-full-pa",
+        model="M2",
+        mode=ExecutionMode.DRY_RUN,
+        transfer_adapter=FakeFileTransferAdapter(),
+        scheduler_adapter=FakeSchedulerAdapter(),
+        remote_exec_adapter=FakeRemoteExecAdapter(),
+    )
+
+    script_text = result.local_job_script_path.read_text(encoding="utf-8")
+    assert "require_outlet_cap_mapping = True" in script_text
+    plan = json.loads(result.plan_path.with_suffix(".json").read_text(encoding="utf-8"))
+    mapping = (
+        "/scratch/users/ndorn/svzt_runs/run-adapt-full-pa/iterations/iter-03/results/"
+        "outlet_cap_mapping.json"
+    )
+    assert plan["summary"]["outlet_cap_mapping"] == mapping
+    assert plan["summary"]["outlet_cap_mapping_required"] is True
+    assert mapping in plan["steps"][0]["remote_paths"]["read"]
+
+
+@pytest.mark.parametrize("model", ["M1", "M3"])
+def test_run_adapt_rejects_reduced_pa_models_for_full_pa_tuning(sample_config_files, model):
+    paths = _prepare_adaptable_run(sample_config_files, run_id=f"run-adapt-full-pa-{model.lower()}")
+    _set_selected_tuning_model(paths, "full_pa")
+
+    with pytest.raises(ConfigError, match="use M2"):
+        run_adapt(
+            workspace_root=sample_config_files,
+            run_id=f"run-adapt-full-pa-{model.lower()}",
+            model=model,
+            mode=ExecutionMode.DRY_RUN,
+            transfer_adapter=FakeFileTransferAdapter(),
+            scheduler_adapter=FakeSchedulerAdapter(),
+            remote_exec_adapter=FakeRemoteExecAdapter(),
+        )
+
+
+def test_manifest_without_calibration_defaults_resolves_legacy_tuning_model():
+    from types import SimpleNamespace
+
+    from svztagent.core.seed_policy import manifest_effective_tuning_model
+
+    legacy = SimpleNamespace(remote={"impedance_defaults": {"tuning_model": "full_pa"}})
+    assert manifest_effective_tuning_model(legacy, 1) == "full_pa"
+    assert manifest_effective_tuning_model(legacy, 3) == "rri"
+    current = SimpleNamespace(
+        remote={
+            "impedance_defaults": {"tuning_model": "full_pa"},
+            "calibration_defaults": {"next_iteration_seed_policy": "calibrated_full_pa"},
+        }
+    )
+    assert manifest_effective_tuning_model(current, 3) == "full_pa"

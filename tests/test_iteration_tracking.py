@@ -361,6 +361,9 @@ patients:
     tuning:
       impedance:
         tuning_model: "full_pa"
+      calibration:
+        enabled: false
+        next_iteration_seed_policy: "legacy_rri_after_first"
 """.strip()
         + "\n",
         encoding="utf-8",
@@ -775,7 +778,7 @@ def test_stage_tune_inputs_iteration1_remote_path_pulls_seed(sample_config_files
         run_id="run-iter-011",
     )
 
-    remote_seed = sample_config_files / "remote_data" / "active" / "TST-STAN-x" / "remote_seed.json"
+    remote_seed = sample_config_files / "remote_data" / "permanent" / "TST-STAN-x" / "remote_seed.json"
     remote_seed.write_text("{\"remote\": true}", encoding="utf-8")
 
     class CopyingTransfer(FakeFileTransferAdapter):

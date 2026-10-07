@@ -36,6 +36,7 @@ from svztagent.core.plan import (
     write_plan_yaml,
 )
 from svztagent.core.plan_validate import assert_valid_execution_plan
+from svztagent.core.seed_policy import manifest_uses_calibrated_full_pa
 from svztagent.hpc.interfaces import (
     ExecutionMode,
     FileTransferAdapter,
@@ -260,6 +261,34 @@ def _resolve_selected_reduced_config_path(
     return regenerated_config or tuned_config
 
 
+CALIBRATED_FULL_PA_FILENAME = "calibrated_full_pa_zerod.json"
+
+
+def _promoted_calibrated_full_pa_config(manifest, iteration: int) -> str | None:
+    """Return the remote calibrated full-PA model once calibration is promoted."""
+
+    for record in reversed(list(getattr(manifest, "calibration_runs", []) or [])):
+        if int(record.iteration) != int(iteration):
+            continue
+        if record.promotion_status != "promoted":
+            return None
+        return str(PurePosixPath(record.remote_dir) / "results" / CALIBRATED_FULL_PA_FILENAME)
+    return None
+
+
+def _require_calibrated_full_pa_config(manifest, iteration: int) -> str:
+    calibrated = _promoted_calibrated_full_pa_config(manifest, iteration)
+    if calibrated is None:
+        raise ConfigError(
+            f"iter-{iteration:02d} has no promoted full-PA calibration; under the "
+            "calibrated_full_pa seed policy postop must use the calibrated full-PA model. "
+            f"Run `svzt advance-iter --run-id {manifest.run_id} --execute` (or "
+            f"`svzt run calibrate --run-id {manifest.run_id} --iteration {iteration} --execute`) "
+            "and wait for promotion"
+        )
+    return calibrated
+
+
 def _refresh_selected_reduced_config_from_local_iteration(
     *,
     manifest,
@@ -268,6 +297,17 @@ def _refresh_selected_reduced_config_from_local_iteration(
     selected = manifest.converged_preop_iteration
     if selected is None:
         return manifest, None
+
+    if manifest_uses_calibrated_full_pa(manifest):
+        calibrated_config = _require_calibrated_full_pa_config(manifest, int(selected.iteration))
+        if calibrated_config == selected.remote_tuned_zerod_config:
+            return manifest, selected
+        updated = manifest.model_copy(deep=True)
+        updated.converged_preop_iteration = selected.model_copy(
+            update={"remote_tuned_zerod_config": calibrated_config}
+        )
+        write_manifest(updated, local_paths.manifest)
+        return updated, updated.converged_preop_iteration
 
     iteration_paths = build_iteration_local_paths(local_paths, int(selected.iteration))
     if not iteration_paths["decision"].exists():
@@ -339,11 +379,14 @@ def select_converged_preop_iteration(
     tuned_config = str(artifacts.get("tuned_zerod_config") or "").strip()
     if not tuned_config:
         raise ConfigError(f"iter-{iteration:02d} is missing tuned_zerod_config")
-    selected_reduced_config = _resolve_selected_reduced_config_path(
-        record=record,
-        decision=decision,
-        tuned_config=tuned_config,
-    )
+    if manifest_uses_calibrated_full_pa(manifest):
+        selected_reduced_config = _require_calibrated_full_pa_config(manifest, iteration)
+    else:
+        selected_reduced_config = _resolve_selected_reduced_config_path(
+            record=record,
+            decision=decision,
+            tuned_config=tuned_config,
+        )
 
     remote_iter_dir = str(record.remote_dir or "").strip()
     if not remote_iter_dir:

@@ -8,6 +8,7 @@ from importlib.resources import files
 from pathlib import Path, PurePosixPath
 import json
 import shutil
+import time
 from typing import Callable
 
 import yaml
@@ -62,6 +63,11 @@ from svztagent.core.plan import (
 )
 from svztagent.core.plan_render import render_execution_plan
 from svztagent.core.plan_validate import assert_valid_execution_plan
+from svztagent.core.seed_policy import (
+    effective_tuning_model,
+    manifest_uses_calibrated_full_pa,
+    uses_calibrated_full_pa,
+)
 from svztagent.core.state import RunLifecycleState, coerce_run_lifecycle_state
 from svztagent.core.status import NormalizedRunState
 from svztagent.hpc.executor import CommandExecutor
@@ -78,29 +84,61 @@ from svztagent.hpc.ssh import SshRemoteExecAdapter
 
 REDUCED_SEED_INPUT_FILENAME = "simplified_nonlinear_zerod.json"
 FULL_PA_SEED_INPUT_FILENAME = "full_pa_zerod.json"
+LEARNED_SOURCE_INPUT_FILENAME = "source_0d_config.json"
+OUTLET_MAPPING_KEYS = (
+    "outlet_mapping_mode",
+    "outlet_mapping",
+    "outlet_mapping_centerline",
+)
 
 
-def _effective_tuning_model(tuning_model: str | None, iteration: int) -> str:
-    normalized = str(tuning_model or "rri").strip().lower()
-    if normalized == "full_pa" and iteration > 1:
-        return "rri"
-    return normalized
+def _effective_tuning_model(
+    tuning_model: str | None,
+    iteration: int,
+    seed_policy: str = "calibrated_full_pa",
+) -> str:
+    return effective_tuning_model(tuning_model, iteration, seed_policy)
 
 
-def _seed_input_filename(tuning_model: str | None = None, iteration: int = 1) -> str:
-    if _effective_tuning_model(tuning_model, iteration) == "full_pa":
+def _seed_input_filename(
+    tuning_model: str | None = None,
+    iteration: int = 1,
+    seed_policy: str = "calibrated_full_pa",
+) -> str:
+    if _effective_tuning_model(tuning_model, iteration, seed_policy) == "full_pa":
         return FULL_PA_SEED_INPUT_FILENAME
     return REDUCED_SEED_INPUT_FILENAME
 
 
-def _iteration_impedance_config(impedance_config: dict, iteration: int) -> dict:
+def _iteration_impedance_config(
+    impedance_config: dict,
+    iteration: int,
+    seed_policy: str = "calibrated_full_pa",
+) -> dict:
     rendered = dict(impedance_config)
     rendered["tuning_model"] = _effective_tuning_model(
         rendered.get("tuning_model"),
         iteration,
+        seed_policy,
     )
     if float(rendered.get("diameter_scale") or 0.0) > 0.0:
         rendered["use_mean"] = False
+    # svZeroDTrees rejects outlet mapping keys and objective_tree_policy for
+    # RRI, so unset keys are omitted and RRI iterations (including
+    # legacy_rri_after_first) never carry full-PA-only controls.
+    # proximal_compliance, polish and leaf_resistance are full-PA-only as
+    # well; RRI iterations (legacy_rri_after_first) tune a reduced model
+    # without seed vessels.  Unset optional controls are omitted so a cluster
+    # svZeroDTrees that predates them still accepts the payload.
+    for key in (
+        *OUTLET_MAPPING_KEYS,
+        "objective_tree_policy",
+        "proximal_compliance",
+        "polish",
+        "leaf_resistance",
+    ):
+        if rendered.get(key) is None or rendered["tuning_model"] != "full_pa":
+            rendered.pop(key, None)
     return rendered
 
 
@@ -116,10 +154,11 @@ def _seed_input_filename_for_tuning(
     bc_type: str | None,
     tuning_model: str | None,
     iteration: int,
+    seed_policy: str = "calibrated_full_pa",
 ) -> str:
     if _resolved_tuning_bc_type(bc_type) == "rcr":
         return REDUCED_SEED_INPUT_FILENAME
-    return _seed_input_filename(tuning_model, iteration)
+    return _seed_input_filename(tuning_model, iteration, seed_policy)
 
 
 def _emit_progress(
@@ -174,6 +213,55 @@ class StatusQueryResult:
     adaptation_job_state_normalized: NormalizedRunState | None = None
     failure_error_log_path: str | None = None
     failure_error_log_tail: str | None = None
+    seed_generation: "SeedGenerationSnapshot | None" = None
+
+
+@dataclass(frozen=True)
+class SeedGenerationSnapshot:
+    """Driver-reported next-seed generation for the current iteration."""
+
+    strategy: str
+    status: str
+    regenerated_config_path: str | None = None
+    postprocess_job_id: str | None = None
+    postprocess_state: str | None = None
+    calibration_job_id: str | None = None
+    calibration_state: str | None = None
+    error: str | None = None
+
+
+def _seed_generation_snapshot(
+    decision_payload: dict | None,
+    *,
+    scheduler_adapter: SchedulerAdapter,
+    warnings: list[str],
+) -> SeedGenerationSnapshot | None:
+    block = decision_payload.get("seed_generation") if decision_payload else None
+    if not isinstance(block, dict) or not block.get("strategy"):
+        return None
+    jobs: dict[str, tuple[str | None, str | None]] = {}
+    for label in ("postprocess", "calibration"):
+        entry = block.get(label) if isinstance(block.get(label), dict) else {}
+        job = _poll_child_job(
+            job_id=str(entry.get("job_id")) if entry.get("job_id") else None,
+            scheduler_adapter=scheduler_adapter,
+            warnings=warnings,
+            label=label,
+        )
+        jobs[label] = (
+            job.job_id if job is not None else None,
+            _format_job_state(job.normalized_state, job.raw_state) if job is not None else None,
+        )
+    return SeedGenerationSnapshot(
+        strategy=str(block.get("strategy")),
+        status=str(block.get("status") or "unknown"),
+        regenerated_config_path=block.get("regenerated_config_path"),
+        postprocess_job_id=jobs["postprocess"][0],
+        postprocess_state=jobs["postprocess"][1],
+        calibration_job_id=jobs["calibration"][0],
+        calibration_state=jobs["calibration"][1],
+        error=block.get("error"),
+    )
 
 
 @dataclass(frozen=True)
@@ -1096,6 +1184,28 @@ def _apply_cluster_svzerodsolver_build_dir(
     return resolved
 
 
+def _resolve_effective_tune_cpus(
+    *, scheduler_cpus: str | int | None, tuning_config: dict
+) -> str:
+    """Resolve the parent tune allocation: the tuning ``n_procs`` when set.
+
+    The tune job's own work is the 0D tuning (single-process for impedance
+    tuning; svZeroDTrees does not parallelize tree construction) plus serial
+    bookkeeping; the 3D, prestress, postprocess and calibration steps are
+    separate Slurm jobs.  Requesting more CPUs than ``n_procs`` only leaves
+    cores idle, so scheduler ``cpus`` applies only when ``n_procs`` is absent.
+    """
+
+    scheduler_value = "<count>" if scheduler_cpus is None else str(scheduler_cpus)
+    try:
+        tuning_n_procs = int(tuning_config.get("n_procs"))
+    except (TypeError, ValueError):
+        return scheduler_value
+    if tuning_n_procs <= 0:
+        return scheduler_value
+    return str(tuning_n_procs)
+
+
 def _render_tune_job_script(
     *,
     run_id: str,
@@ -1114,27 +1224,17 @@ def _render_tune_job_script(
     threed_config: dict,
     tuning_bc_type: str,
     tuning_config: dict,
+    iteration1_seed_config: dict,
     mesh_scale_factor: float,
     scheduler_defaults: dict,
+    effective_tune_cpus: str,
     env_hooks: list[str],
     python_executable: str,
     skip_zerod_tuning: bool = False,
+    seed_generation: dict | None = None,
 ) -> str:
     template = _template_text()
     env_block = "\n".join(env_hooks) if env_hooks else "# no environment hooks configured"
-    scheduler_cpus = scheduler_defaults.get("cpus", "<count>")
-    try:
-        scheduler_cpus_int = int(scheduler_cpus)
-    except (TypeError, ValueError):
-        scheduler_cpus_int = None
-    try:
-        tuning_n_procs = int(tuning_config.get("n_procs"))
-    except (TypeError, ValueError):
-        tuning_n_procs = None
-    if tuning_n_procs is not None:
-        sbatch_cpus = str(max(scheduler_cpus_int or 0, tuning_n_procs))
-    else:
-        sbatch_cpus = str(scheduler_cpus)
 
     replacements = {
         "{{RUN_ID}}": run_id,
@@ -1153,13 +1253,19 @@ def _render_tune_job_script(
         "{{THREED_CONFIG_JSON}}": json.dumps(threed_config, sort_keys=True),
         "{{TUNING_BC_TYPE}}": tuning_bc_type,
         "{{ZEROD_TUNING_CONFIG_JSON}}": json.dumps(tuning_config, sort_keys=True),
+        "{{ITERATION1_SEED_CONFIG_JSON}}": json.dumps(
+            iteration1_seed_config, sort_keys=True
+        ),
         "{{MESH_SCALE_FACTOR}}": str(mesh_scale_factor),
         "{{SKIP_ZEROD_TUNING_JSON}}": json.dumps(bool(skip_zerod_tuning)),
+        "{{SEED_GENERATION_JSON}}": json.dumps(
+            seed_generation or {"strategy": "reduced_rri"}, sort_keys=True
+        ),
         "{{SBATCH_ACCOUNT}}": str(scheduler_defaults.get("account") or ""),
         "{{SBATCH_PARTITION}}": str(scheduler_defaults.get("partition", "<partition>")),
         "{{SBATCH_TIME}}": str(scheduler_defaults.get("wall_time", "<HH:MM:SS>")),
         "{{SBATCH_MEM}}": str(scheduler_defaults.get("mem", "<memory>")),
-        "{{SBATCH_CPUS}}": sbatch_cpus,
+        "{{SBATCH_CPUS}}": effective_tune_cpus,
         "{{ENV_HOOKS}}": env_block,
         "{{PYTHON_EXECUTABLE}}": python_executable.strip() or "python3",
     }
@@ -1286,21 +1392,25 @@ def _stage_tune_inputs(
             if pulled_seed is not None:
                 seed = pulled_seed
 
-        previous_paths = build_iteration_local_paths(local_paths, iteration - 1)
-        pulled_results = (
-            local_paths.pulled_outputs
-            / "iterations"
-            / iteration_dir_name(iteration - 1)
-            / "results"
-        )
-        fallback_candidates = [
-            pulled_results / "simplified_zerod_tuned_RRI.json",
-            previous_paths["results"] / "simplified_zerod_tuned_RRI.json",
-        ]
-        for fallback_seed in fallback_candidates:
-            if fallback_seed.exists():
-                seed = fallback_seed
-                break
+        # Reduced-RRI iterations may consume the driver's regenerated seed.
+        # A full_pa iteration must never silently fall back to that reduced
+        # artifact: promotion is the explicit source of its next seed.
+        if seed_input_filename == REDUCED_SEED_INPUT_FILENAME:
+            previous_paths = build_iteration_local_paths(local_paths, iteration - 1)
+            pulled_results = (
+                local_paths.pulled_outputs
+                / "iterations"
+                / iteration_dir_name(iteration - 1)
+                / "results"
+            )
+            fallback_candidates = [
+                pulled_results / "simplified_zerod_tuned_RRI.json",
+                previous_paths["results"] / "simplified_zerod_tuned_RRI.json",
+            ]
+            for fallback_seed in fallback_candidates:
+                if fallback_seed.exists():
+                    seed = fallback_seed
+                    break
     if seed is None and iteration == 1:
         iter1_seed_source = (
             patient_assets.get("iteration1_seed_source") if patient_assets else None
@@ -1336,6 +1446,37 @@ def _stage_tune_inputs(
                         )
                         if pulled_seed is not None:
                             seed = pulled_seed
+        elif iter1_seed_source == "learned_zerod":
+            # A local learned source is staged under a canonical name so the
+            # rendered driver never needs to reference the workspace path.
+            # Remote-only sources remain referenced by their resolved patient
+            # path and are validated by the execute-time driver.
+            candidate = Path(str(iter1_seed_path or "")).expanduser()
+            if candidate.exists() and not candidate.is_file():
+                raise ConfigError(
+                    "configured learned source must be a readable 0D JSON file: "
+                    f"{candidate}"
+                )
+            if candidate.is_file():
+                target = iteration_paths["staged_inputs"] / LEARNED_SOURCE_INPUT_FILENAME
+                try:
+                    shutil.copyfile(candidate, target)
+                except OSError as exc:
+                    raise ConfigError(
+                        "configured learned source could not be staged: "
+                        f"{candidate}"
+                    ) from exc
+            elif (
+                candidate.is_absolute()
+                and mode == ExecutionMode.EXECUTE
+                and remote_exec_adapter is not None
+            ):
+                result = remote_exec_adapter.run(["test", "-f", str(candidate)])
+                if not result.dry_run and result.returncode != 0:
+                    raise ConfigError(
+                        "configured learned source is unavailable on the execution host: "
+                        f"{candidate}"
+                    )
         elif iter1_seed_source == "generate":
             pass
 
@@ -1355,6 +1496,7 @@ def _build_default_adapters(
     config,
     run_id: str,
     mode: ExecutionMode,
+    effective_tune_cpus: str | None = None,
 ) -> tuple[FileTransferAdapter, SchedulerAdapter, RemoteExecAdapter]:
     executor = CommandExecutor(mode=mode)
     remote = SshRemoteExecAdapter(
@@ -1381,7 +1523,11 @@ def _build_default_adapters(
             partition=config.defaults.scheduler.partition,
             wall_time=config.defaults.scheduler.wall_time,
             mem=config.defaults.scheduler.mem,
-            cpus=config.defaults.scheduler.cpus,
+            cpus=(
+                effective_tune_cpus
+                if effective_tune_cpus is not None
+                else config.defaults.scheduler.cpus
+            ),
         ),
     )
     return transfer, scheduler, remote
@@ -1426,6 +1572,26 @@ def run_tune_trees(
 
     manifest = read_manifest(local_paths.manifest)
     resolved_iteration = _resolve_iteration(manifest, iteration)
+    calibration_policy = getattr(patient, "calibration", None)
+    seed_policy = (
+        calibration_policy.next_iteration_seed_policy
+        if calibration_policy is not None
+        else "calibrated_full_pa"
+    )
+    tuning_bc_type = _resolved_tuning_bc_type(patient.bc_type)
+    tuning_config = (
+        _iteration_impedance_config(
+            patient.impedance.model_dump(mode="json"),
+            resolved_iteration,
+            seed_policy,
+        )
+        if tuning_bc_type == "impedance"
+        else patient.rcr.model_dump(mode="json")
+    )
+    effective_tune_cpus = _resolve_effective_tune_cpus(
+        scheduler_cpus=config.defaults.scheduler.cpus,
+        tuning_config=tuning_config,
+    )
     remote_layout = _iteration_remote_layout(
         runs_root=cluster.remote_roots.runs_root,
         run_id=resolved_run_id,
@@ -1459,6 +1625,7 @@ def run_tune_trees(
             config=config,
             run_id=resolved_run_id,
             mode=mode,
+            effective_tune_cpus=effective_tune_cpus,
         )
         transfer_adapter = transfer_adapter or default_transfer
         scheduler_adapter = scheduler_adapter or default_scheduler
@@ -1472,7 +1639,20 @@ def run_tune_trees(
         ),
         None,
     )
-    seed_config = prior_record.regenerated_config_path if prior_record else None
+    effective_model = _effective_tuning_model(
+        patient.impedance.tuning_model,
+        resolved_iteration,
+        seed_policy,
+    )
+    if effective_model == "full_pa" and resolved_iteration > 1:
+        seed_config = prior_record.calibrated_seed_path if prior_record else None
+        if not seed_config:
+            raise ConfigError(
+                f"full_pa iteration {resolved_iteration} requires a terminal successful "
+                "calibration promotion from the previous iteration; no promoted seed is recorded"
+            )
+    else:
+        seed_config = prior_record.regenerated_config_path if prior_record else None
     _emit_progress(
         progress_callback,
         f"[svzt] Staging inputs for iteration {resolved_iteration}",
@@ -1487,6 +1667,7 @@ def run_tune_trees(
             bc_type=patient.bc_type,
             tuning_model=patient.impedance.tuning_model,
             iteration=resolved_iteration,
+            seed_policy=seed_policy,
         ),
         patient_assets=(
             patient.patient_assets.model_dump(mode="json")
@@ -1498,22 +1679,56 @@ def run_tune_trees(
         mode=mode,
     )
 
+    learned_source_path = (
+        patient.patient_assets.iteration1_seed_path
+        if patient.patient_assets
+        else None
+    )
+    staged_learned_source = (
+        local_iteration_paths["staged_inputs"] / LEARNED_SOURCE_INPUT_FILENAME
+    )
+    if (
+        patient.patient_assets
+        and patient.patient_assets.iteration1_seed_source == "learned_zerod"
+        and staged_learned_source.is_file()
+    ):
+        learned_source_path = str(
+            PurePosixPath(remote_inputs_dir) / LEARNED_SOURCE_INPUT_FILENAME
+        )
+
     local_iteration_paths["root"].mkdir(parents=True, exist_ok=True)
     local_script_path = local_iteration_paths["job_script"]
     cluster_svfsiplus_path = _resolve_cluster_svfsiplus_path(
         cluster_name=cluster.name,
         configured_path=cluster.executables.svfsiplus_path,
     )
-    _emit_progress(progress_callback, "[svzt] Rendering job script")
-    tuning_bc_type = _resolved_tuning_bc_type(patient.bc_type)
-    tuning_config = (
-        _iteration_impedance_config(
-            patient.impedance.model_dump(mode="json"),
-            resolved_iteration,
-        )
-        if tuning_bc_type == "impedance"
-        else patient.rcr.model_dump(mode="json")
+    # Seed generation is one driver step with a policy-selected strategy: the
+    # driver regenerates the reduced RRI seed inline, or submits the
+    # pre-rendered postprocess + calibration jobs for a calibrated full-PA model.
+    from svztagent.workflows.seed_generation import (
+        prepare_calibrated_full_pa_seed_generation,
+        reduced_rri_seed_generation,
     )
+
+    if uses_calibrated_full_pa(
+        bc_type=tuning_bc_type,
+        effective_tuning_model=effective_model,
+        seed_policy=seed_policy,
+    ):
+        _emit_progress(progress_callback, "[svzt] Rendering postprocess and calibration jobs")
+        seed_generation = prepare_calibrated_full_pa_seed_generation(
+            workspace_root=workspace,
+            manifest=manifest,
+            config=config,
+            cluster=cluster,
+            iteration=resolved_iteration,
+            remote_run_dir=remote_run_dir,
+            remote_exec_adapter=remote_exec_adapter,
+        )
+    else:
+        seed_generation = reduced_rri_seed_generation()
+
+    _emit_progress(progress_callback, "[svzt] Rendering job script")
     script_body = _render_tune_job_script(
         run_id=resolved_run_id,
         iteration=resolved_iteration,
@@ -1541,11 +1756,25 @@ def run_tune_trees(
         ),
         tuning_bc_type=tuning_bc_type,
         tuning_config=tuning_config,
+        iteration1_seed_config={
+            "source": patient.patient_assets.iteration1_seed_source,
+            "path": learned_source_path,
+            "learned_zerod_executable": (
+                patient.patient_assets.iteration1_seed_learned_zerod_executable
+            ),
+            "svzerodsolver_executable": (
+                patient.patient_assets.iteration1_seed_svzerodsolver_executable
+            ),
+        }
+        if patient.patient_assets
+        else {"source": "path"},
         mesh_scale_factor=patient.mesh_scale_factor,
         scheduler_defaults=config.defaults.scheduler.model_dump(mode="json"),
+        effective_tune_cpus=effective_tune_cpus,
         env_hooks=config.defaults.execution.env_activation_hooks,
         python_executable=config.defaults.execution.python_executable,
         skip_zerod_tuning=skip_zerod_tuning,
+        seed_generation=seed_generation.spec,
     )
     local_script_path.write_text(script_body, encoding="utf-8")
 
@@ -1556,6 +1785,10 @@ def run_tune_trees(
     command_results.append(transfer_adapter.ensure_remote_dir(remote_inputs_dir))
     command_results.append(transfer_adapter.ensure_remote_dir(remote_results_dir))
     command_results.append(transfer_adapter.ensure_remote_dir(remote_logs_dir))
+    for remote_dir in seed_generation.remote_dirs:
+        command_results.append(transfer_adapter.ensure_remote_dir(remote_dir))
+    for local_file, remote_file in seed_generation.uploads:
+        command_results.append(transfer_adapter.push(str(local_file), remote_file))
     _emit_progress(progress_callback, "[svzt] Syncing staged inputs to cluster")
     command_results.append(
         transfer_adapter.sync(
@@ -2024,6 +2257,11 @@ def query_run_status(
         postop_job_state_normalized=postop_job.normalized_state if postop_job is not None else None,
         failure_error_log_path=failure_error_log_path,
         failure_error_log_tail=failure_error_log_tail,
+        seed_generation=_seed_generation_snapshot(
+            decision_payload,
+            scheduler_adapter=scheduler_adapter,
+            warnings=progress_warnings,
+        ),
     )
 
 
@@ -2273,6 +2511,57 @@ def watch_and_auto_advance_tuning(
             remote_exec_adapter=remote_exec_adapter,
         )
 
+        if advance_result.action in {"calibration_submitted", "calibration_pending"}:
+            from svztagent.workflows.calibrate import finalize_calibration_if_ready
+
+            calibration_polls = 0
+            calibration_started = time.monotonic()
+            calibration_poll_interval = (
+                poll_interval_seconds
+                if poll_interval_seconds is not None
+                else config.defaults.monitoring.poll_interval_seconds
+            )
+            while True:
+                calibration_status = finalize_calibration_if_ready(
+                    root,
+                    validated_run_id,
+                    iteration=current_iteration,
+                    transfer_adapter=transfer_adapter,
+                    scheduler_adapter=scheduler_adapter,
+                )
+                if calibration_status.promotion_status == "promoted":
+                    advance_result = advance_tune_iteration(
+                        workspace_root=root,
+                        run_id=validated_run_id,
+                        execute=True,
+                        transfer_adapter=transfer_adapter,
+                        scheduler_adapter=scheduler_adapter,
+                        remote_exec_adapter=remote_exec_adapter,
+                    )
+                    break
+                if calibration_status.status == "failed":
+                    advance_result = AdvanceIterationResult(
+                        run_id=validated_run_id,
+                        previous_iteration=current_iteration,
+                        next_iteration=None,
+                        tracker_status=read_manifest(local_paths.manifest).tuning_iteration_tracker.status,
+                        action="calibration_failed",
+                        submitted_job_id=calibration_status.scheduler_job_id,
+                    )
+                    break
+                calibration_polls += 1
+                if max_polls is not None and calibration_polls >= max_polls:
+                    raise ConfigError(
+                        f"full-PA calibration for run '{validated_run_id}' exceeded max_polls={max_polls}"
+                    )
+                if timeout_seconds is not None and (
+                    time.monotonic() - calibration_started >= timeout_seconds
+                ):
+                    raise ConfigError(
+                        f"full-PA calibration for run '{validated_run_id}' exceeded timeout_seconds={timeout_seconds}"
+                    )
+                time.sleep(max(calibration_poll_interval, 5))
+
         records.append(
             AutoAdvanceIterationRecord(
                 iteration=current_iteration,
@@ -2307,6 +2596,15 @@ def watch_and_auto_advance_tuning(
             return AutoAdvanceResult(
                 run_id=validated_run_id,
                 final_action="max_iter_failed",
+                tracker_status=advance_result.tracker_status,
+                final_iteration=current_iteration,
+                final_terminal_state=watch_result.terminal_state,
+                iterations=records,
+            )
+        if advance_result.action == "calibration_failed":
+            return AutoAdvanceResult(
+                run_id=validated_run_id,
+                final_action="calibration_failed",
                 tracker_status=advance_result.tracker_status,
                 final_iteration=current_iteration,
                 final_terminal_state=watch_result.terminal_state,
@@ -2506,6 +2804,42 @@ def fetch_run_artifacts(
     )
 
 
+def _ensure_calibrated_full_pa_model(
+    *,
+    root: Path,
+    run_id: str,
+    iteration: int,
+    execute: bool,
+    tracker_status: str,
+    transfer_adapter: FileTransferAdapter | None,
+    scheduler_adapter: SchedulerAdapter | None,
+    remote_exec_adapter: RemoteExecAdapter | None,
+) -> AdvanceIterationResult | None:
+    """Return a waiting result until the iteration's calibration is promoted."""
+
+    from svztagent.workflows.calibrate import ensure_iteration_calibration
+
+    gate = ensure_iteration_calibration(
+        root,
+        run_id,
+        iteration=iteration,
+        execute=execute,
+        transfer_adapter=transfer_adapter,
+        scheduler_adapter=scheduler_adapter,
+        remote_exec_adapter=remote_exec_adapter,
+    )
+    if gate.promoted:
+        return None
+    return AdvanceIterationResult(
+        run_id=run_id,
+        previous_iteration=iteration,
+        next_iteration=None,
+        tracker_status=tracker_status,
+        action=str(gate.action),
+        submitted_job_id=gate.scheduler_job_id,
+    )
+
+
 def advance_tune_iteration(
     workspace_root: str | Path,
     run_id: str,
@@ -2566,9 +2900,11 @@ def advance_tune_iteration(
         manifest = mark_iteration_decision(
             manifest,
             iteration=current_iteration,
+            # An operator override (e.g. ``svzt continue``) already recorded in
+            # the manifest must not be reverted by the driver's artifact.
             decision=str(
-                decision_payload.get("decision")
-                or current_record.decision
+                current_record.decision
+                or decision_payload.get("decision")
                 or "not_close"
             ),
             metrics=payload_metrics or current_record.metrics,
@@ -2611,6 +2947,32 @@ def advance_tune_iteration(
             tracker_status=manifest.tuning_iteration_tracker.status,
             action="paused_needs_review",
             submitted_job_id=None,
+        )
+
+    # Under calibrated_full_pa every completed iteration needs its calibrated
+    # full-PA model before the run moves on, regardless of decision: a
+    # not-close iteration seeds its successor with it, and a converged (or
+    # final) iteration hands it to postop for the preop/postop comparison.
+    # Calibration is an upstream scheduled workflow, so it may remain pending
+    # across invocations.
+    if manifest_uses_calibrated_full_pa(manifest):
+        calibration_gate = _ensure_calibrated_full_pa_model(
+            root=root,
+            run_id=validated_run_id,
+            iteration=current_iteration,
+            execute=execute,
+            tracker_status=tracker.status,
+            transfer_adapter=transfer_adapter,
+            scheduler_adapter=scheduler_adapter,
+            remote_exec_adapter=remote_exec_adapter,
+        )
+        if calibration_gate is not None:
+            return calibration_gate
+        manifest = read_manifest(local_paths.manifest)
+        tracker = manifest.tuning_iteration_tracker
+        current_record = next(
+            (record for record in tracker.iterations if record.iteration == current_iteration),
+            current_record,
         )
 
     if decision == "converged":
@@ -2758,6 +3120,23 @@ def continue_tune_iteration(
         postop_submission_requested=False,
     )
     write_manifest(manifest, local_paths.manifest)
+
+    # The forced not-close iteration still owes its calibrated full-PA
+    # successor; the full-PA seed for the next iteration has no other source.
+    if manifest_uses_calibrated_full_pa(manifest):
+        calibration_gate = _ensure_calibrated_full_pa_model(
+            root=root,
+            run_id=validated_run_id,
+            iteration=current_iteration,
+            execute=execute,
+            tracker_status=manifest.tuning_iteration_tracker.status,
+            transfer_adapter=transfer_adapter,
+            scheduler_adapter=scheduler_adapter,
+            remote_exec_adapter=remote_exec_adapter,
+        )
+        if calibration_gate is not None:
+            return calibration_gate
+        manifest = read_manifest(local_paths.manifest)
 
     manifest = advance_iteration(manifest)
     write_manifest(manifest, local_paths.manifest)

@@ -1,0 +1,404 @@
+{
+  "project_goal": "Make learned-zeroD full-PA tuning start from an explicit validated 0D source without legacy 3D steady seed generation, and ensure the tune driver receives the CPU allocation it renders and requires.",
+  "requested_outcome": "A TST-STAN-5-style learned_zerod/full_pa run must bypass seed-generation steady, preop, and postop scaffolding; fail fast when its configured source 0D model is unavailable; submit the parent tune job with resources consistent with its rendered script and 0D tuning parallelism; and retain regression evidence and accurate operator documentation.",
+  "repository_context": {
+    "summary": "svzt-agent resolves patient seed configuration, stages iteration inputs, renders a Slurm/Python tune driver, and submits that driver through typed adapters. The current learned seed path reuses the reduced-seed generator, while the renderer and scheduler adapter independently resolve CPU counts.",
+    "facts": [
+      {
+        "fact": "The learned seed driver always invokes the legacy reduced-seed generator before the learned-zeroD adapter.",
+        "evidence": [
+          "src/svztagent/templates/slurm/job_template.sh:372-404",
+          "docs/EXECUTION.md:116-132"
+        ]
+      },
+      {
+        "fact": "The legacy reduced-seed generator creates seed_generation/preop and seed_generation/postop and runs sys, dia, and mean steady simulations.",
+        "evidence": [
+          "src/svztagent/templates/slurm/job_template.sh:328-369",
+          "../svZeroDTrees/src/svzerodtrees/simulation/simulation.py:694-724"
+        ]
+      },
+      {
+        "fact": "Iteration1SeedConfig already exposes a path field and patient asset resolution converts it to an absolute patient path.",
+        "evidence": [
+          "src/svztagent/config/models.py:278-304",
+          "src/svztagent/config/load.py:173-211"
+        ]
+      },
+      {
+        "fact": "The generated tune script chooses the maximum of scheduler cpus and tuning n_procs, but the scheduler adapter submits with the unmodified scheduler default.",
+        "evidence": [
+          "src/svztagent/workflows/tune_trees.py:1143-1158",
+          "src/svztagent/workflows/tune_trees.py:1403-1413",
+          "src/svztagent/hpc/slurm.py:22-38"
+        ]
+      },
+      {
+        "fact": "Calibration enablement remains explicit policy and does not automatically chain postprocess or calibration jobs.",
+        "evidence": [
+          "docs/EXECUTION.md:217-229",
+          "docs/ARCHITECTURE.md:189-204"
+        ]
+      }
+    ]
+  },
+  "constraints": [
+    {
+      "id": "C-001",
+      "constraint": "Patient/Oak data is read-only and all generated artifacts remain under the configured runs_root.",
+      "source": "repository",
+      "evidence": [
+        "AGENTS.md:46-55",
+        "docs/PATIENT_DATA_CONTRACT.md:29-31"
+      ],
+      "implication": "The learned source may be read from its configured patient path, but copies, generated seeds, and provenance must be written only inside the run directory."
+    },
+    {
+      "id": "C-002",
+      "constraint": "Remote execution, transfer, and Slurm actions must continue through typed adapters.",
+      "source": "repository",
+      "evidence": [
+        "AGENTS.md:49-52",
+        "docs/EXECUTION.md:438-445"
+      ],
+      "implication": "Preflight and staging changes cannot add workflow-level SSH, rsync, sbatch, or arbitrary shell passthrough."
+    },
+    {
+      "id": "C-003",
+      "constraint": "The change must preserve source=generate reduced-seed behavior and source=path staging behavior.",
+      "source": "repository",
+      "evidence": [
+        "docs/EXECUTION.md:116-121",
+        "tests/test_run_tune_dry_run.py:165-331"
+      ],
+      "implication": "Only learned_zerod semantics may bypass the legacy steady generator; reduced generation remains available explicitly."
+    },
+    {
+      "id": "C-004",
+      "constraint": "Calibration automation is outside this corrective change because the repository documents it as a separate explicit workflow and integration gap.",
+      "source": "repository",
+      "evidence": [
+        "docs/EXECUTION.md:217-229",
+        "src/svztagent/workflows/calibrate.py:398-599"
+      ],
+      "implication": "The fix must document the explicit preop-select/postprocess/calibrate sequence and must not silently broaden watch or tune-run authority."
+    },
+    {
+      "id": "C-005",
+      "constraint": "No new dependency is warranted for source staging or CPU resolution.",
+      "source": "repository",
+      "evidence": [
+        "AGENTS.md:6-10",
+        "src/svztagent/workflows/tune_trees.py:1217-1371"
+      ],
+      "implication": "Reuse existing config models, transfer adapters, path validation, and Slurm option types."
+    }
+  ],
+  "invariants": [
+    {
+      "id": "I-001",
+      "invariant": "A learned_zerod run never invokes run_steady_sims or constructs legacy seed_generation preop/postop directories.",
+      "rationale": "The learned adapter requires a source 0D JSON and centerline, not new 3D steady results; eliminating this implicit branch removes the observed multi-hour failure path.",
+      "evidence": [
+        "../svZeroDTrees/src/svzerodtrees/tuning/learned_seed.py:238-294",
+        "src/svztagent/templates/slurm/job_template.sh:394-404"
+      ]
+    },
+    {
+      "id": "I-002",
+      "invariant": "Missing or unreadable learned source input fails before learned-zeroD execution and never falls back to reduced steady generation.",
+      "rationale": "Repository policy prefers fail-fast behavior and a fallback would recreate the expensive, unintended path.",
+      "evidence": [
+        "AGENTS.md:88-94",
+        "src/svztagent/config/models.py:286-304"
+      ]
+    },
+    {
+      "id": "I-003",
+      "invariant": "The requested Slurm CPU count for the parent tune job equals the CPU count embedded in its rendered script and is at least impedance n_procs.",
+      "rationale": "Submission CLI options override script directives, so one resolver must drive both paths.",
+      "evidence": [
+        "src/svztagent/workflows/tune_trees.py:1146-1158",
+        "src/svztagent/hpc/slurm.py:25-37"
+      ]
+    },
+    {
+      "id": "I-004",
+      "invariant": "Generated inputs and provenance remain deterministic, inspectable, and run-scoped.",
+      "rationale": "Plans, manifests, and run artifacts are the source of truth for reproducibility.",
+      "evidence": [
+        "AGENTS.md:53-55",
+        "docs/PLANNING.md:1-30"
+      ]
+    }
+  ],
+  "components": [
+    {
+      "name": "Iteration-1 learned seed staging and execution",
+      "purpose": "Resolve the configured source 0D model, make it available to the remote driver, and invoke learned-zeroD without legacy 3D seed generation.",
+      "affected_files": [
+        {
+          "path": "src/svztagent/workflows/tune_trees.py",
+          "change": "modify",
+          "reason": "Carry the resolved learned source path through staging and rendered runtime configuration."
+        },
+        {
+          "path": "src/svztagent/templates/slurm/job_template.sh",
+          "change": "modify",
+          "reason": "Replace the unconditional reduced-seed generation call with validated source copying and learned adapter invocation."
+        },
+        {
+          "path": "tests/test_run_tune_dry_run.py",
+          "change": "modify",
+          "reason": "Lock learned-path rendering, staging, fail-fast, and no-steady behavior."
+        },
+        {
+          "path": "docs/EXECUTION.md",
+          "change": "modify",
+          "reason": "Document learned source semantics and explicit calibration continuation."
+        },
+        {
+          "path": "docs/PATIENT_DATA_CONTRACT.md",
+          "change": "modify",
+          "reason": "Describe the canonical read-only learned source asset and run-scoped copy."
+        }
+      ],
+      "notes": [
+        "source=generate continues to own steady-based reduced seed creation.",
+        "The learned source filename inside the run should be canonical and independent of the patient source basename."
+      ]
+    },
+    {
+      "name": "Tune job resource resolution",
+      "purpose": "Resolve parent tune-job CPUs once and use the same value for rendering and Slurm submission.",
+      "affected_files": [
+        {
+          "path": "src/svztagent/workflows/tune_trees.py",
+          "change": "modify",
+          "reason": "Introduce one resource resolver and pass its result to the renderer and scheduler adapter."
+        },
+        {
+          "path": "tests/test_run_tune_dry_run.py",
+          "change": "modify",
+          "reason": "Verify script and submission use the same max(default cpus, n_procs) value."
+        },
+        {
+          "path": "docs/ARCHITECTURE.md",
+          "change": "modify",
+          "reason": "Record the single resource-resolution boundary for tune execution."
+        }
+      ],
+      "notes": [
+        "This change corrects the outer allocation; it does not authorize arbitrary nested Slurm submission.",
+        "RCR and impedance paths must retain their configured process semantics."
+      ]
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "defaults.tuning.iteration1_seed.path",
+      "kind": "configuration",
+      "current_contract": "The path field defaults to simplified_nonlinear_zerod.json, is resolved under the patient root, and is actively staged only for source=path; learned_zerod ignores it and generates a source model through steady simulations.",
+      "proposed_contract": "For source=learned_zerod, path identifies the required input 0D JSON supplied to learned-zeroD. It is resolved using existing patient-path rules, copied or staged read-only into the run when appropriate, and missing input fails closed without steady fallback.",
+      "compatibility_requirements": [
+        "source=path retains its current reduced/full seed staging semantics.",
+        "source=generate retains steady-based reduced generation.",
+        "Existing executable override keys remain unchanged."
+      ],
+      "evidence": [
+        "src/svztagent/config/models.py:278-304",
+        "src/svztagent/config/load.py:173-211",
+        "src/svztagent/workflows/tune_trees.py:1333-1371"
+      ]
+    },
+    {
+      "name": "Rendered learned seed runtime configuration",
+      "kind": "function",
+      "current_contract": "The renderer passes source and executable names but omits the resolved seed path.",
+      "proposed_contract": "The renderer also passes the resolved or staged source 0D path, and the remote driver validates it before copying it into seed_generation/learned/source_0d_config.json and invoking the upstream adapter.",
+      "compatibility_requirements": [
+        "Rendered scripts remain deterministic and compilable Python/Bash.",
+        "No patient source file is mutated."
+      ],
+      "evidence": [
+        "src/svztagent/workflows/tune_trees.py:1583-1609",
+        "src/svztagent/templates/slurm/job_template.sh:394-418"
+      ]
+    },
+    {
+      "name": "Tune Slurm CPU options",
+      "kind": "configuration",
+      "current_contract": "The script header uses max(scheduler cpus, tuning n_procs), while SlurmSubmitOptions receives scheduler cpus directly and overrides the header.",
+      "proposed_contract": "A single resolved tune CPU value is calculated after patient tuning resolution and supplied to both the rendered header and SlurmSubmitOptions.",
+      "compatibility_requirements": [
+        "Other scheduler defaults remain unchanged.",
+        "Custom/fake scheduler adapters remain injectable for tests."
+      ],
+      "evidence": [
+        "src/svztagent/workflows/tune_trees.py:1146-1158",
+        "src/svztagent/workflows/tune_trees.py:1390-1415"
+      ]
+    }
+  ],
+  "data_flows": [
+    {
+      "name": "Learned full-PA seed generation",
+      "current_flow": "Resolve learned_zerod policy -> create seed_generation preop/postop -> run sys/dia/mean 3D steady solves -> generate reduced source JSON -> invoke learned-zeroD -> publish full_pa_zerod.json.",
+      "proposed_flow": "Resolve learned_zerod policy and configured source path -> validate/stage a read-only source JSON -> copy it to run-scoped learned provenance input -> invoke learned-zeroD with centerline and svZeroDSolver -> validate/publish full_pa_zerod.json.",
+      "data_or_control": "A source 0D JSON and centerline cross from read-only patient storage into the run-scoped learned adapter; generated full-PA seed and metadata remain under runs_root.",
+      "trust_boundaries": [
+        "Patient/Oak source tree is read-only.",
+        "External learned-zerod and svzerodsolver executables are resolved and validated by svZeroDTrees.",
+        "Run output paths are constrained under runs_root."
+      ],
+      "failure_modes": [
+        "Configured source path is missing or unreadable.",
+        "Source JSON is invalid.",
+        "External executable is missing or fails.",
+        "Generated full-PA output fails upstream validation."
+      ]
+    },
+    {
+      "name": "Tune job resource selection",
+      "current_flow": "Renderer computes an effective CPU count, then scheduler adapter independently submits with the lower scheduler default, overriding the script.",
+      "proposed_flow": "Workflow computes effective tune CPUs once -> renderer writes that value -> default Slurm adapter submits with that same value -> Slurm allocation matches tuning parallelism.",
+      "data_or_control": "Resolved integer CPU count flows from patient/default tuning configuration to script rendering and typed scheduler options.",
+      "trust_boundaries": [
+        "Workspace configuration is validated before execution.",
+        "Slurm command construction remains inside the typed scheduler adapter."
+      ],
+      "failure_modes": [
+        "Non-integer or non-positive CPU configuration.",
+        "Future call sites bypass the shared resolver.",
+        "Cluster policy rejects the requested CPU count."
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "AD-001",
+      "decision": "Redefine iteration1_seed.path as the required input 0D JSON for source=learned_zerod and remove implicit reduced steady generation from that branch.",
+      "rationale": "The upstream learned adapter consumes an existing 0D JSON and centerline directly. The current implicit generation creates unrelated directories and three expensive 3D solves, while the existing config model already provides a validated, patient-resolved path."
+    },
+    {
+      "id": "AD-002",
+      "decision": "Copy or stage the configured learned source into a canonical run-scoped provenance path before invocation, while preserving the patient source as read-only.",
+      "rationale": "A run-scoped copy makes the exact learned input inspectable and digestible without mutating Oak; it also gives the external adapter a stable input path."
+    },
+    {
+      "id": "AD-003",
+      "decision": "Use one pure tune-job CPU resolver for both script rendering and default Slurm submission, resolving to max(scheduler cpus, tuning n_procs).",
+      "rationale": "Slurm CLI options override script headers. A single resolver prevents configuration drift and retains sufficient CPUs for current 0D tuning parallelism."
+    },
+    {
+      "id": "AD-004",
+      "decision": "Keep full-PA calibration as the existing explicit preop-select/postprocess/run-calibrate sequence in this change and document it clearly.",
+      "rationale": "Automatic calibration chaining changes lifecycle authority and spans monitoring, postprocess, scheduler dependencies, and promotion semantics. The repository explicitly labels it an integration gap, so folding it into a seed/resource correction would violate focused-change and autonomy boundaries."
+    }
+  ],
+  "compatibility": {
+    "preserved_behaviors": [
+      "source=generate continues producing reduced seeds from steady simulations.",
+      "source=path continues staging the configured seed with its current missing-path behavior.",
+      "Learned seed executable override names and upstream output validation remain unchanged.",
+      "Calibration remains explicitly initiated and guarded by existing manifest prerequisites."
+    ],
+    "intentional_changes": [
+      "source=learned_zerod now requires its configured path to exist and never falls back to steady generation.",
+      "Learned runs no longer create legacy seed_generation/preop, postop, or steady directories.",
+      "Default Slurm submission requests the same effective CPUs rendered into the tune script."
+    ],
+    "versioning_strategy": "No schema-version bump is required because existing configuration keys are reused; update operator docs and tests to make the tightened learned_zerod path semantics explicit."
+  },
+  "migration": {
+    "required": true,
+    "strategy": "Before starting a new learned_zerod run, configure iteration1_seed.path to an existing patient-level input 0D JSON (for TST-STAN-5, select and verify the intended baseline rather than the missing simplified_nonlinear_zerod.json default). Existing historical run directories and manifests are not mutated.",
+    "affected_data_or_state": [
+      "Workspace patient/default configuration for learned_zerod runs.",
+      "New run directory layout under iterations/iter-01/seed_generation/learned.",
+      "Parent tune-job Slurm allocation."
+    ],
+    "backward_compatibility_window": "Reduced source=generate and source=path workflows remain supported indefinitely; learned_zerod configurations relying on implicit steady generation must set a valid path before their next execution.",
+    "rollback_strategy": "Revert the code and documentation changes and use source=generate explicitly if legacy reduced steady generation is desired; do not rewrite or delete artifacts from existing runs."
+  },
+  "testing_strategy": {
+    "architecture_validation": [
+      "Validate architecture.json against the Architect schema.",
+      "Validate tasks.json against the Planner schema and dependency rules."
+    ],
+    "contract_tests": [
+      "Assert learned_zerod rendered runtime configuration contains its resolved source path.",
+      "Assert the learned helper copies/uses the configured source and does not call _generate_iteration_seed or run_steady_sims.",
+      "Assert missing learned source fails closed in the rendered driver or execute preflight.",
+      "Assert effective tune CPUs equal max(scheduler cpus, tuning n_procs)."
+    ],
+    "integration_tests": [
+      "Exercise dry-run and fake-adapter execute staging for local and remote learned source paths.",
+      "Capture default scheduler submission options and compare them with the rendered #SBATCH CPU directive."
+    ],
+    "end_to_end_tests": [
+      "Render a TST-STAN-style learned/full_pa iteration and compile both embedded Python blocks.",
+      "After local tests pass, perform a new run-ID Sherlock smoke test separately; verify no seed_generation/steady, preop, or postop directories appear before learned generation."
+    ],
+    "operational_checks": [
+      "Confirm a new Sherlock job allocation reports the expected CPU count in scontrol show job.",
+      "Confirm learned_seed_metadata.json and full_pa_zerod.json appear under the run-scoped learned directory.",
+      "Continue calibration only through explicit selected-preop postprocess and run calibrate commands."
+    ]
+  },
+  "risks": [
+    {
+      "id": "R-001",
+      "risk": "The configured baseline_0d.json may not be the scientifically intended learned-zeroD input for TST-STAN-5.",
+      "impact": "A technically valid run could generate the wrong full-PA seed lineage.",
+      "likelihood": "medium",
+      "mitigation": "Require the operator to select the intended patient baseline explicitly; record the run-scoped copy and upstream digest before launching a new run."
+    },
+    {
+      "id": "R-002",
+      "risk": "Remote-only source staging may diverge between dry-run and execute behavior.",
+      "impact": "A dry-run could look valid while execution fails before learned generation.",
+      "likelihood": "medium",
+      "mitigation": "Render an explicit source path in dry-run, perform typed-adapter existence/pull checks in execute mode, and test both paths."
+    },
+    {
+      "id": "R-003",
+      "risk": "Resource resolution changes may affect RCR or injected scheduler-adapter tests.",
+      "impact": "Unrelated tuning paths could request different resources or lose test injectability.",
+      "likelihood": "low",
+      "mitigation": "Keep the resolver pure, preserve custom adapter injection, and add focused impedance plus default-path regression tests."
+    },
+    {
+      "id": "R-004",
+      "risk": "The repository currently has substantial uncommitted work overlapping affected files.",
+      "impact": "Parallel builders could overwrite or omit in-progress calibration and workflow changes.",
+      "likelihood": "high",
+      "mitigation": "Orchestrate builders from an isolated snapshot commit that contains the current working tree, assign serial tasks for shared files, and integrate without resetting the user's main worktree."
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "A-001",
+      "assumption": "learned-zeroD accepts the existing patient baseline 0D schema used by svZeroDTrees as its --zerod-json input.",
+      "basis": "generate_full_pa_learned_seed validates a JSON file and passes it directly to the external executable; the observed TST-STAN-5 baseline contains vessels, junctions, boundary_conditions, and simulation_parameters.",
+      "impact_if_false": "The operator must generate or select a different patient baseline artifact, but the no-steady orchestration design remains valid.",
+      "validation": "Run the external learned-zeroD adapter against the explicitly selected baseline in a new smoke run and retain learned_seed_metadata.json."
+    },
+    {
+      "id": "A-002",
+      "assumption": "Impedance tuning n_procs is the correct lower bound for the parent tune job CPU allocation.",
+      "basis": "The renderer already applies this rule, and tests expect a 24-CPU header for n_procs=24.",
+      "impact_if_false": "The shared resolver needs a different resource policy before production execution.",
+      "validation": "Run focused tests and inspect the first corrected Sherlock allocation and 0D tuning process usage."
+    }
+  ],
+  "open_questions": [
+    {
+      "id": "Q-001",
+      "question": "Which TST-STAN-5 patient artifact is the scientifically approved learned-zeroD source: baseline_0d.json or a new zerod-models/baseline_0d_learned.json?",
+      "why_it_matters": "The code can enforce and preserve lineage, but it cannot infer which baseline is scientifically authoritative.",
+      "blocking": false,
+      "resolution_owner": "User/operator before launching the replacement Sherlock run"
+    }
+  ]
+}

@@ -94,14 +94,32 @@ def _load_svzerodtrees_tuning(workspace_root: Path):
     return importlib.import_module("svzerodtrees.tuning")
 
 
+def _gate_kwargs_from_decision(decision_payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Reuse the job's sigma-mode gate settings (iteration_decision.json)."""
+    if not isinstance(decision_payload, Mapping) or decision_payload.get("gate_mode") != "sigma":
+        return {}
+    sigma = decision_payload.get("sigma")
+    if not isinstance(sigma, Mapping):
+        return {}
+    try:
+        return {
+            "sigma": {"pressure_mmhg": float(sigma["pressure_mmhg"]), "split": float(sigma["split"])},
+            "sigma_multiple": float(sigma.get("multiple", 1.0)),
+        }
+    except (KeyError, TypeError, ValueError):
+        return {}
+
+
 def _evaluate_against_targets(
     workspace_root: Path,
     *,
     metrics: Mapping[str, float],
     clinical_targets: Mapping[str, Any],
+    gate_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     tuning = _load_svzerodtrees_tuning(workspace_root)
     return tuning.evaluate_iteration_gate(
+        **_gate_kwargs_from_decision(gate_payload),
         metrics=metrics,
         clinical_targets={
             "mpa_p": [
@@ -217,6 +235,7 @@ def _zerod_stage_summary(
         workspace_root,
         metrics={key: float(metrics[key]) for key in _METRIC_ORDER},
         clinical_targets=clinical_targets,
+        gate_payload=decision_payload,
     )
     return {
         "run_id": run_id,

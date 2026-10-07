@@ -130,7 +130,7 @@ def test_write_tuning_progress_backfills_from_snapshot(
     )
     monkeypatch.setattr(
         "svztagent.postprocess.tuning_progress._evaluate_against_targets",
-        lambda _root, metrics, clinical_targets: {
+        lambda _root, metrics, clinical_targets, **_kwargs: {
             "decision": "converged",
             "close_to_targets": True,
             "clinical_targets": clinical_targets,
@@ -192,7 +192,7 @@ def test_write_tuning_progress_uses_pulled_outputs_snapshot_when_local_missing(
     monkeypatch.setattr("svztagent.postprocess.tuning_progress._summarize_pulmonary_config", fake_summary)
     monkeypatch.setattr(
         "svztagent.postprocess.tuning_progress._evaluate_against_targets",
-        lambda _root, metrics, clinical_targets: {
+        lambda _root, metrics, clinical_targets, **_kwargs: {
             "decision": "converged",
             "close_to_targets": True,
             "clinical_targets": clinical_targets,
@@ -310,3 +310,15 @@ def test_build_parser_routes_postprocess_tuning_progress(monkeypatch, tmp_path: 
     assert called["workspace_root"] == Path("/tmp/workspace")
     assert called["run_id"] == "run-progress-004"
     assert called["overwrite"] is True
+
+
+def test_gate_fallback_reuses_sigma_mode_from_decision():
+    from svztagent.postprocess.tuning_progress import _gate_kwargs_from_decision
+
+    decision = {"gate_mode": "sigma", "sigma": {"pressure_mmhg": 2.0, "split": 0.02, "multiple": 1.5}}
+    assert _gate_kwargs_from_decision(decision) == {
+        "sigma": {"pressure_mmhg": 2.0, "split": 0.02},
+        "sigma_multiple": 1.5,
+    }
+    assert _gate_kwargs_from_decision({"gate_mode": "relative", "sigma": None}) == {}
+    assert _gate_kwargs_from_decision(None) == {}

@@ -242,400 +242,79 @@ def _render_postprocess_slurm_header(
     return "\n".join(header)
 
 
-def _stacked_centerline_timeseries_python_source() -> str:
+def _upstream_suite_artifact_consumer_source() -> str:
+    """Return the remote-side adapter for the upstream suite contract.
+
+    svZeroDTrees owns postprocessing, descriptor validation, and publication.
+    The generated job only invokes the public suite API and confirms that its
+    publication landed at the requested descriptor path.
+    """
+
     return """
-import shutil
-import xml.etree.ElementTree as ET
-import vtk
+from collections.abc import Mapping
+
+from svzerodtrees.post_processing import validate_centerline_timeseries_descriptor
 
 
-def _read_polydata(path: Path) -> vtk.vtkPolyData:
-    reader = vtk.vtkXMLPolyDataReader()
-    reader.SetFileName(str(path))
-    reader.Update()
-    poly = vtk.vtkPolyData()
-    poly.DeepCopy(reader.GetOutput())
-    return poly
-
-
-def _load_vtu(path: Path) -> vtk.vtkUnstructuredGrid:
-    reader = vtk.vtkXMLUnstructuredGridReader()
-    reader.SetFileName(str(path))
-    reader.Update()
-    grid = vtk.vtkUnstructuredGrid()
-    grid.DeepCopy(reader.GetOutput())
-    return grid
-
-
-def _write_polydata(poly: vtk.vtkPolyData, path: Path) -> None:
-    writer = vtk.vtkXMLPolyDataWriter()
-    writer.SetFileName(str(path))
-    writer.SetInputData(poly)
-    if writer.Write() != 1:
-        raise RuntimeError(f"failed to write polydata: {path}")
-
-
-def _copy_array_with_name(array, name: str):
-    copied = array.NewInstance()
-    copied.DeepCopy(array)
-    copied.SetName(name)
-    return copied
-
-
-def _point_scalar_array(data, source_path: Path, name: str, aliases: tuple[str, ...]):
-    names = (name, *aliases)
-    for candidate in names:
-        if data.HasArray(candidate):
-            array = data.GetArray(candidate)
-            if array is not None and array.GetNumberOfComponents() == 1:
-                return array
-    raise RuntimeError(f"{source_path}: missing scalar point-data array (tried {names})")
-
-
-def _strip_timestep_point_fields(data) -> None:
-    to_remove = []
-    for array_index in range(data.GetNumberOfArrays()):
-        name = data.GetArrayName(array_index)
-        if name is None:
-            continue
-        lowered = name.lower()
-        if lowered in ("pressure", "velocity", "flow"):
-            to_remove.append(name)
-        elif lowered.startswith("pressure_") or lowered.startswith("velocity_") or lowered.startswith("flow_"):
-            to_remove.append(name)
-    for name in to_remove:
-        data.RemoveArray(name)
-
-
-def _validate_matching_geometry(reference: vtk.vtkPolyData, candidate: vtk.vtkPolyData, source_path: Path) -> None:
-    if reference.GetNumberOfPoints() != candidate.GetNumberOfPoints():
-        raise RuntimeError(f"mapped centerline point count changed for stacked timeseries: {source_path}")
-    if reference.GetNumberOfCells() != candidate.GetNumberOfCells():
-        raise RuntimeError(f"mapped centerline cell count changed for stacked timeseries: {source_path}")
-
-    for point_index in range(reference.GetNumberOfPoints()):
-        if reference.GetPoint(point_index) != candidate.GetPoint(point_index):
-            raise RuntimeError(f"mapped centerline point coordinates changed for stacked timeseries: {source_path}")
-
-    for cell_index in range(reference.GetNumberOfCells()):
-        reference_cell = reference.GetCell(cell_index)
-        candidate_cell = candidate.GetCell(cell_index)
-        if reference_cell.GetNumberOfPoints() != candidate_cell.GetNumberOfPoints():
-            raise RuntimeError(f"mapped centerline connectivity changed for stacked timeseries: {source_path}")
-        for point_offset in range(reference_cell.GetNumberOfPoints()):
-            if reference_cell.GetPointId(point_offset) != candidate_cell.GetPointId(point_offset):
-                raise RuntimeError(f"mapped centerline connectivity changed for stacked timeseries: {source_path}")
-
-
-def _add_zerod_timestep_array(base_data, frame_data, source_path: Path, frame_index: int, role: str) -> str:
-    if role == "pressure":
-        source_array = _point_scalar_array(frame_data, source_path, "Pressure", ("pressure",))
-    elif role == "velocity":
-        source_array = _point_scalar_array(frame_data, source_path, "Velocity", ("velocity", "Flow", "flow"))
-    else:
-        raise RuntimeError(f"unsupported stacked centerline role: {role}")
-
-    target_name = f"{role}_{frame_index}"
-    base_data.AddArray(_copy_array_with_name(source_array, target_name))
-    return target_name
-
-
-def _preserve_intermediate_centerlines(intermediate_dir: Path):
-    original_rmtree = shutil.rmtree
-    protected_dir = intermediate_dir.expanduser().resolve(strict=False)
-
-    def _wrapped_rmtree(path, *args, **kwargs):
-        candidate = Path(path).expanduser().resolve(strict=False)
-        if candidate == protected_dir:
-            return None
-        return original_rmtree(path, *args, **kwargs)
-
-    shutil.rmtree = _wrapped_rmtree
-    return original_rmtree
-
-
-def _cleanup_intermediate_centerlines(intermediate_dir: Path, original_rmtree) -> None:
-    shutil.rmtree = original_rmtree
-    if intermediate_dir.exists():
-        original_rmtree(intermediate_dir, ignore_errors=True)
-
-
-def _array_names(data) -> list[str]:
-    names = []
-    for array_index in range(data.GetNumberOfArrays()):
-        name = data.GetArrayName(array_index)
-        if name is not None:
-            names.append(str(name))
-    return names
-
-
-def _build_polyline_graph(poly: vtk.vtkPolyData) -> tuple[dict[int, set[int]], dict[int, int]]:
-    graph: dict[int, set[int]] = {}
-    incidence: dict[int, int] = {}
-    lines = poly.GetLines()
-    lines.InitTraversal()
-    ids = vtk.vtkIdList()
-    while lines.GetNextCell(ids):
-        n_ids = ids.GetNumberOfIds()
-        for point_index in range(n_ids):
-            point_id = int(ids.GetId(point_index))
-            incidence[point_id] = incidence.get(point_id, 0) + 1
-        for point_index in range(n_ids - 1):
-            left = int(ids.GetId(point_index))
-            right = int(ids.GetId(point_index + 1))
-            graph.setdefault(left, set()).add(right)
-            graph.setdefault(right, set()).add(left)
-    return graph, incidence
-
-
-def _reachable_nodes(graph: dict[int, set[int]], root_id: int) -> set[int]:
-    pending = [root_id]
-    visited: set[int] = set()
-    while pending:
-        node = pending.pop()
-        if node in visited:
-            continue
-        visited.add(node)
-        pending.extend(neighbor for neighbor in graph.get(node, set()) if neighbor not in visited)
-    return visited
-
-
-def _first_reachable_bifurcation(
-    graph: dict[int, set[int]],
+def _consume_upstream_suite_descriptor(
     *,
-    root_id: int,
-    line_incidence: dict[int, int],
-) -> int | None:
-    reachable = _reachable_nodes(graph, root_id)
-    candidates = sorted(
-        node_id
-        for node_id, count in line_incidence.items()
-        if node_id != root_id and node_id in reachable and count >= 2
-    )
-    if candidates:
-        return candidates[0]
-    degree_candidates = sorted(
-        node_id
-        for node_id, neighbors in graph.items()
-        if node_id != root_id and node_id in reachable and len(neighbors) >= 3
-    )
-    if degree_candidates:
-        return degree_candidates[0]
-    return None
-
-
-def _discover_result_vtus(simulation_dir: Path) -> list[Path]:
-    result_files = sorted(simulation_dir.glob("*-procs/result_*.vtu"))
-    if result_files:
-        return result_files
-    return sorted(simulation_dir.glob("result_*.vtu"))
-
-
-def _path_snapshot(path: Path) -> dict[str, object]:
-    snapshot = {
-        "path": str(path),
-        "exists": path.exists(),
-        "is_file": path.is_file(),
-        "is_dir": path.is_dir(),
-        "suffix": path.suffix,
-    }
-    try:
-        snapshot["resolved"] = str(path.expanduser().resolve(strict=False))
-    except Exception as exc:
-        snapshot["resolve_error"] = f"{type(exc).__name__}: {exc}"
-    if path.exists():
-        try:
-            snapshot["size_bytes"] = int(path.stat().st_size)
-        except OSError as exc:
-            snapshot["stat_error"] = f"{type(exc).__name__}: {exc}"
-    return snapshot
-
-
-def _diagnose_centerline_input(centerline_path: Path) -> dict[str, object]:
-    diagnostics = _path_snapshot(centerline_path)
-    if not centerline_path.exists() or not centerline_path.is_file():
-        return diagnostics
-    try:
-        poly = _read_polydata(centerline_path)
-        graph, incidence = _build_polyline_graph(poly)
-        diagnostics.update(
-            {
-                "point_count": int(poly.GetNumberOfPoints()),
-                "cell_count": int(poly.GetNumberOfCells()),
-                "line_count": int(poly.GetNumberOfLines()),
-                "point_arrays": _array_names(poly.GetPointData()),
-                "cell_arrays": _array_names(poly.GetCellData()),
-                "graph_node_count": len(graph),
-            }
-        )
-        if 0 not in graph:
-            diagnostics["root_validation"] = "missing root point id 0 in polyline connectivity"
-        else:
-            bifurcation_id = _first_reachable_bifurcation(graph, root_id=0, line_incidence=incidence)
-            if bifurcation_id is None:
-                diagnostics["bifurcation_validation"] = (
-                    "no reachable bifurcation downstream of root point id 0"
-                )
-            else:
-                diagnostics["detected_bifurcation_id"] = int(bifurcation_id)
-    except Exception as exc:
-        diagnostics["read_error"] = f"{type(exc).__name__}: {exc}"
-    return diagnostics
-
-
-def _diagnose_result_vtu(path: Path, *, pressure_field: str) -> dict[str, object]:
-    diagnostics = _path_snapshot(path)
-    if not path.exists() or not path.is_file():
-        return diagnostics
-    try:
-        mesh = _load_vtu(path)
-        point_arrays = _array_names(mesh.GetPointData())
-        diagnostics.update(
-            {
-                "point_count": int(mesh.GetNumberOfPoints()),
-                "cell_count": int(mesh.GetNumberOfCells()),
-                "point_arrays": point_arrays,
-                "cell_arrays": _array_names(mesh.GetCellData()),
-                "has_pressure_field": pressure_field in point_arrays,
-            }
-        )
-    except Exception as exc:
-        diagnostics["read_error"] = f"{type(exc).__name__}: {exc}"
-    return diagnostics
-
-
-def _load_suite_metadata_snapshot(metadata_path: Path) -> dict[str, object] | None:
-    if not metadata_path.exists():
-        return None
-    try:
-        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        return {"read_error": f"{type(exc).__name__}: {exc}", "path": str(metadata_path)}
-    return {
-        "status": payload.get("status"),
-        "error": payload.get("error"),
-        "steps": payload.get("steps"),
-    }
-
-
-def _collect_mpa_pressure_failure_diagnostics(
-    *,
-    simulation_dir: Path,
-    centerline_path: Path,
-    pressure_field: str,
-    metadata_path: Path,
+    suite_metadata_path: Path,
+    result: dict[str, object],
 ) -> dict[str, object]:
-    diagnostics: dict[str, object] = {
-        "pressure_field": pressure_field,
-        "simulation_dir": _path_snapshot(simulation_dir),
-        "centerline": _diagnose_centerline_input(centerline_path),
-        "suite_metadata": _load_suite_metadata_snapshot(metadata_path),
-    }
-
-    xml_path = simulation_dir / "svFSIplus.xml"
-    diagnostics["svfsi_xml"] = _path_snapshot(xml_path)
-    if xml_path.exists() and xml_path.is_file():
-        try:
-            dt_text = ET.parse(xml_path).getroot().findtext(".//Time_step_size")
-            diagnostics["time_step_size"] = None if dt_text is None else float(dt_text)
-        except Exception as exc:
-            diagnostics["svfsi_xml_error"] = f"{type(exc).__name__}: {exc}"
-
-    result_files = _discover_result_vtus(simulation_dir)
-    diagnostics["result_file_count"] = len(result_files)
-    if result_files:
-        diagnostics["first_result_vtu"] = _diagnose_result_vtu(
-            result_files[0],
-            pressure_field=pressure_field,
-        )
-        diagnostics["last_result_vtu"] = _diagnose_result_vtu(
-            result_files[-1],
-            pressure_field=pressure_field,
-        )
-    return diagnostics
-
-
-def _validate_mpa_pressure_csv_inputs(
-    *,
-    simulation_dir: Path,
-    centerline_path: Path,
-    pressure_field: str,
-) -> dict[str, object]:
-    if not centerline_path.exists():
-        raise FileNotFoundError(f"centerline file not found for MPA pressure CSV generation: {centerline_path}")
-    if not centerline_path.is_file():
+    if not isinstance(result, dict):
+        raise RuntimeError("upstream postprocess suite returned a non-object result")
+    if result.get("status") == "failed":
+        error = result.get("error")
+        raise RuntimeError(f"upstream postprocess suite failed: {error}")
+    suite_timeseries = result.get("centerline_timeseries")
+    if not isinstance(suite_timeseries, Mapping):
+        raise RuntimeError("upstream postprocess suite result is missing centerline_timeseries")
+    descriptor_value = suite_timeseries.get("descriptor")
+    if not isinstance(descriptor_value, str) or not descriptor_value.strip():
+        raise RuntimeError("upstream postprocess suite result is missing its descriptor path")
+    if Path(descriptor_value).expanduser().resolve() != suite_metadata_path.expanduser().resolve():
         raise RuntimeError(
-            f"centerline path is not a regular file for MPA pressure CSV generation: {centerline_path}"
+            "upstream postprocess suite returned a descriptor different from "
+            f"the requested path: {descriptor_value}"
         )
 
-    centerline = _read_polydata(centerline_path)
-    if centerline.GetNumberOfPoints() <= 0:
-        raise RuntimeError(f"centerline has no points: {centerline_path}")
-    if centerline.GetNumberOfLines() <= 0:
-        raise RuntimeError(f"centerline has no line cells: {centerline_path}")
-
-    graph, incidence = _build_polyline_graph(centerline)
-    if 0 not in graph:
-        raise RuntimeError(
-            f"centerline is missing root point id 0 in its polyline connectivity: {centerline_path}"
-        )
-    bifurcation_id = _first_reachable_bifurcation(graph, root_id=0, line_incidence=incidence)
-    if bifurcation_id is None:
-        raise RuntimeError(
-            "centerline does not contain a reachable bifurcation downstream of root point id 0: "
-            f"{centerline_path}"
-        )
-
-    xml_path = simulation_dir / "svFSIplus.xml"
-    if not xml_path.exists():
-        raise FileNotFoundError(f"svFSIplus.xml not found in simulation directory: {simulation_dir}")
-    try:
-        dt_text = ET.parse(xml_path).getroot().findtext(".//Time_step_size")
-        if dt_text is None:
-            raise RuntimeError(f"Time_step_size missing in {xml_path}")
-        dt = float(dt_text)
-    except ValueError as exc:
-        raise RuntimeError(f"invalid Time_step_size in {xml_path}: {dt_text}") from exc
-    if dt <= 0.0:
-        raise RuntimeError(f"Time_step_size must be positive in {xml_path}: {dt}")
-
-    result_files = _discover_result_vtus(simulation_dir)
-    if not result_files:
-        raise FileNotFoundError(f"no result_*.vtu files found in simulation directory: {simulation_dir}")
-
-    sample_mesh = _load_vtu(result_files[0])
-    point_arrays = _array_names(sample_mesh.GetPointData())
-    if pressure_field not in point_arrays:
-        raise KeyError(
-            f"pressure field '{pressure_field}' not found in sample result {result_files[0]}; "
-            f"available point arrays: {point_arrays}"
-        )
-
-    return {
-        "centerline_point_count": int(centerline.GetNumberOfPoints()),
-        "centerline_line_count": int(centerline.GetNumberOfLines()),
-        "detected_bifurcation_id": int(bifurcation_id),
-        "result_file_count": len(result_files),
-        "sample_result_vtu": str(result_files[0]),
-        "time_step_size": float(dt),
-    }
+    # Delegate the schema, digest, sidecar, geometry, and array checks to the
+    # upstream public validator.  The agent deliberately does not reproduce
+    # those checks here.
+    validate_centerline_timeseries_descriptor(suite_metadata_path)
+    return result
 
 
-def _is_unexpected_camera_kwarg_error(exc: Exception) -> bool:
-    if not isinstance(exc, TypeError):
-        return False
-    message = str(exc)
-    return (
-        "unexpected keyword argument" in message
-        and ("camera_offset_dir" in message or "camera_view_up" in message)
-    )
-
-
-def _run_postprocess_suite_with_optional_camera(run_postprocess, postprocess_kwargs: dict[str, object]):
+def _run_postprocess_suite_with_optional_camera(
+    run_postprocess, postprocess_kwargs: dict[str, object]
+):
+    '''Retry only the camera compatibility boundary for older suite builds.'''
     try:
         return run_postprocess(**postprocess_kwargs)
-    except Exception as exc:
-        if not _is_unexpected_camera_kwarg_error(exc):
+    except TypeError as exc:
+        message = str(exc)
+        if "unexpected keyword argument" not in message or not any(
+            name in message for name in ("camera_offset_dir", "camera_view_up")
+        ):
+            raise
+        trimmed_kwargs = dict(postprocess_kwargs)
+        trimmed_kwargs.pop("camera_offset_dir", None)
+        trimmed_kwargs.pop("camera_view_up", None)
+        return run_postprocess(**trimmed_kwargs)
+"""
+
+
+def _run_postprocess_suite_with_optional_camera(
+    run_postprocess, postprocess_kwargs: dict[str, object]
+):
+    """Retry only the camera compatibility boundary for older suite builds."""
+    try:
+        return run_postprocess(**postprocess_kwargs)
+    except TypeError as exc:
+        message = str(exc)
+        if "unexpected keyword argument" not in message or not any(
+            name in message for name in ("camera_offset_dir", "camera_view_up")
+        ):
             raise
         trimmed_kwargs = dict(postprocess_kwargs)
         trimmed_kwargs.pop("camera_offset_dir", None)
@@ -643,200 +322,9 @@ def _run_postprocess_suite_with_optional_camera(run_postprocess, postprocess_kwa
         return run_postprocess(**trimmed_kwargs)
 
 
-def _has_point_array(poly: vtk.vtkPolyData, name: str) -> bool:
-    point_data = poly.GetPointData()
-    for index in range(point_data.GetNumberOfArrays()):
-        candidate = point_data.GetArrayName(index)
-        if candidate == name:
-            return True
-    return False
-
-
-def _repair_failed_suite_result_if_outputs_exist(
-    *,
-    output_dir: Path,
-    suite_metadata_path: Path,
-    result: dict[str, object],
-) -> dict[str, object]:
-    if not isinstance(result, dict) or result.get("status") != "failed":
-        return result
-
-    mean_vtp = output_dir / "resistance_map_mean.vtp"
-    mean_metadata_json = output_dir / "resistance_map_metadata.json"
-    mean_summary_csv = output_dir / "branch_resistance_summary.csv"
-    mean_ranked_csv = output_dir / "ranked_stent_candidates.csv"
-    systolic_vtp = output_dir / "resistance_map_systolic.vtp"
-    systolic_metadata_json = output_dir / "resistance_map_systolic_metadata.json"
-    systolic_summary_csv = output_dir / "branch_resistance_summary_systolic.csv"
-    systolic_ranked_csv = output_dir / "ranked_stent_candidates_systolic.csv"
-
-    required_paths = [
-        mean_vtp,
-        mean_metadata_json,
-        mean_summary_csv,
-        mean_ranked_csv,
-        systolic_vtp,
-        systolic_metadata_json,
-        systolic_summary_csv,
-        systolic_ranked_csv,
-        suite_metadata_path,
-    ]
-    if any(not path.exists() for path in required_paths):
-        return result
-
-    mean_poly = _read_polydata(mean_vtp)
-    systolic_poly = _read_polydata(systolic_vtp)
-    if not _has_point_array(mean_poly, "BranchId") or not _has_point_array(systolic_poly, "BranchId"):
-        return result
-
-    mean_metadata = json.loads(mean_metadata_json.read_text(encoding="utf-8"))
-    systolic_metadata = json.loads(systolic_metadata_json.read_text(encoding="utf-8"))
-    repaired = json.loads(suite_metadata_path.read_text(encoding="utf-8"))
-
-    repaired.pop("error", None)
-    repaired["status"] = "completed"
-    steps = repaired.get("steps")
-    if not isinstance(steps, dict):
-        steps = {}
-        repaired["steps"] = steps
-
-    mean_result = {
-        "kind": "pulmonary_resistance_map",
-        "metric_suffix": "mean",
-        "output_dir": str(output_dir / "resistance_map"),
-        "resistance_map": str(mean_vtp),
-        "summary_csv": str(mean_summary_csv),
-        "ranked_csv": str(mean_ranked_csv),
-        "metadata_json": str(mean_metadata_json),
-        "selected_frame_count": int(mean_metadata.get("selected_frame_count", 0)),
-        "available_frame_count": int(mean_metadata.get("available_frame_count", 0)),
-        "intermediate_dir": mean_metadata.get("intermediate_dir"),
-    }
-    systolic_result = {
-        "kind": "pulmonary_resistance_map",
-        "metric_suffix": "systolic",
-        "output_dir": str(output_dir / "resistance_map_systolic"),
-        "resistance_map": str(systolic_vtp),
-        "summary_csv": str(systolic_summary_csv),
-        "ranked_csv": str(systolic_ranked_csv),
-        "metadata_json": str(systolic_metadata_json),
-        "selected_frame_count": int(systolic_metadata.get("selected_frame_count", 0)),
-        "available_frame_count": int(systolic_metadata.get("available_frame_count", 0)),
-        "intermediate_dir": systolic_metadata.get("intermediate_dir"),
-    }
-
-    steps["resistance_map"] = {"status": "completed", "result": mean_result}
-    steps["resistance_map_systolic"] = {"status": "completed", "result": systolic_result}
-    repaired["resistance_map"] = mean_result
-    repaired["resistance_map_systolic"] = systolic_result
-    suite_metadata_path.write_text(json.dumps(repaired, indent=2, sort_keys=True), encoding="utf-8")
-    return repaired
-
-
-def _write_stacked_centerline_timeseries(
-    *,
-    output_dir: Path,
-    suite_metadata_path: Path,
-    result: dict[str, object],
-) -> dict[str, object]:
-    resistance_result = result.get("resistance_map")
-    if not isinstance(resistance_result, dict):
-        raise RuntimeError("postprocess result missing resistance_map payload")
-    mean_metadata_json = resistance_result.get("metadata_json")
-    if not isinstance(mean_metadata_json, str) or not mean_metadata_json.strip():
-        raise RuntimeError("postprocess result missing resistance_map metadata_json")
-
-    mean_metadata_path = Path(mean_metadata_json).expanduser().resolve()
-    mean_metadata = json.loads(mean_metadata_path.read_text(encoding="utf-8"))
-    selected_frames = mean_metadata.get("selected_frames")
-    if not isinstance(selected_frames, list) or not selected_frames:
-        raise RuntimeError("resistance map metadata missing selected_frames")
-    reference_poly = None
-    processed_frames: list[dict[str, object]] = []
-    zerod_point_arrays: list[str] = []
-    for frame_index, frame in enumerate(selected_frames):
-        if not isinstance(frame, dict):
-            raise RuntimeError("selected_frames entries must be objects")
-        raw_path = frame.get("path")
-        raw_time = frame.get("time_s")
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            raise RuntimeError("selected frame missing mapped centerline path")
-        if raw_time is None:
-            raise RuntimeError("selected frame missing time_s")
-        mapped_path = Path(raw_path).expanduser().resolve()
-        if not mapped_path.exists():
-            raise FileNotFoundError(f"mapped centerline missing for stacked timeseries: {mapped_path}")
-        timestep_id_raw = frame.get("timestep_id")
-        timestep_id = int(timestep_id_raw) if timestep_id_raw is not None else None
-        poly = _read_polydata(mapped_path)
-        if reference_poly is None:
-            reference_poly = vtk.vtkPolyData()
-            reference_poly.DeepCopy(poly)
-            _strip_timestep_point_fields(reference_poly.GetPointData())
-        else:
-            _validate_matching_geometry(reference_poly, poly, mapped_path)
-
-        pressure_name = _add_zerod_timestep_array(
-            reference_poly.GetPointData(),
-            poly.GetPointData(),
-            mapped_path,
-            frame_index,
-            "pressure",
-        )
-        velocity_name = _add_zerod_timestep_array(
-            reference_poly.GetPointData(),
-            poly.GetPointData(),
-            mapped_path,
-            frame_index,
-            "velocity",
-        )
-        zerod_point_arrays.extend([pressure_name, velocity_name])
-
-        processed_frames.append(
-            {
-                "frame_index": frame_index,
-                "time_s": float(raw_time),
-                "timestep_id": timestep_id,
-                "source_frame_path": frame.get("source_frame_path"),
-                "point_arrays": [pressure_name, velocity_name],
-            }
-        )
-
-    if reference_poly is None:
-        raise RuntimeError("resistance map metadata missing selected_frames")
-
-    output_path = output_dir / "centerline_timeseries_last_cycle.vtp"
-    metadata_output_path = output_dir / "centerline_timeseries_last_cycle_metadata.json"
-    _write_polydata(reference_poly, output_path)
-
-    stack_result = {
-        "kind": "centerline_timeseries_last_cycle",
-        "output_path": str(output_path),
-        "metadata_json": str(metadata_output_path),
-        "source_resistance_map_metadata_json": str(mean_metadata_path),
-        "selected_frame_count": len(processed_frames),
-        "point_count": int(reference_poly.GetNumberOfPoints()),
-        "cell_count": int(reference_poly.GetNumberOfCells()),
-        "zerod_point_arrays": zerod_point_arrays,
-        "processed_frames": processed_frames,
-    }
-    metadata_output_path.write_text(json.dumps(stack_result, indent=2, sort_keys=True), encoding="utf-8")
-
-    suite_metadata = {}
-    if suite_metadata_path.exists():
-        suite_metadata = json.loads(suite_metadata_path.read_text(encoding="utf-8"))
-    outputs = suite_metadata.get("outputs")
-    if not isinstance(outputs, dict):
-        outputs = {}
-    outputs["centerline_timeseries_last_cycle_vtp"] = str(output_path)
-    outputs["centerline_timeseries_last_cycle_metadata_json"] = str(metadata_output_path)
-    suite_metadata["outputs"] = outputs
-    suite_metadata["centerline_timeseries_last_cycle"] = stack_result
-    suite_metadata_path.write_text(json.dumps(suite_metadata, indent=2, sort_keys=True), encoding="utf-8")
-
-    result["centerline_timeseries_last_cycle"] = stack_result
-    return stack_result
-"""
+def _stacked_centerline_timeseries_python_source() -> str:
+    """Return remote postprocess helpers used by adaptation job scripts."""
+    return _upstream_suite_artifact_consumer_source()
 
 
 def _render_postprocess_script(
@@ -914,31 +402,14 @@ try:
         postprocess_kwargs["camera_offset_dir"] = {camera_offset_expr}
     if {camera_view_up_expr} is not None:
         postprocess_kwargs["camera_view_up"] = {camera_view_up_expr}
-    pressure_field = str(postprocess_kwargs.get("pressure_field") or "Pressure")
-    _validate_mpa_pressure_csv_inputs(
-        simulation_dir=Path(postprocess_kwargs["simulation_dir"]),
-        centerline_path=Path(postprocess_kwargs["centerline"]),
-        pressure_field=pressure_field,
+    result = _run_postprocess_suite_with_optional_camera(
+        run_pulmonary_threed_postprocess_suite,
+        postprocess_kwargs,
     )
-    preserved_centerlines = output_dir / "resistance_map" / "intermediate_centerlines"
-    original_rmtree = _preserve_intermediate_centerlines(preserved_centerlines)
-    try:
-        result = _run_postprocess_suite_with_optional_camera(
-            run_pulmonary_threed_postprocess_suite,
-            postprocess_kwargs,
-        )
-        result = _repair_failed_suite_result_if_outputs_exist(
-            output_dir=output_dir,
-            suite_metadata_path=metadata_path,
-            result=result,
-        )
-        _write_stacked_centerline_timeseries(
-            output_dir=output_dir,
-            suite_metadata_path=metadata_path,
-            result=result,
-        )
-    finally:
-        _cleanup_intermediate_centerlines(preserved_centerlines, original_rmtree)
+    result = _consume_upstream_suite_descriptor(
+        suite_metadata_path=metadata_path,
+        result=result,
+    )
 except Exception as exc:
     payload = {{
         "status": "failed",
@@ -947,12 +418,6 @@ except Exception as exc:
             "message": str(exc),
         }},
         "metadata_json": str(metadata_path) if metadata_path.exists() else None,
-        "pressure_step_diagnostics": _collect_mpa_pressure_failure_diagnostics(
-            simulation_dir=Path(postprocess_kwargs["simulation_dir"]),
-            centerline_path=Path(postprocess_kwargs["centerline"]),
-            pressure_field=pressure_field,
-            metadata_path=metadata_path,
-        ),
     }}
     submission_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     raise
@@ -1072,59 +537,60 @@ def _submit_paraview_viz_if_configured(
         print(f"[postprocess] Warning: ParaView viz submission failed: {exc}")
 
 
-def submit_selected_preop_postprocess(
+def _existing_preop_postprocess(manifest, iteration: int):
+    for record in reversed(manifest.preop_postprocess_runs):
+        if int(record.source_preop_iteration) == int(iteration):
+            return record
+    return None
+
+
+@dataclass(frozen=True)
+class PreparedPostprocessScript:
+    """A rendered preop postprocess job script that has not been submitted."""
+
+    remote_layout: dict[str, str]
+    local_layout: dict[str, Path]
+    submit_options: SlurmSubmitOptions
+
+
+def _preop_postprocess_resources(config) -> tuple[int, str | None]:
+    cpus_per_task = _resolved_postprocess_worker_count(config)
+    mem = None
+    if cpus_per_task > 1:
+        mem = config.defaults.postprocess.resistance_map.selected_preop_mem
+    return cpus_per_task, mem
+
+
+def prepare_preop_postprocess_script(
     *,
-    workspace_root: str | Path,
-    run_id: str,
+    workspace_root: Path,
+    manifest,
+    config,
+    cluster,
     iteration: int,
-    transfer_adapter: FileTransferAdapter | None = None,
-    scheduler_adapter: SchedulerAdapter | None = None,
-    remote_exec_adapter: RemoteExecAdapter | None = None,
-) -> PostprocessSubmissionResult:
-    root = detect_workspace_root(workspace_root)
-    validated_run_id = validate_run_id(run_id)
-    local_paths = build_local_run_paths(root, validated_run_id)
-    manifest = read_manifest(local_paths.manifest)
-    config = load_workspace_config(root)
-    cluster = resolve_cluster(config, str(manifest.cluster.get("name")))
+    remote_run_dir: str,
+    remote_exec_adapter: RemoteExecAdapter,
+) -> PreparedPostprocessScript:
+    """Render the per-iteration preop postprocess script locally.
+
+    Shared by agent-side submission and by the tune driver, which submits the
+    same pre-rendered script itself under the calibrated full-PA policy.
+    """
+
     if cluster.executables.svslicer_path is None:
         raise ConfigError("cluster executables.svslicer_path is required for postprocessing")
-
-    remote_run_dir = manifest.execution.remote_run_dir or manifest.remote.get("remote_run_dir")
-    if not remote_run_dir:
-        raise ConfigError(f"run '{validated_run_id}' is missing remote_run_dir")
+    run_id = str(manifest.run_id)
     remote_layout = _selected_preop_remote_layout(str(remote_run_dir), iteration)
-    local_layout = _selected_preop_local_paths(root, validated_run_id, iteration)
+    local_layout = _selected_preop_local_paths(workspace_root, run_id, iteration)
     for key in ("root", "inputs", "logs"):
         local_layout[key].mkdir(parents=True, exist_ok=True)
 
     patient_alias = str(manifest.patient.get("alias"))
-    clinical_targets_payload = _load_stage_target_payload(root, patient_alias=patient_alias, stage="preop")
+    clinical_targets_payload = _load_stage_target_payload(
+        workspace_root, patient_alias=patient_alias, stage="preop"
+    )
     svzerodtrees_paths = manifest.remote.get("svzerodtrees_paths", {})
-    threed_defaults = manifest.remote.get("threed_defaults", {})
-    resistance_map_workers = _resolved_postprocess_worker_count(config)
-    cpus_per_task = resistance_map_workers
-    mem = None
-    if cpus_per_task > 1:
-        mem = config.defaults.postprocess.resistance_map.selected_preop_mem
-    if transfer_adapter is None or scheduler_adapter is None or remote_exec_adapter is None:
-        default_transfer, default_scheduler, default_remote = _build_default_adapters(
-            cluster=cluster,
-            config=config,
-            run_id=validated_run_id,
-            mode=ExecutionMode.EXECUTE,
-        )
-        transfer_adapter = transfer_adapter or default_transfer
-        remote_exec_adapter = remote_exec_adapter or default_remote
-        if scheduler_adapter is None:
-            scheduler_adapter = _build_postprocess_scheduler_adapter(
-                cluster=cluster,
-                config=config,
-                remote_exec=remote_exec_adapter,
-                run_id=validated_run_id,
-                cpus_per_task=cpus_per_task,
-                mem=mem,
-            )
+    cpus_per_task, mem = _preop_postprocess_resources(config)
     fallback_csv = svzerodtrees_paths.get("clinical_targets")
     inflow_csv = svzerodtrees_paths.get("inflow")
     centerline = _require_remote_centerline_path(
@@ -1151,13 +617,97 @@ def submit_selected_preop_postprocess(
         clinical_targets_payload=clinical_targets_payload,
         fallback_clinical_targets_csv=str(fallback_csv) if fallback_csv else None,
         inflow_csv=str(inflow_csv) if inflow_csv else None,
-        resistance_map_workers=resistance_map_workers,
+        resistance_map_workers=cpus_per_task,
         camera_offset_dir=camera_offset_dir,
         camera_view_up=camera_view_up,
         cpus_per_task=cpus_per_task,
         mem=mem,
     )
     local_layout["job_script"].write_text(script_body, encoding="utf-8")
+    submit_options = _build_postprocess_scheduler_adapter(
+        cluster=cluster,
+        config=config,
+        remote_exec=remote_exec_adapter,
+        run_id=run_id,
+        cpus_per_task=cpus_per_task,
+        mem=mem,
+    ).submit_options
+    return PreparedPostprocessScript(
+        remote_layout=remote_layout,
+        local_layout=local_layout,
+        submit_options=submit_options,
+    )
+
+
+def _submit_preop_postprocess(
+    *,
+    workspace_root: str | Path,
+    run_id: str,
+    iteration: int,
+    manifest_field: str,
+    record_stage: str,
+    note: str,
+    submit_paraview_viz: bool,
+    transfer_adapter: FileTransferAdapter | None = None,
+    scheduler_adapter: SchedulerAdapter | None = None,
+    remote_exec_adapter: RemoteExecAdapter | None = None,
+) -> PostprocessSubmissionResult:
+    root = detect_workspace_root(workspace_root)
+    validated_run_id = validate_run_id(run_id)
+    local_paths = build_local_run_paths(root, validated_run_id)
+    manifest = read_manifest(local_paths.manifest)
+    if manifest_field == "preop_postprocess":
+        existing = _existing_preop_postprocess(manifest, iteration)
+        if existing is not None and existing.scheduler_job_id:
+            return PostprocessSubmissionResult(
+                run_id=validated_run_id,
+                stage=existing.stage,
+                source_preop_iteration=iteration,
+                remote_results_dir=existing.remote_dir,
+                remote_job_script_path=existing.remote_job_script_path or "",
+                local_job_script_path=Path(existing.local_job_script_path or ""),
+                submitted_job_id=existing.scheduler_job_id,
+                command_previews=[],
+            )
+    config = load_workspace_config(root)
+    cluster = resolve_cluster(config, str(manifest.cluster.get("name")))
+    if cluster.executables.svslicer_path is None:
+        raise ConfigError("cluster executables.svslicer_path is required for postprocessing")
+
+    remote_run_dir = manifest.execution.remote_run_dir or manifest.remote.get("remote_run_dir")
+    if not remote_run_dir:
+        raise ConfigError(f"run '{validated_run_id}' is missing remote_run_dir")
+    cpus_per_task, mem = _preop_postprocess_resources(config)
+    if transfer_adapter is None or scheduler_adapter is None or remote_exec_adapter is None:
+        default_transfer, default_scheduler, default_remote = _build_default_adapters(
+            cluster=cluster,
+            config=config,
+            run_id=validated_run_id,
+            mode=ExecutionMode.EXECUTE,
+        )
+        transfer_adapter = transfer_adapter or default_transfer
+        remote_exec_adapter = remote_exec_adapter or default_remote
+        if scheduler_adapter is None:
+            scheduler_adapter = _build_postprocess_scheduler_adapter(
+                cluster=cluster,
+                config=config,
+                remote_exec=remote_exec_adapter,
+                run_id=validated_run_id,
+                cpus_per_task=cpus_per_task,
+                mem=mem,
+            )
+    prepared = prepare_preop_postprocess_script(
+        workspace_root=root,
+        manifest=manifest,
+        config=config,
+        cluster=cluster,
+        iteration=iteration,
+        remote_run_dir=str(remote_run_dir),
+        remote_exec_adapter=remote_exec_adapter,
+    )
+    remote_layout = prepared.remote_layout
+    local_layout = prepared.local_layout
+    patient_alias = str(manifest.patient.get("alias"))
 
     command_results = [
         transfer_adapter.ensure_remote_dir(remote_layout["remote_root"]),
@@ -1179,39 +729,88 @@ def submit_selected_preop_postprocess(
     manifest = read_manifest(local_paths.manifest)
     manifest = record_postprocess_submission(
         manifest,
-        field_name="selected_preop_postprocess",
-        stage="selected_preop",
+        field_name=manifest_field,
+        stage=record_stage,
         source_preop_iteration=iteration,
         local_dir=str(local_layout["root"]),
         remote_dir=remote_layout["remote_results_dir"],
         local_job_script_path=str(local_layout["job_script"]),
         remote_job_script_path=remote_layout["remote_job_script_path"],
         scheduler_job_id=submit_result.job_id,
-        note="Selected preop postprocess submitted",
+        note=note,
     )
     write_manifest(manifest, local_paths.manifest)
 
-    # Submit ParaView viz job in parallel (independent of postprocess, same VTU files).
-    # Requires pvpython_path in clusters.yaml and cycle_duration_s in the patient's
-    # postprocess.paraview_viz config block.
-    _submit_paraview_viz_if_configured(
-        cluster=cluster,
-        config=config,
-        patient_alias=patient_alias,
-        root=root,
-        validated_run_id=validated_run_id,
-        iteration=iteration,
-        transfer_adapter=transfer_adapter,
-        remote_exec_adapter=remote_exec_adapter,
-    )
+    if submit_paraview_viz:
+        # Submit ParaView viz in parallel (independent of postprocess, same VTU files).
+        _submit_paraview_viz_if_configured(
+            cluster=cluster,
+            config=config,
+            patient_alias=patient_alias,
+            root=root,
+            validated_run_id=validated_run_id,
+            iteration=iteration,
+            transfer_adapter=transfer_adapter,
+            remote_exec_adapter=remote_exec_adapter,
+        )
 
     return PostprocessSubmissionResult(
         run_id=validated_run_id,
-        stage="selected_preop",
+        stage=record_stage,
         source_preop_iteration=iteration,
         remote_results_dir=remote_layout["remote_results_dir"],
         remote_job_script_path=remote_layout["remote_job_script_path"],
         local_job_script_path=local_layout["job_script"],
         submitted_job_id=submit_result.job_id,
         command_previews=[result.argv for result in command_results],
+    )
+
+
+def submit_preop_iteration_postprocess(
+    *,
+    workspace_root: str | Path,
+    run_id: str,
+    iteration: int,
+    transfer_adapter: FileTransferAdapter | None = None,
+    scheduler_adapter: SchedulerAdapter | None = None,
+    remote_exec_adapter: RemoteExecAdapter | None = None,
+) -> PostprocessSubmissionResult:
+    """Submit the per-iteration preop suite needed by full-PA calibration."""
+
+    return _submit_preop_postprocess(
+        workspace_root=workspace_root,
+        run_id=run_id,
+        iteration=iteration,
+        manifest_field="preop_postprocess",
+        record_stage="preop_iteration",
+        note="Automatic full-PA calibration preop postprocess submitted",
+        submit_paraview_viz=False,
+        transfer_adapter=transfer_adapter,
+        scheduler_adapter=scheduler_adapter,
+        remote_exec_adapter=remote_exec_adapter,
+    )
+
+
+def submit_selected_preop_postprocess(
+    *,
+    workspace_root: str | Path,
+    run_id: str,
+    iteration: int,
+    transfer_adapter: FileTransferAdapter | None = None,
+    scheduler_adapter: SchedulerAdapter | None = None,
+    remote_exec_adapter: RemoteExecAdapter | None = None,
+) -> PostprocessSubmissionResult:
+    """Submit the explicit selected-preop postprocess suite."""
+
+    return _submit_preop_postprocess(
+        workspace_root=workspace_root,
+        run_id=run_id,
+        iteration=iteration,
+        manifest_field="selected_preop_postprocess",
+        record_stage="selected_preop",
+        note="Selected preop postprocess submitted",
+        submit_paraview_viz=True,
+        transfer_adapter=transfer_adapter,
+        scheduler_adapter=scheduler_adapter,
+        remote_exec_adapter=remote_exec_adapter,
     )

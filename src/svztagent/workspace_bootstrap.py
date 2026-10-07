@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import os
 
+from svztagent.config.tuning_checks import tuning_model_warnings
 from svztagent.config.load import (
     detect_workspace_root,
     load_workspace_config,
@@ -199,6 +200,9 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
   mesh_scale_factor: 1.0
   tuning:
     bc_type: "impedance"
+    calibration:
+      enabled: true
+      next_iteration_seed_policy: "calibrated_full_pa"
     iteration1_seed:
       source: "path"
       path: "simplified_nonlinear_zerod.json"
@@ -215,8 +219,10 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
       compliance_model: "olufsen"
       diameter_scale: 0.0
       diameter_std_cap: null
-      allow_ordered_outlet_mapping: false
       tuning_model: "rri"
+      outlet_mapping_mode: null
+      outlet_mapping: null
+      outlet_mapping_centerline: null
       tune_space:
         free:
           - name: "lpa.xi"
@@ -448,6 +454,8 @@ class WorkspaceValidationResult:
     patient_aliases: list[str]
     repository_locations: dict[str, str | None]
     optional_config_files: dict[str, bool]
+    # Impedance tuning cross-checks (warnings only); see config/tuning_checks.py.
+    tuning_warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -513,6 +521,7 @@ def validate_workspace_config(workspace_root: str | Path | None = None) -> Works
         patient_aliases=sorted(patient.alias for patient in config.patients),
         repository_locations=repository_locations,
         optional_config_files=optional_config_files,
+        tuning_warnings=tuning_model_warnings(config, root),
     )
 
 
@@ -534,6 +543,8 @@ def doctor_workspace(workspace_root: str | Path | None = None) -> WorkspaceDocto
             "Optional config/clinical_targets.yaml is missing; add it if you manage "
             "workspace-level clinical target overrides."
         )
+
+    warnings.extend(validation.tuning_warnings)
 
     for repo_name, repo_path in validation.repository_locations.items():
         if repo_path is None:

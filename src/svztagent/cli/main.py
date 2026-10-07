@@ -36,6 +36,10 @@ from svztagent.workflows.postop import (
     select_converged_preop_iteration,
 )
 from svztagent.workflows.adapt import run_adapt
+from svztagent.workflows.calibrate import (
+    query_calibration_status,
+    run_calibration,
+)
 from svztagent.workflows.tune_trees import (
     advance_tune_iteration,
     continue_tune_iteration,
@@ -100,6 +104,13 @@ def build_parser() -> argparse.ArgumentParser:
     tune.add_argument("--run-id", required=False)
     tune.set_defaults(handler=cmd_plan_tune)
 
+    calibrate_plan = plan_subparsers.add_parser(
+        "calibrate", help="Generate a dry-run plan for upstream full-PA calibration"
+    )
+    calibrate_plan.add_argument("--run-id", required=True)
+    calibrate_plan.add_argument("--iteration", required=False, type=int)
+    calibrate_plan.set_defaults(handler=cmd_plan_calibrate)
+
     run = subparsers.add_parser("run", help="Execute workflows")
     run_subparsers = run.add_subparsers(dest="run_command", required=True)
     run_tune = run_subparsers.add_parser("tune", help="Run tune workflow with HPC adapters")
@@ -131,6 +142,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--execute", action="store_true", help="Execute remote operations"
     )
     run_tune_iter.set_defaults(handler=cmd_run_tune_iter)
+
+    run_calibrate = run_subparsers.add_parser(
+        "calibrate", help="Run upstream full-PA calibration with HPC adapters"
+    )
+    run_calibrate.add_argument("--run-id", required=True)
+    run_calibrate.add_argument("--iteration", required=False, type=int)
+    mode_group_calibrate = run_calibrate.add_mutually_exclusive_group()
+    mode_group_calibrate.add_argument(
+        "--dry-run", action="store_true", help="Preview commands only (default)"
+    )
+    mode_group_calibrate.add_argument(
+        "--execute", action="store_true", help="Execute remote operations"
+    )
+    run_calibrate.set_defaults(handler=cmd_run_calibrate)
 
     run_postop_cmd = run_subparsers.add_parser(
         "postop", help="Run explicit postop simulation from converged preop iteration"
@@ -230,6 +255,13 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="Query scheduler status for a run")
     status.add_argument("run_id")
     status.set_defaults(handler=cmd_status)
+
+    calibration_status = subparsers.add_parser(
+        "calibration-status", help="Query full-PA calibration stage status"
+    )
+    calibration_status.add_argument("run_id")
+    calibration_status.add_argument("--iteration", type=int, required=False)
+    calibration_status.set_defaults(handler=cmd_calibration_status)
 
     fetch = subparsers.add_parser("fetch", help="Pull configured artifacts for a run")
     fetch.add_argument("run_id")
@@ -479,6 +511,26 @@ def cmd_plan_tune(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan_calibrate(args: argparse.Namespace) -> int:
+    workspace_root = detect_workspace_root(args.workspace_root)
+    # Planning uses the same renderer/manifest contract as execution while
+    # avoiding adapter side effects.  run_calibration's dry-run mode records a
+    # visible submission preview and writes the upstream YAML envelope.
+    result = run_calibration(
+        workspace_root=workspace_root,
+        run_id=args.run_id,
+        iteration=args.iteration,
+        mode=ExecutionMode.DRY_RUN,
+    )
+    print(f"Run ID: {result.run_id}")
+    print(f"Iteration: {result.iteration}")
+    print(f"Calibration config: {result.local_config_path}")
+    print(f"Calibration script: {result.local_job_script_path}")
+    print(f"Postprocess dependency: {result.postprocess_job_id}")
+    print(f"Command previews: {len(result.command_previews)}")
+    return 0
+
+
 def cmd_run_tune(args: argparse.Namespace) -> int:
     workspace_root = detect_workspace_root(args.workspace_root)
     mode = _resolve_mode(args.execute)
@@ -535,6 +587,26 @@ def cmd_run_tune_iter(args: argparse.Namespace) -> int:
     print("Command previews:")
     for argv in result.command_previews:
         print(f"  - {' '.join(argv)}")
+    return 0
+
+
+def cmd_run_calibrate(args: argparse.Namespace) -> int:
+    workspace_root = detect_workspace_root(args.workspace_root)
+    result = run_calibration(
+        workspace_root=workspace_root,
+        run_id=args.run_id,
+        iteration=args.iteration,
+        mode=_resolve_mode(args.execute),
+    )
+    print(f"Run ID: {result.run_id}")
+    print(f"Iteration: {result.iteration}")
+    print(f"Mode: {result.mode.value}")
+    print(f"Calibration config: {result.local_config_path}")
+    print(f"Calibration script: {result.local_job_script_path}")
+    print(f"Postprocess dependency: {result.postprocess_job_id}")
+    print(f"Submitted job ID: {result.submitted_job_id or '<none>'}")
+    for command in result.command_previews:
+        print(f"  - {' '.join(command)}")
     return 0
 
 
@@ -616,6 +688,10 @@ def cmd_config_validate(args: argparse.Namespace) -> int:
     print("Optional config files:")
     for file_name, present in result.optional_config_files.items():
         print(f"  - {file_name}: {'present' if present else 'absent'}")
+    if result.tuning_warnings:
+        print("Tuning model warnings:")
+        for warning in result.tuning_warnings:
+            print(f"  - {warning}")
     print("Config validation: PASS")
     return 0
 
@@ -716,6 +792,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"model={result.adaptation_model or '<none>'} "
             f"parameter_set={result.adaptation_parameter_set or '<none>'}"
         )
+    _print_seed_generation(result)
     warnings = result.progress_warnings or []
     if warnings:
         print("Warnings:")
@@ -726,6 +803,49 @@ def cmd_status(args: argparse.Namespace) -> int:
     if result.failure_error_log_tail:
         print("Failure error tail:")
         print(result.failure_error_log_tail)
+    return 0
+
+
+def _print_seed_generation(result) -> None:
+    seed = result.seed_generation
+    if seed is None:
+        return
+    print(f"Seed generation: {seed.strategy} ({seed.status})")
+    if seed.regenerated_config_path:
+        print(f"  regenerated seed: {seed.regenerated_config_path}")
+    if seed.postprocess_job_id:
+        print(f"  postprocess  job {seed.postprocess_job_id} ({seed.postprocess_state})")
+    if seed.calibration_job_id:
+        print(
+            f"  calibration  job {seed.calibration_job_id} ({seed.calibration_state}, "
+            f"afterok:{seed.postprocess_job_id})"
+        )
+    if seed.error:
+        print(f"  driver submission error: {seed.error}")
+        print(f"  Next: svzt advance-iter --run-id {result.run_id} --execute submits them agent-side")
+    elif seed.calibration_job_id:
+        print(
+            f"  Next: svzt advance-iter --run-id {result.run_id} --execute "
+            "(verifies and promotes once calibration completes)"
+        )
+
+
+def cmd_calibration_status(args: argparse.Namespace) -> int:
+    workspace_root = detect_workspace_root(args.workspace_root)
+    result = query_calibration_status(
+        workspace_root=workspace_root,
+        run_id=args.run_id,
+        iteration=args.iteration,
+    )
+    print(f"Run ID: {result.run_id}")
+    print(f"Iteration: {result.iteration}")
+    print(f"Status: {result.status}")
+    print(f"Terminal state: {result.terminal_state or '<none>'}")
+    print(f"Postprocess dependency: {result.postprocess_job_id or '<none>'}")
+    print(f"Calibration job: {result.scheduler_job_id or '<none>'}")
+    print(f"Promotion: {result.promotion_status}")
+    if result.promotion_reason:
+        print(f"Promotion reason: {result.promotion_reason}")
     return 0
 
 
@@ -892,7 +1012,23 @@ def cmd_advance_iter(args: argparse.Namespace) -> int:
     print(f"Action: {result.action}")
     if result.submitted_job_id:
         print(f"Submitted job ID: {result.submitted_job_id}")
+    _print_calibration_hint(result, args.run_id)
     return 0
+
+
+def _print_calibration_hint(result, run_id: str) -> None:
+    if result.action in {"calibration_required", "calibration_submitted", "calibration_pending"}:
+        print(
+            f"Next: wait for full-PA calibration (svzt calibration-status {run_id} "
+            f"--iteration {result.previous_iteration}), then re-run with --execute"
+        )
+    elif result.action == "calibration_failed":
+        print(
+            "Full-PA calibration failed; inspect it with "
+            f"svzt calibration-status {run_id} --iteration {result.previous_iteration} "
+            f"and retry with svzt run calibrate --run-id {run_id} "
+            f"--iteration {result.previous_iteration} --execute"
+        )
 
 
 def cmd_continue(args: argparse.Namespace) -> int:
@@ -909,6 +1045,7 @@ def cmd_continue(args: argparse.Namespace) -> int:
     print(f"Action: {result.action}")
     if result.submitted_job_id:
         print(f"Submitted job ID: {result.submitted_job_id}")
+    _print_calibration_hint(result, args.run_id)
     if result.action in {"timeout_bypassed_no_submit", "timeout_bypassed_and_submitted"}:
         print("Note: previous iteration was force-advanced (driver timeout bypass)")
         if not args.execute:

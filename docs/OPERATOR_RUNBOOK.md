@@ -9,8 +9,48 @@ Before starting:
 - The workspace YAML is configured with your cluster, patient alias, and defaults (see [`docs/PATIENT_DATA_CONTRACT.md`](./PATIENT_DATA_CONTRACT.md)).
 - Patient data is present on Sherlock under the configured `permanent_remote_path`: `mesh-complete/`, `centerlines.vtp`, `inflow.csv`, `clinical_targets.csv`.
 - `svzt` is installed and either `SVZ_WORKSPACE_ROOT` is set or you pass `--workspace-root` to every command.
+- For full-PA calibration, the cluster config also provides an absolute
+  `remote_roots.runs_root`, `executables.svfsiplus_path`, and
+  `executables.svslicer_path`; `defaults.execution.python_executable` and
+  `env_activation_hooks` must select a compatible upstream `svZeroDTrees` /
+  `pysvzerod` runtime on Sherlock.
+- Full-PA calibration is enabled by default. Keep
+  `next_iteration_seed_policy: calibrated_full_pa` unless a reviewed rollback
+  explicitly selects `legacy_rri_after_first`; `calibration.enabled: false`
+  is an explicit opt-out.
 
 ---
+
+## Before Tuning a New Patient (Physiological Full-PA Model)
+1. Initialize a new run for every patient. Runs started under the previous
+   configuration (k3 = 0, unbounded xi) seed the next iteration with
+   parameters outside the new bounds and fail into `needs_review`.
+2. Confirm the patient's `clinical_targets.csv` and `inflow.csv` provenance
+   (the inflow must be the patient's own MRI flow, not a rescaled template).
+   `proximal_compliance` also needs `geometric_params` and `vessel_length` on
+   every rigid seed vessel; a seed without them fails at the start of tuning,
+   before any tree is built.
+3. Set the outlet pressure policy: patients with pulmonary regurgitation get
+   `tuning.impedance.wedge_pressure_policy: "precapillary_fraction"` in
+   `config/patients.yaml` (needs a measured PCWP); the workspace default
+   `diastolic_offset` covers patients without regurgitation.
+4. Record `regurgitation` and `wedge_pressure` in `config/clinical_targets.yaml`
+   and run `svzt config validate`; resolve or acknowledge every tuning warning.
+   After the first tuning, check `threed_wall_vs_proximal_compliance` in
+   `iteration_driver_log.json`; if the ratio is outside 0.5–2, set the
+   patient's `tuning.threed.elasticity_modulus` to the logged
+   `matched_elasticity_modulus`.
+5. Make sure the cluster's svZeroDTrees is current (`svzt update`); otherwise the
+   job exits with code 8 before running.
+6. After tuning, read `results/tuning_diagnostics.json`: `published_fit`
+   errors and chi2, `parameters_at_bounds`, `compliance_in_svpp_bracket`,
+   `trees.n_truncated` and `inflow_consistency`. `docs/TUNING_MODEL.md`
+   lists what to change if a patient does not fit.
+7. Run adaptation with `--model M2`: it starts from the tuned per-cap trees,
+   outlet mapping and Pd of the selected iteration. M1/M3 are rejected for
+   full-PA runs. The job stops if `outlet_cap_mapping.json` is missing or the
+   postop coupler pairs a BC with a different cap than the mapping
+   (`docs/TUNING_MODEL.md` §8, item 5).
 
 ## Step 1 — Initialize the run
 
@@ -39,7 +79,9 @@ svzt run tune --cluster sherlock --patient <patient-alias> --run-id <run-id> --e
 ```
 
 This command:
-1. Stages the iteration-1 seed config (or generates one on the cluster if `iteration1_seed.source: generate`)
+1. Stages the configured iteration-1 seed, generates a reduced seed for
+   `iteration1_seed.source: generate`, or generates a learned full-PA seed for
+   `iteration1_seed.source: learned_zerod`
 2. Uploads the job script and inputs to Sherlock via rsync
 3. Submits the SLURM driver job and prints the job ID
 
@@ -48,7 +90,12 @@ The SLURM driver job is long-running. For each iteration it:
 - Submits the preop 3D CMM job and waits for it
 - Post-processes `result_*.vtu` files against the MPA centerline to generate `mpa_pressure_vs_time.csv`
 - Evaluates the clinical gate against `clinical_targets.csv`
-- Writes `iteration_decision.json` and (if `not_close`) regenerates `simplified_zerod_tuned_RRI.json` as the seed for the next iteration
+- Generates the next seed, then writes `iteration_decision.json` with a
+  `seed_generation` block. Reduced-RRI and `legacy_rri_after_first` runs
+  regenerate `simplified_zerod_tuned_RRI.json` inline on `not_close`. A
+  default-policy (`calibrated_full_pa`) full-PA run instead submits the preop
+  postprocess job and the dependent calibration job on `not_close` or
+  `converged`, reports both job IDs, and exits.
 
 ---
 
@@ -62,10 +109,14 @@ svzt watch <run-id> --auto-advance --fetch-on-complete
 
 Runs until convergence, max iterations, or a `needs_review` pause. For each iteration it:
 1. Polls SLURM until the driver job completes
-2. Pulls `iteration_decision.json`, `iteration_metrics.json`, and `simplified_zerod_tuned_RRI.json`
-3. If `not_close`: seeds and submits the next iteration automatically
-4. If `converged`: exits cleanly; record the converged preop iteration and submit postop explicitly
-5. If `needs_review`: exits with code 1 and prints the reason
+2. Pulls `iteration_decision.json`, `iteration_metrics.json`, and any
+   regenerated reduced-RRI seed
+3. Under default-policy full-PA, for `not_close`, `converged`, or the final
+   iteration: waits for the driver-submitted calibration, then verifies and
+   promotes it
+4. If `not_close`: seeds and submits the next iteration
+5. If `converged`: exits cleanly; record the converged preop iteration and submit postop explicitly (postop uses the calibrated full-PA model)
+6. If `needs_review`: exits with code 1 and prints the reason (no calibration)
 
 ### Option B: Manual iteration-by-iteration
 
@@ -117,6 +168,110 @@ mapping now supports bounded parallelism controlled by
 matching `--cpus-per-task`, resolving `auto` against the selected-preop
 allocation, and when more than one worker is requested they also request
 `defaults.postprocess.resistance_map.selected_preop_mem`.
+
+### Full-PA calibration and seed promotion
+
+For every completed default-policy preoperative `full_pa` iteration
+(`not_close`, `converged`, or final; not `needs_review`), calibration consumes the exact tuned model plus the
+`postprocess_suite_metadata.json` produced by the upstream postprocess suite.
+The agent only stages the request, submits it after the postprocess job with an
+`afterok` dependency, records paths/digests, and applies the final promotion
+gate. It does not parse VTP, stack centerlines, validate observations, or tune
+branch parameters. See the [svZeroDTrees production calibration
+contract](https://github.com/ncdorn/svZeroDTrees/blob/main/docs/full_pa_calibration.md)
+for the scientific input/output schema and quality gates.
+
+The tune driver submits this dependency chain itself and reports the job IDs
+(`svzt status` shows them). `svzt advance-iter --run-id <run-id> --execute`
+records them, reports `calibration_pending` until calibration finishes, then
+verifies, promotes, and advances; it submits the chain agent-side only when the
+driver did not (older driver, failed driver `sbatch`, or `svzt continue`). The explicit operator sequence remains useful for recovery or
+inspection:
+
+```bash
+# Use the global --workspace-root prefix when SVZ_WORKSPACE_ROOT is not set.
+svzt preop select --run-id <run-id> --iteration <n> --reason "calibration source"
+svzt run calibrate --run-id <run-id> --iteration <n> --execute
+svzt calibration-status <run-id> --iteration <n>
+```
+
+Do not run `plan calibrate` immediately before the execute command in the
+current implementation. The plan command persists a dry-run `submitted`
+record with a `dryrun-*` job identity, and a matching execute request can
+reuse that preview instead of submitting a real job. Treat this as a known
+TASK-016 CLI defect; use the execute command directly after the postprocess
+record exists. An isolated plan preview is still useful, but do not promote
+its manifest record into a production run.
+
+`svzt preop select` records `selected_preop_postprocess` and submits the
+standalone postprocess job. The calibration request is staged at
+`runs/<run-id>/iterations/iter-XX/calibration/` locally and at
+`<runs_root>/<run-id>/iterations/iter-XX/calibration/` remotely. The generated
+script runs `svzerodtrees.cli calibrate-0d-from-3d` and includes
+`#SBATCH --dependency=afterok:<postprocess-job-id>`.
+
+Promotion occurs only when the completion handoff records a successful
+terminal state, matching input identity digest, `validated_lineage: true`, and
+a locally available calibrated model with a SHA-256 digest. The promoted copy
+is `calibration/results/calibrated_full_pa_zerod.promoted.json` and its path is
+stored as the iteration's `calibrated_seed_path`. This is what permits the
+next default-policy full-PA iteration to stage `full_pa_zerod.json`. For a
+converged iteration, `svzt preop select` and `svzt run postop` use the remote
+`calibration/results/calibrated_full_pa_zerod.json` as the postop 0D model and
+fail closed if that iteration has no promoted calibration.
+
+`watch --auto-advance` waits for the automatic postprocess/calibration chain,
+fetches the calibrated publication, and only then submits the next full-PA
+iteration. If the upstream publication is missing or invalid, the agent fails
+closed and leaves the tuned result unpromoted.
+
+Do not use this sequence for RRI or for automatic postoperative/adaptation
+calibration. Those workflows remain explicit and are outside the preoperative
+full-PA promotion policy.
+
+### Calibration retry and rollback
+
+For a retry, inspect the manifest and scheduler state first:
+
+```bash
+svzt status <run-id>
+svzt calibration-status <run-id> --iteration <n>
+```
+
+Then inspect the postprocess dependency before resubmitting. Matching
+`tuned_model`, `postprocess_descriptor`, and `postprocess_job` digests reuse an
+existing active/terminal calibration record rather than creating a duplicate.
+If any input digest changes, the old record is marked `invalidated` and a new
+attempt is appended. A postprocess failure must be repaired upstream; do not
+submit an independent calibration job without its `afterok` dependency.
+
+If calibration fails, retain the tuned 0D/3D artifacts and diagnostic reports;
+failure never promotes a candidate. To roll back, set
+`calibration.enabled: false` and explicitly select
+`next_iteration_seed_policy: legacy_rri_after_first` if continuing with the
+historical reduced-RRI path is required. Rollback does not delete reports,
+rewrite manifest history, or replace a last-known-good seed.
+
+### Calibration failure diagnostics
+
+Use `svzt calibration-status` for stage state, job/dependency IDs, digests, and
+promotion reason. Then inspect, in order:
+
+1. `runs/<run-id>/manifest.yaml`: `calibration_runs[]`,
+   `promotion_records[]`, `last_known_good_promotion`, and the prior
+   iteration's `calibrated_seed_path`.
+2. The postprocess `postprocess_submission.json`,
+   `postprocess_suite_metadata.json`, and scheduler logs under the iteration's
+   `postprocess/` root.
+3. Calibration `logs/` plus the upstream QC, confirmation, replay, target, and
+   summary reports under `calibration/results/`.
+4. `svzt config validate`/`svzt doctor` if paths, runtime activation, or
+   executable resolution failed.
+
+The upstream report explains scientific gate failures; adapter output explains
+remote command or scheduler failures; `promotion_reason` explains mechanical
+non-promotion (digest mismatch, non-terminal state, missing lineage, or
+missing candidate). Preserve these artifacts when escalating.
 
 **If `needs_review` due to a driver timeout** — the `svzt status` output prints a tip. Force-advance to the next iteration:
 ```bash
@@ -203,10 +358,19 @@ snapshot when it exists in `iterations/.../results/` or `pulled_outputs/.../resu
 ## Convergence flow
 
 ```
-iter 1 → not_close → iter 2 → not_close → ... → converged → svzt preop select → svzt run postop
-                                        ↘ needs_review → svzt continue  (timeout)
-                                                       → svzt run tune-iter  (other)
+iter 1 → not_close → iter 2 → not_close → ... → converged
+                                      → svzt preop select → postprocess
+                                      → (optional full_pa calibration → guarded promotion)
+                                      → svzt run postop
+                         ↘ needs_review → svzt continue  (timeout)
+                                        → svzt run tune-iter  (other)
 ```
+
+The parenthesized calibration path is automatic for every completed
+default-policy full-PA iteration, including the converged one (via
+`advance-iter --execute` or `watch --auto-advance`). A full-PA run using the default `calibrated_full_pa`
+seed policy cannot advance to the next full-PA iteration
+without a recorded successful promotion.
 
 The clinical gate checks four metrics against `clinical_targets.csv`:
 

@@ -1,0 +1,141 @@
+{
+  "task_id": "TASK-001",
+  "status": "completed",
+  "summary": "Learned-zeroD iteration-1 runs now consume the configured input 0D JSON, stage local sources through the run inputs, validate remote-only sources at execute time, and bypass legacy steady seed generation while preserving generate and path behavior.",
+  "files_changed": [
+    {
+      "path": "src/svztagent/workflows/tune_trees.py",
+      "change_type": "modified",
+      "previous_path": null,
+      "summary": "Stage local learned source JSON under a canonical run-input name, validate remote-only sources through the remote adapter, and pass the resolved/staged path into the rendered learned runtime configuration."
+    },
+    {
+      "path": "src/svztagent/templates/slurm/job_template.sh",
+      "change_type": "modified",
+      "previous_path": null,
+      "summary": "Replace learned-branch reduced steady generation with fail-fast source validation, run-scoped provenance copying, and direct learned-zeroD invocation."
+    },
+    {
+      "path": "tests/test_run_tune_dry_run.py",
+      "change_type": "modified",
+      "previous_path": null,
+      "summary": "Cover local learned staging, remote-only rendering, missing-source execute failure, rendered block compilation, and the absence of learned steady scaffolding."
+    },
+    {
+      "path": "docs/EXECUTION.md",
+      "change_type": "modified",
+      "previous_path": null,
+      "summary": "Document required learned source input, run-scoped provenance, no steady fallback/scaffolding, and explicit calibration continuation."
+    },
+    {
+      "path": "docs/PATIENT_DATA_CONTRACT.md",
+      "change_type": "modified",
+      "previous_path": null,
+      "summary": "Document the read-only learned source contract, canonical run copy, fail-closed behavior, and explicit calibration continuation."
+    }
+  ],
+  "tests_changed": [
+    {
+      "path": "tests/test_run_tune_dry_run.py",
+      "change_type": "modified",
+      "previous_path": null,
+      "summary": "Verifies learned source staging and rendering for local and remote-only inputs, execute-time missing-source failure, compiled rendered Python, and no learned steady scaffolding."
+    }
+  ],
+  "verification": {
+    "overall_status": "passed",
+    "checks": [
+      {
+        "verification_id": "VER-T001-01",
+        "kind": "test",
+        "procedure": "pytest -q tests/test_run_tune_dry_run.py tests/test_patient_path_resolution.py",
+        "status": "passed",
+        "exit_code": 0,
+        "summary": "Focused learned, generated, path, rendering, staging, and patient-path tests passed in the locked project test environment."
+      },
+      {
+        "verification_id": "VER-T001-02",
+        "kind": "inspection",
+        "procedure": "Inspect the source=learned_zerod helper and rendered-script assertions for _generate_iteration_seed, run_steady_sims, seed_generation/preop, seed_generation/postop, and seed_generation/steady.",
+        "status": "passed",
+        "exit_code": null,
+        "summary": "The learned helper validates and copies the configured source into seed_generation/learned/source_0d_config.json, contains no reduced-generator or steady calls, and the explicit source=generate helper retains the reduced generator."
+      },
+      {
+        "verification_id": "VER-T001-03",
+        "kind": "command",
+        "procedure": "python3 -m compileall -q src/svztagent (with PYTHONPYCACHEPREFIX directed to a writable temporary cache)",
+        "status": "passed",
+        "exit_code": 0,
+        "summary": "All svztagent Python source compiled successfully."
+      },
+      {
+        "verification_id": null,
+        "kind": "inspection",
+        "procedure": "Review docs/EXECUTION.md and docs/PATIENT_DATA_CONTRACT.md for learned source requirements, run-scoped copying, no steady generation, read-only patient data, and explicit calibration continuation.",
+        "status": "passed",
+        "exit_code": null,
+        "summary": "Both operator-facing documents describe the tightened learned-zeroD input and calibration contract accurately."
+      }
+    ],
+    "acceptance_criteria": [
+      {
+        "criterion_id": "AC-T001-01",
+        "criterion": "A rendered source=learned_zerod iteration uses the configured source 0D path or staged canonical source and contains no call from _generate_learned_iteration_seed to _generate_iteration_seed.",
+        "status": "passed",
+        "evidence": "VER-T001-01 verifies local and remote-only path rendering; VER-T001-02 confirms the learned helper copies the configured source and does not call _generate_iteration_seed."
+      },
+      {
+        "criterion_id": "AC-T001-02",
+        "criterion": "The learned path writes its provenance input only under the run-scoped seed_generation/learned directory and never creates learned seed_generation/preop, postop, or steady directories.",
+        "status": "passed",
+        "evidence": "VER-T001-01 checks the rendered learned helper and staged source; VER-T001-02 confirms the learned helper has no preop, postop, steady, or run_steady_sims scaffolding."
+      },
+      {
+        "criterion_id": "AC-T001-03",
+        "criterion": "A missing learned source fails with a specific error before invoking learned-zeroD and never falls back to steady generation.",
+        "status": "passed",
+        "evidence": "VER-T001-01 exercises execute-time missing remote-source failure; VER-T001-02 confirms the rendered runtime guard precedes learned_generator invocation and has no steady fallback."
+      },
+      {
+        "criterion_id": "AC-T001-04",
+        "criterion": "Existing source=generate and source=path tests continue to pass without changed semantics.",
+        "status": "passed",
+        "evidence": "VER-T001-01 passes the existing generate/path dry-run and patient-path regression coverage alongside the new learned cases."
+      },
+      {
+        "criterion_id": "AC-T001-05",
+        "criterion": "Execution and patient-data docs accurately describe required learned source input, run-scoped copying, no steady generation, and explicit calibration continuation.",
+        "status": "passed",
+        "evidence": "The documentation review check confirms both required documents contain the updated learned source and calibration contract."
+      }
+    ]
+  },
+  "deviations": [
+    {
+      "description": "VER-T001-03 used PYTHONPYCACHEPREFIX to redirect Python bytecode output to a writable temporary cache.",
+      "reason": "The unmodified command attempted to write macOS Python cache files under a protected user cache path in the sandbox.",
+      "impact": "Compilation covered the same src/svztagent tree and passed; no product behavior or source path changed."
+    }
+  ],
+  "assumptions": [],
+  "unresolved_issues": [
+    {
+      "description": "A broader repository pytest run still has six unrelated baseline failures in adaptation, postop, and iteration-tracking tests.",
+      "impact": "The full repository suite is not globally green in this snapshot, but the failures do not involve TASK-001 files or required verification procedures.",
+      "recommended_action": "Investigate those failures in their owning tasks and rerun the full suite after parallel changes are integrated."
+    }
+  ],
+  "escalation": {
+    "required": false,
+    "category": null,
+    "reason": null,
+    "requested_action": null
+  },
+  "commit": {
+    "status": "created",
+    "sha": "546f441d7122351eb3a4ef7fa9ddbc6edd23bbb3",
+    "message": "Fix learned seed source staging",
+    "reason": null
+  }
+}

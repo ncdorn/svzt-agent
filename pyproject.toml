@@ -92,6 +92,7 @@ only-packages = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/svztagent"]
+artifacts = ["src/svztagent/templates/**/*.sh"]
 
 [tool.hatch.build.targets.sdist]
 include = [

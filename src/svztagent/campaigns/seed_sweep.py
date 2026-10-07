@@ -31,13 +31,16 @@ class SeedSweepCase:
     seed_mode: str
     diameter_scale: float
     tuning_model: str
-    allow_ordered_outlet_mapping: bool = False
+    # Full-PA only.  Learned seeds name BCs in centerline branch order, so
+    # serialized cap order mispairs them; ``auto`` resolves metadata, cap
+    # names, then the patient centerline geometry.
+    outlet_mapping_mode: str | None = None
 
 
 CASES = (
-    SeedSweepCase("learned-tree-dscale-0p0", "learned_path", 0.0, "full_pa", True),
-    SeedSweepCase("learned-tree-dscale-0p1", "learned_path", 0.1, "full_pa", True),
-    SeedSweepCase("learned-rri-reduced", "rri_from_learned_reference", 0.0, "rri", True),
+    SeedSweepCase("learned-tree-dscale-0p0", "learned_path", 0.0, "full_pa", "auto"),
+    SeedSweepCase("learned-tree-dscale-0p1", "learned_path", 0.1, "full_pa", "auto"),
+    SeedSweepCase("learned-rri-reduced", "rri_from_learned_reference", 0.0, "rri"),
 )
 
 
@@ -201,7 +204,11 @@ def _configure_child_workspace(
     impedance = tuning.setdefault("impedance", {})
     impedance["diameter_scale"] = case.diameter_scale
     impedance["tuning_model"] = case.tuning_model
-    impedance["allow_ordered_outlet_mapping"] = case.allow_ordered_outlet_mapping
+    impedance.pop("allow_ordered_outlet_mapping", None)
+    if case.outlet_mapping_mode is not None:
+        impedance["outlet_mapping_mode"] = case.outlet_mapping_mode
+    else:
+        impedance.pop("outlet_mapping_mode", None)
     if case.tuning_model == "full_pa" and case.diameter_scale > 0.0:
         impedance["use_mean"] = False
 
@@ -224,7 +231,6 @@ def _configure_child_workspace(
     default_impedance = defaults_yaml.setdefault("defaults", {}).setdefault(
         "tuning", {}
     ).setdefault("impedance", {})
-    default_impedance.setdefault("allow_ordered_outlet_mapping", False)
     default_impedance.setdefault("tuning_model", "rri")
 
     _write_yaml(patients_yaml_path, patients_yaml)
@@ -285,7 +291,7 @@ def plan_seed_sweep_campaign(
                     "seed_mode": case.seed_mode,
                     "diameter_scale": case.diameter_scale,
                     "tuning_model": case.tuning_model,
-                    "allow_ordered_outlet_mapping": case.allow_ordered_outlet_mapping,
+                    "outlet_mapping_mode": case.outlet_mapping_mode,
                     "learned_model": str(learned_path),
                     "seed_path": str(seed_path),
                     "child_workspace": str(child_root),

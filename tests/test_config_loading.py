@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from svztagent.config.load import load_workspace_config, resolve_patient_alias
+from svztagent.config.models import ImpedanceTuningConfig
 from svztagent.core.errors import ConfigError
 
 
@@ -73,6 +76,387 @@ patients:
     assert config.patients[0].tuning.iteration1_seed is not None
     assert config.patients[0].tuning.iteration1_seed.source == "generate"
     assert config.patients[0].tuning.iteration1_seed.path == "/tmp/custom_seed.json"
+
+
+def test_resolve_patient_supports_learned_zerod_seed_source(sample_config_files):
+    patient_root = (
+        sample_config_files
+        / "remote_data"
+        / "permanent"
+        / "TST-STAN-x"
+    )
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        f"""
+patients:
+  - alias: "TST-STAN-x"
+    permanent_remote_path: "{patient_root.as_posix()}"
+    data_policy: "read_only"
+    tuning:
+      iteration1_seed:
+        source: "learned_zerod"
+        learned_zerod_executable: "/opt/learned/bin/learned-zerod"
+        svzerodsolver_executable: "/opt/svzerod/bin/svzerodsolver"
+      impedance:
+        tuning_model: "full_pa"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_workspace_config(sample_config_files)
+    patient = resolve_patient_alias(config, "sherlock", "TST-STAN-x")
+
+    assert patient.patient_assets is not None
+    assert patient.patient_assets.iteration1_seed_source == "learned_zerod"
+    assert patient.impedance.outlet_mapping_mode == "auto"
+    assert patient.impedance.outlet_mapping_centerline == patient.patient_assets.centerlines
+    assert (
+        patient.patient_assets.iteration1_seed_learned_zerod_executable
+        == "/opt/learned/bin/learned-zerod"
+    )
+    assert (
+        patient.patient_assets.iteration1_seed_svzerodsolver_executable
+        == "/opt/svzerod/bin/svzerodsolver"
+    )
+
+
+def test_resolve_patient_learned_seed_inherits_default_executables(
+    sample_config_files,
+):
+    defaults_path = sample_config_files / "config" / "defaults.yaml"
+    defaults_path.write_text(
+        defaults_path.read_text(encoding="utf-8").replace(
+            'source: "path"\n      path: "simplified_nonlinear_zerod.json"',
+            'source: "path"\n      path: "simplified_nonlinear_zerod.json"\n'
+            '      learned_zerod_executable: "/opt/learned/bin/learned-zerod"\n'
+            '      svzerodsolver_executable: "/opt/svzerod/bin/svzerodsolver"',
+        ),
+        encoding="utf-8",
+    )
+    patient_root = sample_config_files / "remote_data" / "permanent" / "TST-STAN-x"
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        f'''
+patients:
+  - alias: "TST-STAN-x"
+    permanent_remote_path: "{patient_root.as_posix()}"
+    data_policy: "read_only"
+    tuning:
+      iteration1_seed:
+        source: "learned_zerod"
+        path: "baseline_0d.json"
+      impedance:
+        tuning_model: "full_pa"
+'''.strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    patient = resolve_patient_alias(
+        load_workspace_config(sample_config_files), "sherlock", "TST-STAN-x"
+    )
+
+    assert patient.patient_assets is not None
+    assert patient.patient_assets.iteration1_seed_path.endswith("baseline_0d.json")
+    assert (
+        patient.patient_assets.iteration1_seed_learned_zerod_executable
+        == "/opt/learned/bin/learned-zerod"
+    )
+    assert (
+        patient.patient_assets.iteration1_seed_svzerodsolver_executable
+        == "/opt/svzerod/bin/svzerodsolver"
+    )
+
+
+def test_resolve_patient_rejects_learned_zerod_for_reduced_tuning(
+    sample_config_files,
+):
+    patient_root = (
+        sample_config_files
+        / "remote_data"
+        / "permanent"
+        / "TST-STAN-x"
+    )
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        f"""
+patients:
+  - alias: "TST-STAN-x"
+    permanent_remote_path: "{patient_root.as_posix()}"
+    data_policy: "read_only"
+    tuning:
+      iteration1_seed:
+        source: "learned_zerod"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_workspace_config(sample_config_files)
+    with pytest.raises(
+        ConfigError,
+        match="source='learned_zerod'.*tuning_model='full_pa'",
+    ):
+        resolve_patient_alias(config, "sherlock", "TST-STAN-x")
+
+
+def _write_full_pa_patient(sample_config_files, impedance_yaml: str) -> str:
+    patient_root = (
+        sample_config_files / "remote_data" / "permanent" / "TST-STAN-x"
+    ).as_posix()
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        f"""
+patients:
+  - alias: "TST-STAN-x"
+    permanent_remote_path: "{patient_root}"
+    data_policy: "read_only"
+    tuning:
+      impedance:
+        tuning_model: "full_pa"
+{impedance_yaml}
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    return patient_root
+
+
+def test_resolve_patient_full_pa_centerline_mode_defaults_to_patient_centerline(
+    sample_config_files,
+):
+    patient_root = _write_full_pa_patient(
+        sample_config_files, '        outlet_mapping_mode: "centerline"'
+    )
+
+    patient = resolve_patient_alias(
+        load_workspace_config(sample_config_files), "sherlock", "TST-STAN-x"
+    )
+
+    assert patient.impedance.outlet_mapping_mode == "centerline"
+    assert patient.impedance.outlet_mapping_centerline == f"{patient_root}/centerlines.vtp"
+
+
+def test_resolve_patient_full_pa_relative_mapping_centerline_uses_patient_root(
+    sample_config_files,
+):
+    patient_root = _write_full_pa_patient(
+        sample_config_files,
+        '        outlet_mapping_mode: "centerline"\n'
+        '        outlet_mapping_centerline: "seed-source/centerlines.vtp"',
+    )
+
+    patient = resolve_patient_alias(
+        load_workspace_config(sample_config_files), "sherlock", "TST-STAN-x"
+    )
+
+    assert (
+        patient.impedance.outlet_mapping_centerline
+        == f"{patient_root}/seed-source/centerlines.vtp"
+    )
+
+
+def test_resolve_patient_full_pa_absolute_mapping_centerline_is_kept(
+    sample_config_files,
+):
+    _write_full_pa_patient(
+        sample_config_files,
+        '        outlet_mapping_centerline: "/tmp/other/centerlines.vtp"',
+    )
+
+    patient = resolve_patient_alias(
+        load_workspace_config(sample_config_files), "sherlock", "TST-STAN-x"
+    )
+
+    assert patient.impedance.outlet_mapping_mode == "auto"
+    assert patient.impedance.outlet_mapping_centerline == "/tmp/other/centerlines.vtp"
+
+
+@pytest.mark.parametrize("mode", ["metadata", "cap_name", "serialized_cap_order"])
+def test_resolve_patient_full_pa_non_geometric_mode_has_no_mapping_centerline(
+    sample_config_files, mode
+):
+    _write_full_pa_patient(sample_config_files, f'        outlet_mapping_mode: "{mode}"')
+
+    patient = resolve_patient_alias(
+        load_workspace_config(sample_config_files), "sherlock", "TST-STAN-x"
+    )
+
+    assert patient.impedance.outlet_mapping_mode == mode
+    assert patient.impedance.outlet_mapping_centerline is None
+
+
+def test_mapping_centerline_rejected_for_non_geometric_mode():
+    with pytest.raises(ValueError, match="used only by outlet_mapping_mode 'auto' or 'centerline'"):
+        ImpedanceTuningConfig.model_validate(
+            {
+                "tuning_model": "full_pa",
+                "outlet_mapping_mode": "metadata",
+                "outlet_mapping_centerline": "/tmp/centerlines.vtp",
+            }
+        )
+
+
+def test_mapping_centerline_rejected_for_rri():
+    with pytest.raises(ValueError, match="only for tuning_model='full_pa'"):
+        ImpedanceTuningConfig.model_validate(
+            {"tuning_model": "rri", "outlet_mapping_centerline": "/tmp/centerlines.vtp"}
+        )
+
+
+def test_resolve_patient_rri_has_no_mapping_centerline(sample_config_files):
+    patient = resolve_patient_alias(
+        load_workspace_config(sample_config_files), "sherlock", "TST-STAN-x"
+    )
+
+    assert patient.impedance.tuning_model == "rri"
+    assert patient.impedance.outlet_mapping_mode is None
+    assert patient.impedance.outlet_mapping_centerline is None
+
+
+def test_wedge_pressure_policy_defaults_to_upstream_clamp():
+    config = ImpedanceTuningConfig.model_validate({"tuning_model": "full_pa"})
+
+    assert config.model_dump(mode="json")["wedge_pressure_policy"] == "clamp_to_diastolic"
+
+
+def test_wedge_pressure_policy_rejects_unknown_value():
+    with pytest.raises(ValidationError):
+        ImpedanceTuningConfig.model_validate({"wedge_pressure_policy": "mean"})
+
+
+def test_patient_wedge_pressure_policy_override(sample_config_files):
+    patients_path = sample_config_files / "config" / "patients.yaml"
+    payload = yaml.safe_load(patients_path.read_text())
+    payload["patients"][0].setdefault("tuning", {}).setdefault("impedance", {})[
+        "wedge_pressure_policy"
+    ] = "measured"
+    patients_path.write_text(yaml.safe_dump(payload))
+
+    config = load_workspace_config(sample_config_files)
+    alias = payload["patients"][0]["alias"]
+    patient = resolve_patient_alias(config, "sherlock", alias)
+
+    assert config.defaults.tuning.impedance.wedge_pressure_policy == "clamp_to_diastolic"
+    assert patient.impedance.wedge_pressure_policy == "measured"
+    assert patient.impedance.model_dump(mode="json")["wedge_pressure_policy"] == "measured"
+
+
+def test_impedance_config_omits_unset_objective_tree_policy():
+    config = ImpedanceTuningConfig.model_validate({"tuning_model": "full_pa"})
+
+    assert config.objective_tree_policy is None
+    assert config.model_dump(mode="json")["objective_tree_policy"] is None
+
+
+def test_objective_tree_policy_serializes_only_set_fields():
+    config = ImpedanceTuningConfig.model_validate(
+        {
+            "tuning_model": "full_pa",
+            "diameter_scale": 0.2,
+            "diameter_std_cap": 1.5,
+            "objective_tree_policy": {
+                "use_mean": True,
+                "diameter_std_cap": None,
+                "reference_diameter": "conductance_matched",
+            },
+        }
+    )
+
+    # Omitted diameter_scale must stay omitted so svZeroDTrees inherits the
+    # final policy; explicit diameter_std_cap: null means "no cap".
+    assert config.model_dump(mode="json")["objective_tree_policy"] == {
+        "use_mean": True,
+        "diameter_std_cap": None,
+        "reference_diameter": "conductance_matched",
+    }
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"unknown_key": 1},
+        {"reference_diameter": "geometric_mean"},
+        {"diameter_scale": -0.1},
+        {"diameter_std_cap": -1.0},
+    ],
+)
+def test_objective_tree_policy_rejects_invalid_fields(policy):
+    with pytest.raises(ValueError):
+        ImpedanceTuningConfig.model_validate(
+            {"tuning_model": "full_pa", "objective_tree_policy": policy}
+        )
+
+
+def test_objective_tree_policy_rejected_for_rri():
+    with pytest.raises(ValueError, match="objective_tree_policy is supported only"):
+        ImpedanceTuningConfig.model_validate(
+            {"tuning_model": "rri", "objective_tree_policy": {"use_mean": True}}
+        )
+
+
+def test_resolve_patient_full_pa_objective_tree_policy_override(sample_config_files):
+    _write_full_pa_patient(
+        sample_config_files,
+        "        diameter_scale: 0.2\n"
+        "        objective_tree_policy:\n"
+        "          use_mean: true\n"
+        "          diameter_std_cap: null\n"
+        '          reference_diameter: "conductance_matched"',
+    )
+
+    patient = resolve_patient_alias(
+        load_workspace_config(sample_config_files), "sherlock", "TST-STAN-x"
+    )
+
+    assert patient.impedance.model_dump(mode="json")["objective_tree_policy"] == {
+        "use_mean": True,
+        "diameter_std_cap": None,
+        "reference_diameter": "conductance_matched",
+    }
+
+
+def test_resolve_patient_rejects_unknown_objective_tree_policy_key(sample_config_files):
+    _write_full_pa_patient(
+        sample_config_files,
+        "        objective_tree_policy:\n          reference: \"conductance_matched\"",
+    )
+
+    with pytest.raises(ConfigError):
+        load_workspace_config(sample_config_files)
+
+
+def test_impedance_config_enables_nelder_mead_stopping_by_default():
+    stopping = ImpedanceTuningConfig().model_dump(mode="json")["stopping"]
+
+    assert stopping["enabled"] is True
+    assert stopping["target_tolerance"] == 0.025
+    assert stopping["maxfev"] == 200
+
+
+@pytest.mark.parametrize(
+    "stopping",
+    [{"maxfev": 0}, {"xatol": -1.0}, {"initial_simplex_step": 0.9}, {"unknown": 1}],
+)
+def test_nelder_mead_stopping_rejects_invalid_fields(stopping):
+    with pytest.raises(ValueError):
+        ImpedanceTuningConfig.model_validate({"stopping": stopping})
+
+
+def test_resolve_patient_stopping_override_patches_fields(sample_config_files):
+    _write_full_pa_patient(
+        sample_config_files,
+        "        stopping:\n"
+        "          maxfev: 120\n"
+        "          target_tolerance: null",
+    )
+
+    patient = resolve_patient_alias(
+        load_workspace_config(sample_config_files), "sherlock", "TST-STAN-x"
+    )
+
+    stopping = patient.impedance.model_dump(mode="json")["stopping"]
+    assert stopping["maxfev"] == 120
+    # An explicit null survives the patch and disables the target stop.
+    assert stopping["target_tolerance"] is None
+    assert stopping["stall_rel_improvement"] == 0.01
 
 
 def test_load_workspace_config_supports_patient_threed_override(sample_config_files):

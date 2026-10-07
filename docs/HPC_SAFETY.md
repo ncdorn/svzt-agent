@@ -8,6 +8,14 @@
 
 ## Command safety
 - Remote commands are validated against an allowlist (`mkdir`, `test`, `sbatch`, `squeue`, `sacct`, `scancel`, `bash`).
+- The tune driver job submits child Slurm jobs from inside the cluster: the preop
+  3D job and, under `calibrated_full_pa`, the preop postprocess and calibration
+  jobs. The postprocess/calibration scripts and their exact `sbatch` argv are
+  rendered agent-side at `run tune` time, validated under `runs_root`, and
+  embedded in the driver; the driver only adds `--dependency=afterok:<id>` and
+  writes the calibration YAML under the run's `calibration/inputs/`. It reports
+  every child job ID in `iteration_decision.json`, and the agent records them
+  in the manifest before polling or promotion.
 - Forbidden shell-control tokens are rejected.
 - Adapters accept argv arrays, not arbitrary shell strings from workflow code.
 

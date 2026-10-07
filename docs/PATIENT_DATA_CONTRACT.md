@@ -57,8 +57,26 @@ Iteration-1 simplified 0D seed behavior is also config-driven:
 - optional per-patient override: `patients[].tuning.iteration1_seed`
 - relative `path` values resolve to `<patient>/...` under `permanent_remote_path`
 - absolute `path` values are used directly
-- runtime behavior: if `source=path` and the file is missing, the agent falls back to `source=generate`
-- learned full-0D seed campaign cases use absolute read-only `baseline_0d_learned.json` paths and stage a copy into the child run inputs as `full_pa_zerod.json`
+- `source=generate` produces the established reduced iteration-1 seed
+- `source=learned_zerod` consumes the required configured `path` as an existing
+  patient-level input 0D JSON and uses the patient `centerlines.vtp` plus the
+  configured external executables to produce a validated full-PA seed under the
+  run directory
+- learned generation requires full-PA impedance tuning and never writes its
+  generated seed or provenance back into the patient directory
+- runtime behavior: if `source=path` and the file is missing, reduced tuning
+  falls back to generation; a missing or unreadable `source=learned_zerod` path
+  fails closed before learned-zeroD execution and never falls back to steady
+  generation
+- local learned sources may be staged into a child run's `inputs/` as
+  `source_0d_config.json`; the driver always records its canonical provenance
+  copy at `seed_generation/learned/source_0d_config.json` before writing
+  `full_pa_zerod.json`. The run-scoped copy normalizes deprecated
+  `internal_junction` values to `NORMAL_JUNCTION`; the patient-owned source
+  remains unchanged.
+- default-policy learned full-PA calibration is submitted by
+  `advance-iter --execute` after each `not_close` iteration and must promote
+  before the next full-PA iteration. No patient asset is mutated.
 
 ## svZeroDTrees Mapping
 
@@ -145,25 +163,36 @@ when configured to bound outlet-diameter variance handling, while
 `diameter_scale` controls how much of the outlet diameter spread is applied.
 Nonzero `diameter_scale` only affects outlet-specific trees; svZeroDTrees
 therefore normalizes final tree assignment to `use_mean: false` whenever
-`diameter_scale > 0`. Full-PA objective evaluations still use shared LPA/RPA
-mean trees to avoid rebuilding every outlet tree during each Nelder-Mead step.
+`diameter_scale > 0`. Full-PA objective evaluations use the same final tree
+policy unless `objective_tree_policy` is set; that optional block (`use_mean`,
+`diameter_scale`, `diameter_std_cap`, `reference_diameter`) selects the tree
+policy used only inside the optimizer, for example shared
+`conductance_matched` LPA/RPA trees while the published config keeps
+per-outlet trees. It is forwarded unchanged to svZeroDTrees (see svZeroDTrees
+`docs/full_pa_calibration.md#objective-tree-policy`).
 For `full_pa`, the tuning snapshot must preserve the full model vessel and
 outlet-BC topology; a reduced PA/RRI snapshot is treated as invalid evidence.
 `svzerod_3d_coupling_tuned.json` is a tuned 0D source artifact. The canonical
 svMultiPhysics input is `svzerod_3Dcoupling.json`, generated from that source and
 required to contain `external_solver_coupling_blocks`. Deprecated
 `svZeroD_interface.dat` files are not part of the runtime contract.
-Full-PA campaign cases use the full model for iteration 1 only; a `not_close`
-decision regenerates a reduced RRI seed for iteration 2 onward.
+Default-policy full-PA cases retain the full model across iterations: a
+`not_close` decision schedules calibration of the exact tuned full-PA model,
+whose promoted output becomes the next seed. Reduced-RRI continuation is only
+the explicit `legacy_rri_after_first` policy.
 
 Reduced RRI tuning starts from two LPA/RPA BCs, but the tuned 3D coupling artifact
 is expanded back to one outlet BC per 3D cap before `svzerod_3Dcoupling.json` is
 staged for svMultiPhysics.
 
 Full learned 0D configs may contain one outlet BC per 3D cap. In that case,
-svZeroDTrees validates a deterministic mesh-cap to BC mapping by BC name or
-stored outlet metadata before optimization. Legacy order-based mapping is only
-allowed when `allow_ordered_outlet_mapping` is explicitly enabled.
+svZeroDTrees validates a deterministic mesh-cap to BC mapping before
+optimization: by stored outlet metadata, by BC name, or geometrically against
+the centerline the seed was generated from. The patient `centerlines.vtp` is
+read (never written) as the default `outlet_mapping_centerline` for full-PA
+`auto`/`centerline` mapping. Order-based mapping (`serialized_cap_order`, or the
+deprecated `allow_ordered_outlet_mapping`) is legacy-only and is wrong for
+centerline-generated seeds.
 
 Gate behavior remains unchanged: it still requires `results/mpa_pressure_vs_time.csv`.
 

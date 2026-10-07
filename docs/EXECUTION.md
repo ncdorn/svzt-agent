@@ -6,6 +6,9 @@
 - `svzt doctor`
 - `svzt run tune --cluster <name> --patient <alias> [--run-id <id>] [--execute]`
 - `svzt run tune-iter --cluster <name> --patient <alias> --run-id <id> [--iteration <n>] [--execute]`
+- `svzt plan calibrate --run-id <id> [--iteration <n>]`
+- `svzt run calibrate --run-id <id> [--iteration <n>] [--dry-run|--execute]`
+- `svzt calibration-status <run-id> [--iteration <n>]`
 - `svzt preop select --run-id <id> --iteration <n> [--reason <text>]`
 - `svzt run postop --run-id <id> [--dry-run|--execute]`
 - `svzt run adapt --run-id <id> --model M1|M2|M3 [--parameter-set <name>] [--dry-run|--execute]`
@@ -61,16 +64,100 @@
   workspace warnings such as missing optional config files or absent local repo
   checkouts.
 
+## Full-PA calibration prerequisites
+
+Use the global `--workspace-root` option, set `SVZ_WORKSPACE_ROOT`, or run
+from inside the workspace. The required workspace files are
+`config/clusters.yaml`, `config/patients.yaml`, `config/defaults.yaml`, and
+`runs/`; `config/repositories.yaml` is optional. Relative repository paths are
+resolved from the workspace root and are recorded in each manifest.
+
+The cluster used for a calibration run must have an absolute
+`remote_roots.runs_root`, a reachable SSH `host`/`user`, and the normal
+`svfsiplus_path`. A postprocess stage additionally requires
+`executables.svslicer_path`. The generated calibration script runs the
+upstream `svzerodtrees` CLI with `defaults.execution.python_executable` after
+the configured `defaults.execution.env_activation_hooks`; those hooks must
+make the compatible `svZeroDTrees`, `pysvzerod`, VTK/svSlicer, and solver
+runtime available on the remote host. `svzerodsolver_build_dir` is recorded
+and passed through to upstream 3D configuration when needed. Patient source
+paths are read-only, and all staged or generated files must remain below
+`<runs_root>/<run_id>/`.
+
+Enable the agent-owned policy only for the intended patient/stage. Scientific
+calibration settings belong to the upstream YAML contract:
+
+```yaml
+defaults:
+  execution:
+    python_executable: python3
+    env_activation_hooks: []       # e.g. module/venv activation on the cluster
+  tuning:
+    impedance:
+      tuning_model: full_pa
+      outlet_mapping_mode: auto
+    calibration:
+      enabled: true
+      next_iteration_seed_policy: calibrated_full_pa
+```
+
+Use `patients[].tuning.calibration` for a patient override. The accepted seed
+policies are `calibrated_full_pa` (the default) and the explicitly selected,
+one-release compatibility policy `legacy_rri_after_first`. Under the default
+policy, a full-PA iteration after iteration one fails closed unless its
+predecessor has a terminal, lineage-valid calibration promotion, and
+`svzt preop select` / `svzt run postop` fail closed unless the selected
+iteration has one; postop then consumes the remote
+`iterations/iter-XX/calibration/results/calibrated_full_pa_zerod.json` as its
+0D model. An RRI run is not a calibration run, and the seed policy has no
+effect on it. Unknown keys, contradictory mapping settings, and
+invalid policy values fail during config validation.
+
 ## Iteration-1 Seed Configuration
 - Configure iteration-1 seed once in YAML:
   - `defaults.tuning.iteration1_seed`
   - optional `patients[].tuning.iteration1_seed` override
 - Supported source modes:
   - `path`: use configured `path`; if missing at run time, fallback to `generate`
-  - `generate`: always generate via svZeroDTrees
-- Relative `path` values are resolved under each patient's `permanent_remote_path`; absolute paths are used as-is.
-- Dry-run preview only generates the seed locally when the required patient assets are mounted locally.
-- When those assets only exist on Sherlock/Oak, `svzt run tune` leaves `inputs/simplified_nonlinear_zerod.json` unstaged and the remote iteration driver generates it during execution.
+  - `generate`: generate the established reduced seed via svZeroDTrees steady solves
+  - `learned_zerod`: require the configured `path` as the input 0D JSON, copy it
+    into the run-scoped `seed_generation/learned/source_0d_config.json` provenance
+    path, then invoke svZeroDTrees' validated learned-zeroD adapter and stage the
+    resulting full-PA model as `inputs/full_pa_zerod.json`
+- `learned_zerod` is valid only with `bc_type: impedance` and
+  `impedance.tuning_model: full_pa`; invalid combinations fail during config
+  resolution.
+- The learned generator defaults to `learned-zerod` and `svzerodsolver` on the
+  activated remote environment's `PATH`. Override them with
+  `iteration1_seed.learned_zerod_executable` and
+  `iteration1_seed.svzerodsolver_executable` when needed.
+- Relative `path` values are resolved under each patient's `permanent_remote_path`; absolute paths are used as-is. For `learned_zerod`, the path is required and a missing or unreadable source fails before the learned adapter is invoked; it never falls back to steady generation.
+- When a learned source is available in the local workspace it is staged as
+  `inputs/source_0d_config.json`; remote-only sources remain referenced by their
+  resolved patient path and are checked on the execution host. In both cases the
+  driver creates the canonical run-scoped provenance copy under
+  `seed_generation/learned/` and leaves patient assets read-only.
+- Before invoking learned-zeroD, the driver replaces deprecated
+  `internal_junction` values with `NORMAL_JUNCTION` in that run-scoped copy.
+  The source patient model is not modified, and the driver log records the
+  number of normalized junctions.
+- `source=generate` alone creates `seed_generation/preop`, `postop`, and `steady`
+  artifacts. Learned runs do not create that legacy steady scaffolding.
+
+```yaml
+tuning:
+  iteration1_seed:
+    source: learned_zerod
+    path: zerod-models/baseline_0d_learned.json
+    # Optional when these commands are already on PATH:
+    # learned_zerod_executable: /path/to/learned-zerod
+    # svzerodsolver_executable: /path/to/svzerodsolver
+  impedance:
+    tuning_model: full_pa
+    outlet_mapping_mode: auto   # or centerline; never serialized_cap_order
+    # outlet_mapping_centerline defaults to the patient centerlines.vtp,
+    # which is also the centerline learned-zerod generates the seed from.
+```
 
 ## 0D Tuning Configuration
 - Select the BC tuning mode in YAML:
@@ -86,15 +173,93 @@
   - optional `patients[].tuning.impedance` override
 - Key controls:
   - `solver`, `nm_iter`, `n_procs`, `grid_search_init`
+    (the tune job requests exactly `n_procs` CPUs; impedance tuning is
+    single-process, so the svz workspace uses `n_procs: 1`)
   - `d_min`, `use_mean`, `specify_diameter`
-  - `diameter_scale`, `diameter_std_cap`, `allow_ordered_outlet_mapping`
+  - `diameter_scale`, `diameter_std_cap`, `outlet_mapping_mode`, `outlet_mapping`,
+    `outlet_mapping_centerline`
+  - `objective_tree_policy` (`full_pa` only): optional tree policy used inside the
+    optimizer objective, with optional `use_mean`, `diameter_scale`,
+    `diameter_std_cap`, and `reference_diameter` (`arithmetic_mean` |
+    `conductance_matched`)
   - `tuning_model`: `rri` for reduced PA/RRI tuning, or `full_pa` for learned full pulmonary 0D configs
+  - `wedge_pressure_policy`: how svZeroDTrees derives the tree outlet `Pd`;
+    `clamp_to_diastolic` (default, `min(wedge, diastolic MPA)`), `measured`
+    (the measured value as-is), `precapillary_fraction`
+    (`wedge + precapillary_fraction * (mean - wedge)`, regurgitant patients) or
+    `diastolic_offset` (`diastolic - diastolic_offset_mmhg`, non-regurgitant
+    patients; no wedge needed)
+  - `keep_diastolic_target`: keep the diastolic term when its target is below `Pd`
+  - `objective`: `{type: relative | likelihood, pressure_sigma_mmhg, split_sigma,
+    target_sigma}`; with `likelihood` the Nelder-Mead target stop and the
+    iteration gate accept metrics within `target_sigma` standard deviations
+  - `proximal_compliance` (`full_pa`): `{wall_ehr}` thin-wall compliance on the
+    rigid seed vessels
+  - `tree_max_nodes`: structured-tree node budget (svZeroDTrees default 100000)
+  - `polish` (`full_pa`, requires `objective_tree_policy`): `{maxfev,
+    initial_simplex_step}` per-cap re-tune from the shared-tree optimum
+  - `leaf_resistance` (`full_pa`, requires `wedge_pressure_policy: measured`):
+    `{downstream_fraction}` capillary + venous resistance at every tree leaf;
+    evaluated on TST-STAN-5 and not used by the svz workspace
+    (`docs/TUNING_MODEL.md` §8)
   - `rescale_inflow`, `convert_to_cm`, `compliance_model`
+  - `stopping`: Nelder-Mead stopping policy, enabled by default with
+    `target_tolerance: 0.025`, `stall_window: null` (5 x free parameters),
+    `stall_rel_improvement: 0.01`, `xatol`/`fatol: 1e-3` (bounds-normalized),
+    `maxfev: 200`, `initial_simplex_step: 0.1`, and
+    `restart_min_rel_improvement: 0.05`. `enabled: false` restores the
+    historical maxiter-only runs. A patient-level block patches individual
+    fields; an explicit `null` disables that rule. Semantics are owned by
+    svZeroDTrees `docs/interface.md` (`stopping`).
+- Tuning artifacts recorded in `iteration_decision.json` (`tuning_artifacts`)
+  also include `tuning_diagnostics` (svZeroDTrees `tuning_diagnostics.json`:
+  outlet pressure and policy, published vs optimizer fit, truncation, total
+  compliance vs the SV/PP bracket, parameters at bounds, peak memory) and
+  `seed_with_proximal_compliance` when enabled. With a polish the shared result
+  is kept as `optimized_params_shared.csv` / `pa_config_tuning_snapshot_shared.json`.
+- The job exits with code 8 before any remote work when the cluster's
+  svZeroDTrees would ignore part of the rendered impedance config; update
+  svZeroDTrees on the cluster (`svzt update`) and resubmit.
+- The cohort configuration and its rationale are in `docs/TUNING_MODEL.md`.
 - Policy: each iteration retunes from a staged seed under `inputs/`.
   Reduced RRI runs use `simplified_nonlinear_zerod.json`; `full_pa` runs use
   `full_pa_zerod.json`.
 - The default Nelder-Mead repeat count is `nm_iter: 5`.
-- Full learned 0D seeds with many outlet BCs require deterministic cap-to-BC mapping by matching BC names or outlet metadata. Order-only mapping is rejected unless `allow_ordered_outlet_mapping: true` is set for a legacy run.
+- `objective_tree_policy` separates the optimizer's tree policy from the final
+  published policy (top-level `use_mean`, `diameter_scale`, `diameter_std_cap`).
+  When omitted, objective evaluations use the final policy. Omitted fields
+  inside the block inherit the final policy; an explicit
+  `diameter_std_cap: null` means no cap. Only explicitly set fields are
+  forwarded to svZeroDTrees, which owns cross-field validation (for example,
+  `conductance_matched` requires `use_mean: true` in the block and per-outlet
+  final trees). A patient-level block replaces the defaults block rather than
+  merging with it. The key is rejected for `rri` and dropped for
+  `legacy_rri_after_first` RRI iterations. See svZeroDTrees
+  `docs/full_pa_calibration.md#objective-tree-policy`.
+- Full-PA seeds with one outlet BC per cap require a deterministic cap-to-BC
+  mapping resolved by svZeroDTrees. `outlet_mapping_mode` accepts
+  `auto` (default for `full_pa`), `metadata`, `cap_name`, `centerline`,
+  `serialized_cap_order`, and `explicit` (with `outlet_mapping`). `auto` tries
+  metadata, then cap names, then centerline geometry when
+  `outlet_mapping_centerline` is set.
+- `centerline` pairs each cap with the nearest centerline outlet endpoint and
+  takes the BC of the 0D vessel on that branch. It fails unless the seed is
+  traceable to the given centerline (see svZeroDTrees
+  `docs/full_pa_calibration.md`, "Geometric (`centerline`) mapping").
+- `outlet_mapping_centerline` must be the centerline the seed was generated
+  from, as a remote path. For `full_pa` with `auto` or `centerline`, patient
+  resolution defaults it to the patient `centerlines.vtp`
+  (`remote.svzerodtrees_paths.centerlines`); relative paths resolve against the
+  patient root. It is rejected for other modes and for `rri`. The resolved value
+  is recorded in the manifest `impedance_defaults` and the rendered job script.
+- Do not use `serialized_cap_order` for centerline-generated or learnedZeroD
+  seeds: their BCs follow centerline branch order while caps are sorted by
+  filename, so the pairing is wrong (1/23 caps correct on TST-STAN-5). It
+  remains only for legacy runs whose seed BC order was built from cap order.
+  `allow_ordered_outlet_mapping` is an input-only deprecated alias for it and
+  cannot be combined with the canonical keys.
+- RRI iterations, including `legacy_rri_after_first` iterations of a `full_pa`
+  run, never receive outlet mapping keys; svZeroDTrees rejects them for RRI.
 
 ## RCR Tuning Configuration
 - Configure RCR tuning defaults in YAML when `bc_type: rcr`:
@@ -110,13 +275,210 @@
 - RCR tuning writes `optimized_rcr_params.csv`, `pa_config_tuning_snapshot.json`,
   and `svzerod_3d_coupling_tuned.json`.
 
+## Full-PA postprocess → calibration handoff
+
+The calibration stage consumes the exact tuned full-PA model used for the
+preoperative 3D case plus one upstream postprocess-suite descriptor. The agent
+does not construct or inspect the VTP/timeseries scientific payload. The
+postprocess job invokes `svZeroDTrees` and publishes its descriptor/reports;
+the agent records the descriptor path and delegates contract validation to the
+upstream implementation. See the [svZeroDTrees production calibration
+contract](https://github.com/ncdorn/svZeroDTrees/blob/main/docs/full_pa_calibration.md)
+for units, descriptor fields, QC, replay, and target semantics.
+
+The scheduler dependency is explicit in the generated calibration script:
+`#SBATCH --dependency=afterok:<postprocess-job-id>`. A missing postprocess
+record or scheduler job ID is an error; the agent never submits an
+un-dependent calibration job or guesses a descriptor filename. A postprocess
+failure consequently prevents the dependent calibration job from running and
+must be diagnosed from the postprocess record/logs.
+
+The explicit recovery/inspection sequence is:
+
+```bash
+svzt --workspace-root /path/to/workspace preop select --run-id <run-id> --iteration <n>
+svzt --workspace-root /path/to/workspace run calibrate --run-id <run-id> --iteration <n> --execute
+svzt --workspace-root /path/to/workspace calibration-status <run-id> --iteration <n>
+```
+
+Use `plan calibrate` only as an isolated preview while validating the current
+implementation. The plan command persists a dry-run `submitted` record with a
+`dryrun-*` job identity; running `run calibrate --execute` immediately after
+that preview can be treated as an idempotent match and reuse the preview
+instead of submitting a real job. This is a TASK-016 CLI idempotency defect;
+do not use plan-then-execute as a production sequence until it is corrected.
+
+`preop select` submits the standalone selected-preop postprocess job and
+records `selected_preop_postprocess`; automatic continuation instead records a
+per-iteration `preop_postprocess_runs[]` entry. Both use the normalized result root
+`iterations/iter-XX/results/postprocess/`. `plan calibrate`/`run calibrate`
+stage the calibration request under the iteration's `calibration/` directory
+and record the `afterok` dependency. `calibration-status` reports the state,
+terminal state, dependency/job IDs, input/output digests, and promotion result.
+
+Under `calibrated_full_pa` (impedance tuning with `tuning_model: full_pa`),
+every completed iteration produces a calibrated full-PA model regardless of its
+decision: `not_close`, `converged`, and the final iteration at
+`max_iterations`. A not-close iteration uses it as the next iteration's seed;
+a converged iteration hands it to postop for the preop/postop comparison.
+### Driver-owned seed generation
+
+Next-seed generation is one tune-driver step whose strategy the seed policy
+selects (`workflows/seed_generation.py`); `run tune` alone is enough for either:
+
+- `reduced_rri` (`rri` model, `rcr` boundary conditions, or
+  `legacy_rri_after_first`): on `not_close` the driver regenerates
+  `simplified_zerod_tuned_RRI.json` inline.
+- `calibrated_full_pa`: at `run tune` time the agent renders and pushes the
+  iteration's preop postprocess script
+  (`iter-XX/postprocess/run_postprocess.sh`), the calibration script
+  (`iter-XX/calibration/run_calibration.sh`, no in-script dependency), and a
+  calibration request without the tuned-model path
+  (`iter-XX/calibration/inputs/calibration_request.json`). After a `not_close`
+  or `converged` decision the driver writes the final
+  `calibrate_0d_from_3d.yaml` with the tuned model it actually produced, runs
+  the rendered `sbatch` argv for postprocess, then calibration with
+  `--dependency=afterok:<postprocess-job>`, and exits. RRI regeneration is
+  skipped (`reduced_pa_regeneration_skipped_calibrated_full_pa`).
+
+The driver reports the outcome in `iteration_decision.json`:
+
+```json
+"seed_generation": {
+  "strategy": "calibrated_full_pa",
+  "status": "submitted",
+  "tuned_zerod_config": "<remote iter>/results/svzerod_3d_coupling_tuned.json",
+  "postprocess": {"job_id": "...", "remote_script": "...", "remote_results_dir": "..."},
+  "calibration": {"job_id": "...", "remote_root": "...", "remote_script": "...", "remote_config_path": "..."},
+  "error": null
+}
+```
+
+(`reduced_rri` reports `{"strategy": "reduced_rri", "status": "regenerated",
+"regenerated_config_path": ...}`.) A failed driver `sbatch` reports
+`status: failed` with `error` and does not change the decision.
+
+### Agent verification and promotion
+
+`advance-iter --execute`, `continue --execute`, and `watch --auto-advance` no
+longer submit seed jobs in the normal path. They pull `iteration_decision.json`
+if it is missing locally, record the driver-reported postprocess and
+calibration jobs in the manifest (`preop_postprocess_runs[]`,
+`calibration_runs[]`), and poll calibration. `calibration_pending` means keep
+waiting; once calibration completes the agent fetches the publication,
+validates it, and promotes it before advancing, reporting `already_converged`,
+or reporting `max_iter_failed`. `needs_review` pauses without calibration.
+Without `--execute`, `advance-iter` submits, polls, and pulls nothing; it
+records any driver-reported jobs from the local decision and reports
+`calibration_required` / `calibration_pending` / `calibration_failed`.
+
+Agent-side submission (`calibration_submitted`) is the fallback when the
+driver did not submit: a driver from before this change, a driver `status:
+failed`, or a forced `svzt continue` after a driver timeout.
+
+`run calibrate` remains available for inspection and explicit retries, but is
+not required for normal full-PA iteration cadence.
+
+## Calibration artifacts and evidence
+
+For iteration `n`, the agent-owned calibration layout is:
+
+```text
+runs/<run-id>/iterations/iter-XX/calibration/
+├── inputs/calibrate_0d_from_3d.yaml
+├── run_calibration.sh
+├── logs/
+└── results/
+    ├── calibrated_full_pa_zerod.json             # upstream candidate
+    └── calibrated_full_pa_zerod.promoted.json   # only after guarded promotion
+```
+
+The corresponding remote root is
+`<runs_root>/<run-id>/iterations/iter-XX/calibration/`. The upstream job writes
+its calibrated model and scientific reports under remote `results/`; the agent
+records those paths/digests in `calibration_runs[]` and does not rewrite them.
+The upstream report set is documented in its contract (QC, confirmation,
+replay, targets, and summary alongside the output config).
+
+The postprocess source is recorded separately under
+`preop_postprocess_runs[]` (automatic/preop records) or
+`selected_preop_postprocess` (the explicit selected-preop handoff), with the
+normalized output root at `iterations/iter-XX/results/postprocess/`. The usual
+handoff evidence includes `postprocess_submission.json`,
+`postprocess_suite_metadata.json`, last-cycle centerline descriptor/data, and
+resistance/metric outputs. `postop_postprocess` is a separate explicit
+postoperative record and is not an implicit preop calibration source.
+
+## Acceptance gates, retry, and rollback
+
+Scientific acceptance is upstream-owned: observation/data-contract QC,
+fixed-point confirmation, finite normalized output, replay stability, target
+evaluation, and provenance validation must pass before upstream marks the
+calibration lineage valid. A negative calibrated resistance is not an
+agent-level rejection when the upstream contract says all required gates pass;
+the upstream warning/report remains evidence.
+
+The agent's promotion gate is deliberately narrower and mechanical. It
+requires all of the following:
+
+- the requested input identity digest equals the manifest identity for the
+  tuned model, postprocess descriptor, and postprocess job ID;
+- the calibration record is `completed`/`succeeded` with a successful terminal
+  scheduler state;
+- `validated_lineage: true` is recorded by the upstream completion handoff; and
+- the calibrated output exists locally and has a SHA-256 digest.
+
+Only then does compare-and-set promotion copy the candidate to
+`calibrated_full_pa_zerod.promoted.json` and set the iteration's
+`calibrated_seed_path`. Failed, stale, incomplete, mismatched, or missing
+outputs append a rejected promotion record and never replace the last-known
+good pointer. A matching active input identity is idempotent: rerunning the
+stage reuses its existing submission instead of scheduling a duplicate. If an
+input digest changes, the prior record is marked `invalidated` and a new
+attempt is recorded; previous evidence remains in manifest history.
+
+For a retry, inspect the manifest first, verify the postprocess job and input
+digests, then rerun `run calibrate --execute` only after the failed/incomplete
+attempt or its upstream dependency has been corrected. Do not hand-edit a
+successful promotion or overwrite a prior iteration's seed. Dry-run mode
+renders the YAML/script, adapter command previews, and manifest submission
+evidence without remote mutation; execute mode performs the transfer and
+submission.
+
+Rollback means disabling calibration/promotion in the workspace policy and,
+if compatibility is required, selecting `legacy_rri_after_first` explicitly.
+Continue from already published tuned 0D/3D outputs; do not delete or rewrite
+calibration reports, prior seeds, or manifest history. A rejected candidate
+already leaves the previous `last_known_good_promotion` unchanged.
+
+## Failure diagnostics
+
+Start with `svzt status <run-id>` and
+`svzt calibration-status <run-id> --iteration <n>`, then inspect the relevant
+run-scoped evidence:
+
+| Symptom | First evidence to inspect |
+| --- | --- |
+| Workspace/config rejection | `svzt config validate`, `svzt doctor`, and the config snapshot under `runs/<run-id>/config/` |
+| Missing or invalid patient/remote path | `manifest.yaml` (`patient`, `remote`, `remote.svzerodtrees_paths`) and `docs/PATIENT_DATA_CONTRACT.md` |
+| Postprocess did not publish a descriptor | `iterations/iter-XX/postprocess/logs/`, `postprocess_submission.json`, `postprocess_suite_metadata.json` |
+| Calibration is pending forever | `calibration_runs[]` dependency/job IDs; inspect the postprocess scheduler state and `afterok` dependency |
+| Calibration failed upstream | `iterations/iter-XX/calibration/logs/`, upstream QC/confirmation/replay/target/summary reports, and the terminal reason |
+| Promotion was rejected | `calibration_runs[]`, `promotion_records[]`, and `promotion_reason`; check terminal state, input digest, lineage flag, and candidate path |
+| Next full-PA iteration refuses to stage | prior iteration `calibrated_seed_path` and `last_known_good_promotion`; choose an explicit legacy policy only as a reviewed rollback |
+
+Scheduler output is retained under the stage `logs/` directory. Adapter errors
+include command/stdout/stderr context; unsafe paths, rejected commands, and
+invalid state transitions fail fast. Preserve those records when escalating a
+run—do not “repair” a failed stage by replacing its manifest evidence.
+
 ## Seed-Sweep Campaigns
 - `svzt campaign seed-sweep plan` creates `runs/campaigns/<campaign-id>/campaign_manifest.yaml` plus one child workspace per patient/case.
 - Without `--patients`, the default learned seed sweep targets TST-STAN-5 and creates exactly three child runs.
 - Default cases compare learned full-0D seeds with `tuning_model=full_pa` and `diameter_scale=0.0`, learned full-0D seeds with `tuning_model=full_pa` and `diameter_scale=0.1`, and an RRI-prepared reduced seed from the learned reference with `tuning_model=rri`.
-- svZeroDTrees normalizes final tree assignment to `use_mean: false` whenever `diameter_scale > 0`, so outlet diameter spread is applied in the tuned 0D source. Full-PA optimization still uses shared LPA/RPA mean trees during each objective evaluation.
+- svZeroDTrees normalizes final tree assignment to `use_mean: false` whenever `diameter_scale > 0`, so outlet diameter spread is applied in the tuned 0D source. Full-PA objective evaluations use that same final policy unless `objective_tree_policy` is configured; the default seed-sweep cases do not set it.
 - The learned full-0D source is `baseline_0d_learned.json` under the patient's local `zerod-models` directory and is staged into each full-PA child run as `inputs/full_pa_zerod.json`; the reduced RRI case prepares `prepared_inputs/simplified_zerod_tuned_RRI.json` from that reference.
-- Full-PA child runs use `tuning_model=full_pa` only for iteration 1. If iteration 1 is `not_close`, the iteration driver regenerates `results/simplified_zerod_tuned_RRI.json`, and iteration 2 onward run reduced RRI tuning from `inputs/simplified_nonlinear_zerod.json`.
+- The historical seed-sweep description used full-PA tuning only for iteration 1 and reduced RRI thereafter. Under the current default `calibrated_full_pa` policy, a full-PA child cannot advance after a `not_close` result without a successful calibration promotion; selecting the legacy reduced-RRI behavior must be explicit with `next_iteration_seed_policy: legacy_rri_after_first`. The campaign helper does not currently set that policy, so this is a known compatibility gap for multi-iteration full-PA seed sweeps.
 - Each child workspace contains config snapshots and a normal `runs/<run-id>/` manifest/plan, so campaign runs remain reproducible without mutating root config.
 - `summarize` writes `seed_sweep_summary.json` and `seed_sweep_summary.csv`; `slides` writes `seed_sweep_comparison.pptx`.
 
@@ -185,6 +547,8 @@
 - When the per-iteration 0D summary is missing, the command backfills it locally from `pa_config_tuning_snapshot.json` when that artifact is available under either:
   - `iterations/iter-XX/results/`
   - `pulled_outputs/iterations/iter-XX/results/`
+- The backfilled gate uses the same thresholds as the job: sigma mode when
+  `iteration_decision.json` records `gate_mode: sigma`, otherwise 10% relative.
 - Missing historical 0D snapshot artifacts remain explicit gaps in the output; the command does not infer pre-mapping behavior from the post-mapping 3D-coupled config.
 
 ## Adaptation Configuration
@@ -201,6 +565,35 @@
 - `M1` is stabilized WSS-only structured-tree adaptation with frozen thickness.
 - `M2` is territory-level homeostatic WSS + pressure/IMS structured-tree adaptation.
 - `M3` wraps the higher-complexity CWSS+IMS ODE model behind the same workflow contract.
+- Adaptation starts from the selected preop iteration's tuning artifacts. The
+  manager passes `results/svzerod_3d_coupling_tuned.json` as `tuned_config`
+  and `results/outlet_cap_mapping.json` as `outlet_cap_mapping` to
+  `run_structured_tree_adaptation` (the mapping only when the file exists).
+  Both paths appear in the plan (`a01` read paths, `summary.tuned_config`,
+  `summary.outlet_cap_mapping`, `summary.outlet_cap_mapping_required`) and in
+  the `adaptation_started` event.
+  - svZeroDTrees rebuilds the tuned trees from the config's tree metadata
+    (parameters, diameters, `max_nodes`) and pairs caps and BCs through the
+    saved outlet mapping, never by list position.
+  - It uses the tuned IMPEDANCE Pd as the outlet pressure.
+  - svzt-agent does not pass `wedge_pressure_policy`: the Pd stored in the
+    tuned config is authoritative, and the manifest's impedance defaults can
+    predate the selected iteration.
+- The manager job fails before adaptation if the tuned config is missing. It
+  also fails if `outlet_cap_mapping.json` is missing for an iteration whose
+  effective tuning model is `full_pa` (manifests without
+  `calibration_defaults` predate the seed policy and resolve iterations after
+  the first as `rri`). A cluster svZeroDTrees without the
+  `tuned_config` argument fails with `TypeError`; run `svzt update`.
+- svZeroDTrees then fails (`ValueError`) in these cases:
+  - the postop coupler's outlet BCs differ from the tuned ones;
+  - an outlet BC has no coupling block with a surface, or the surface is a
+    different cap than the mapped one;
+  - an M2 `parameter_set.max_nodes` disagrees with the tuned budget.
+- For full-PA runs, use `M2`. `svzt run adapt --model M1|M3` raises
+  `ConfigError` at plan time when the selected iteration was tuned with
+  `full_pa`. Both models adapt one LPA and one RPA tree inside a reduced-order
+  PA model. See `docs/TUNING_MODEL.md` §8.
 - ParaView visualization follows the same stage-scoped artifact contract across
   selected pre-op, explicit post-op, and adaptation:
   - selected pre-op submits a sibling ParaView job immediately after the
@@ -258,7 +651,10 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
   - submits preop 3D (`SimulationDirectory`) and waits up to the configured
     `wait_timeout_seconds` value, defaulting to 43200 seconds
   - requires `results/mpa_pressure_vs_time.csv` plus preop flow split for gating
-  - `not_close` regenerates reduced PA config for next iteration
+  - `not_close` regenerates a reduced PA config for reduced-RRI or explicitly
+    selected legacy-policy continuation; `advance-iter --execute` automatically
+    submits the postprocess → calibration → promotion chain for default-policy
+    full-PA continuation before it stages the next iteration
   - `converged` stops after writing decision/metrics/artifact metadata; postop
     submission is explicit via `svzt preop select` and `svzt run postop`
 - Iteration success evidence for preop BC tuning:
@@ -374,4 +770,6 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
     - remote: `<runs_root>/<run_id>/iterations/iter-XX/results/simplified_zerod_tuned_RRI.json`
     - local destination: `runs/<run_id>/iterations/iter-XX/results/`
   - then executes `advance_tune_iteration(..., execute=True)` to submit the next iteration when applicable.
+    Default-policy full-PA runs first complete the dependent postprocess and
+    calibration jobs, then fetch and promote their publication.
   - halts with `final_action=needs_review_pause` when an iteration enters review-required state.

@@ -11,6 +11,7 @@ import yaml
 from svztagent.config.models import (
     AdaptationDefaults,
     AdaptationModelConfig,
+    CalibrationPolicyConfig,
     ClusterConfig,
     ImpedanceTuningConfig,
     Iteration1SeedConfig,
@@ -203,6 +204,12 @@ def _resolve_patient_assets(
         else None,
         iteration1_seed_source=iteration1_seed.source,
         iteration1_seed_path=resolved_seed,
+        iteration1_seed_learned_zerod_executable=(
+            iteration1_seed.learned_zerod_executable
+        ),
+        iteration1_seed_svzerodsolver_executable=(
+            iteration1_seed.svzerodsolver_executable
+        ),
     )
 
 
@@ -215,7 +222,12 @@ def _resolve_iteration1_seed_config(
         if patient.tuning is not None and patient.tuning.iteration1_seed is not None
         else None
     )
-    return patient_override or config.defaults.tuning.iteration1_seed
+    if patient_override is None:
+        return config.defaults.tuning.iteration1_seed
+
+    merged = config.defaults.tuning.iteration1_seed.model_dump(mode="json")
+    merged.update(patient_override.model_dump(mode="json", exclude_unset=True))
+    return Iteration1SeedConfig.model_validate(merged)
 
 
 def _resolve_patient_threed_config(
@@ -258,8 +270,83 @@ def _resolve_patient_impedance_config(
         # tune_space is full replacement at patient level (no patch-merge semantics).
         if "tune_space" in override_payload:
             merged["tune_space"] = override_payload.pop("tune_space")
+        # objective_tree_policy is also full replacement.  Dump it without
+        # exclude_none so an explicit diameter_std_cap: null survives.
+        override_payload.pop("objective_tree_policy", None)
+        if override.objective_tree_policy is not None:
+            merged["objective_tree_policy"] = override.objective_tree_policy.model_dump(
+                mode="json"
+            )
+        # stopping patches field-by-field; exclude_unset keeps explicit nulls
+        # (e.g. target_tolerance: null disables the target stop).
+        override_payload.pop("stopping", None)
+        if override.stopping is not None:
+            merged["stopping"] = {
+                **merged["stopping"],
+                **override.stopping.model_dump(mode="json", exclude_unset=True),
+            }
+        # objective and polish also patch field-by-field, so a patient
+        # objective: {target_sigma: 2.0} keeps the workspace type: likelihood.
+        for key in ("objective", "polish"):
+            override_payload.pop(key, None)
+            block = getattr(override, key)
+            if block is not None:
+                merged[key] = {
+                    **(merged.get(key) or {}),
+                    **block.model_dump(mode="json", exclude_unset=True),
+                }
+        # An explicit null in the patient override clears the workspace value
+        # (exclude_none above would drop the null), e.g. proximal_compliance:
+        # null, or the full-PA-only keys for a patient-level tuning_model: rri.
+        for key in (
+            "objective",
+            "proximal_compliance",
+            "polish",
+            "tree_max_nodes",
+            "leaf_resistance",
+            "objective_tree_policy",
+            "outlet_mapping_mode",
+            "outlet_mapping",
+            "outlet_mapping_centerline",
+        ):
+            if key in override.model_fields_set and getattr(override, key) is None:
+                override_payload.pop(key, None)
+                merged[key] = None
         merged.update(override_payload)
     return ImpedanceTuningConfig.model_validate(merged)
+
+
+def _resolve_outlet_mapping_centerline(
+    impedance: ImpedanceTuningConfig,
+    *,
+    patient_root: str,
+    patient_centerline: str,
+) -> ImpedanceTuningConfig:
+    """Resolve the full-PA geometric cap-to-outlet mapping centerline.
+
+    Relative paths resolve against the patient root.  When omitted for a
+    full-PA ``auto``/``centerline`` mode, the patient centerline is used.
+    svZeroDTrees rejects a centerline that the seed was not generated from.
+    """
+    if impedance.tuning_model != "full_pa":
+        return impedance
+    if impedance.outlet_mapping_mode not in {"auto", "centerline"}:
+        return impedance
+    configured = impedance.outlet_mapping_centerline
+    if configured is None:
+        resolved = patient_centerline
+    else:
+        candidate = PurePosixPath(configured)
+        resolved = (
+            str(candidate)
+            if candidate.is_absolute()
+            else str(PurePosixPath(patient_root) / candidate)
+        )
+    if resolved == configured:
+        return impedance
+    payload = impedance.model_dump(mode="json")
+    payload["outlet_mapping_centerline"] = resolved
+    return ImpedanceTuningConfig.model_validate(payload)
 
 
 def _resolve_patient_rcr_config(
@@ -311,6 +398,21 @@ def _resolve_patient_adaptation_config(
             merged["models"] = merged_models
         merged.update(override_payload)
     return AdaptationDefaults.model_validate(merged)
+
+
+def _resolve_patient_calibration_policy(
+    config: WorkspaceConfig,
+    patient: PatientConfig,
+) -> CalibrationPolicyConfig:
+    merged = config.defaults.tuning.calibration.model_dump(mode="json")
+    override = (
+        patient.tuning.calibration
+        if patient.tuning is not None and patient.tuning.calibration is not None
+        else None
+    )
+    if override is not None:
+        merged.update(override.model_dump(mode="json", exclude_none=True))
+    return CalibrationPolicyConfig.model_validate(merged)
 
 
 def _resolve_patient_mesh_scale_factor(
@@ -400,15 +502,29 @@ def resolve_patient_alias(
     if not patient_assets.iteration1_seed_path.startswith("/"):
         raise ConfigError("resolved iteration-1 seed path must be absolute")
 
+    bc_type = _resolve_patient_bc_type(config, patient)
+    impedance = _resolve_outlet_mapping_centerline(
+        _resolve_patient_impedance_config(config, patient),
+        patient_root=patient.permanent_remote_path,
+        patient_centerline=patient_assets.centerlines,
+    )
+    if patient_assets.iteration1_seed_source == "learned_zerod":
+        if bc_type != "impedance" or impedance.tuning_model != "full_pa":
+            raise ConfigError(
+                "iteration1_seed.source='learned_zerod' requires "
+                "bc_type='impedance' and impedance.tuning_model='full_pa'"
+            )
+
     return ResolvedPatient(
         cluster_name=cluster.name,
         alias=patient.alias,
         permanent_remote_path=patient.permanent_remote_path,
         patient_assets=patient_assets,
-        bc_type=_resolve_patient_bc_type(config, patient),
+        bc_type=bc_type,
         threed=_resolve_patient_threed_config(config, patient),
-        impedance=_resolve_patient_impedance_config(config, patient),
+        impedance=impedance,
         rcr=_resolve_patient_rcr_config(config, patient),
+        calibration=_resolve_patient_calibration_policy(config, patient),
         adaptation=_resolve_patient_adaptation_config(config, patient),
         mesh_scale_factor=_resolve_patient_mesh_scale_factor(config, patient),
         data_policy=patient.data_policy,

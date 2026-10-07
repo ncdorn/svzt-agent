@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import os
 from pathlib import Path
 import shutil
+import tempfile
 
 from pydantic import BaseModel, Field
 import yaml
@@ -70,6 +72,10 @@ class IterationRecord(BaseModel):
     deltas: dict[str, float] | None = None
     decision: str | None = None
     regenerated_config_path: str | None = None
+    # A promoted calibrated full-PA seed is kept separately from the tuning
+    # driver's regenerated reduced seed.  This preserves the original result
+    # and makes seed promotion append-only and auditable.
+    calibrated_seed_path: str | None = None
     postop_submission_requested: bool = False
     postop_job_id: str | None = None
     updated_at: str | None = None
@@ -117,7 +123,78 @@ class PostprocessRunRecord(BaseModel):
     submitted_at: str | None = None
     updated_at: str | None = None
     fetched_artifacts: list[str] = Field(default_factory=list)
+    terminal_state: str | None = None
+    descriptor_path: str | None = None
+    input_digests: dict[str, str] = Field(default_factory=dict)
+    output_digests: dict[str, str] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
+
+
+class CalibrationTransition(BaseModel):
+    """Append-only state transition for an agent calibration stage."""
+
+    at: str
+    from_state: str
+    to_state: str
+    reason: str | None = None
+    note: str | None = None
+
+
+class CalibrationRunRecord(BaseModel):
+    """Agent-owned provenance for one upstream calibration attempt.
+
+    The agent records paths, digests, scheduler identity, and lifecycle only;
+    validation of the scientific descriptor and calibration reports remains in
+    svZeroDTrees.
+    """
+
+    calibration_id: str | None = None
+    iteration: int
+    stage: str = "preop"
+    status: str = "planned"
+    local_dir: str
+    remote_dir: str
+    local_job_script_path: str | None = None
+    remote_job_script_path: str | None = None
+    local_config_path: str | None = None
+    remote_config_path: str | None = None
+    scheduler_job_id: str | None = None
+    postprocess_job_id: str | None = None
+    dependency_job_id: str | None = None
+    dependency_type: str = "afterok"
+    submitted_at: str | None = None
+    updated_at: str | None = None
+    terminal_state: str | None = None
+    input_artifacts: dict[str, str] = Field(default_factory=dict)
+    input_digests: dict[str, str] = Field(default_factory=dict)
+    output_artifacts: dict[str, str] = Field(default_factory=dict)
+    output_digests: dict[str, str] = Field(default_factory=dict)
+    lineage: dict[str, str] = Field(default_factory=dict)
+    validated_lineage: bool = False
+    promotion_status: str = "not_attempted"
+    promotion_reason: str | None = None
+    transitions: list[CalibrationTransition] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class PromotionRecord(BaseModel):
+    """Compare-and-set result for a calibrated next-iteration seed."""
+
+    iteration: int
+    status: str = "rejected"
+    decision: str = "not_promoted"
+    source_calibration_id: str | None = None
+    calibration_input_digest: str | None = None
+    tuned_model_digest: str | None = None
+    descriptor_digest: str | None = None
+    calibrated_model_digest: str | None = None
+    candidate_path: str | None = None
+    previous_seed_path: str | None = None
+    promoted_seed_path: str | None = None
+    reason: str | None = None
+    validated_lineage: bool = False
+    terminal_state: str | None = None
+    at: str
 
 
 class ParaViewVizRecord(BaseModel):
@@ -245,6 +322,14 @@ class RunManifest(BaseModel):
     postop_run: PostopRunRecord | None = None
     selected_preop_postprocess: PostprocessRunRecord | None = None
     postop_postprocess: PostprocessRunRecord | None = None
+    # Automatic preoperative calibration may run once per tuning iteration;
+    # retain every postprocess record instead of overwriting the selected
+    # preop handoff record used by the explicit postop workflow.
+    preop_postprocess_runs: list[PostprocessRunRecord] = Field(default_factory=list)
+    calibration_runs: list[CalibrationRunRecord] = Field(default_factory=list)
+    promotion_records: list[PromotionRecord] = Field(default_factory=list)
+    calibration_promotion: PromotionRecord | None = None
+    last_known_good_promotion: PromotionRecord | None = None
     adaptation_runs: list[AdaptationRunRecord] = Field(default_factory=list)
     paraview_viz_runs: list[ParaViewVizRecord] = Field(default_factory=list)
 
@@ -652,6 +737,10 @@ def record_postprocess_submission(
     local_job_script_path: str | None = None,
     remote_job_script_path: str | None = None,
     scheduler_job_id: str | None = None,
+    terminal_state: str | None = None,
+    descriptor_path: str | None = None,
+    input_digests: dict[str, str] | None = None,
+    output_digests: dict[str, str] | None = None,
     note: str | None = None,
     at: str | None = None,
 ) -> RunManifest:
@@ -669,14 +758,261 @@ def record_postprocess_submission(
         scheduler_job_id=scheduler_job_id,
         submitted_at=timestamp if scheduler_job_id else None,
         updated_at=timestamp,
+        terminal_state=terminal_state,
+        descriptor_path=descriptor_path,
+        input_digests=input_digests or {},
+        output_digests=output_digests or {},
         notes=notes,
     )
     if field_name == "selected_preop_postprocess":
         updated.selected_preop_postprocess = record
+    elif field_name == "preop_postprocess":
+        updated.preop_postprocess_runs.append(record)
     elif field_name == "postop_postprocess":
         updated.postop_postprocess = record
     else:
         raise ConfigError(f"unknown postprocess manifest field: {field_name}")
+    updated.updated_at = timestamp
+    return updated
+
+
+def _calibration_record_for_iteration(
+    manifest: RunManifest,
+    iteration: int,
+) -> CalibrationRunRecord | None:
+    for record in reversed(manifest.calibration_runs):
+        if int(record.iteration) == int(iteration):
+            return record
+    return None
+
+
+def _append_calibration_transition(
+    record: CalibrationRunRecord,
+    *,
+    to_state: str,
+    timestamp: str,
+    reason: str | None = None,
+    note: str | None = None,
+) -> None:
+    from_state = str(record.status or "planned")
+    if from_state == to_state:
+        return
+    record.transitions.append(
+        CalibrationTransition(
+            at=timestamp,
+            from_state=from_state,
+            to_state=to_state,
+            reason=reason,
+            note=note,
+        )
+    )
+    record.status = to_state
+
+
+def record_calibration_submission(
+    manifest: RunManifest,
+    *,
+    iteration: int,
+    local_dir: str,
+    remote_dir: str,
+    local_job_script_path: str,
+    remote_job_script_path: str,
+    local_config_path: str | None,
+    remote_config_path: str | None,
+    scheduler_job_id: str,
+    postprocess_job_id: str,
+    input_artifacts: dict[str, str],
+    input_digests: dict[str, str],
+    lineage: dict[str, str] | None = None,
+    calibration_id: str | None = None,
+    note: str | None = None,
+    at: str | None = None,
+) -> RunManifest:
+    """Persist a submitted calibration stage and all of its input identity.
+
+    A fresh record is created for a changed input digest.  A matching active
+    record is updated in place, which makes retry/resume idempotent while
+    keeping prior changed attempts in the append-only manifest history.
+    """
+
+    timestamp = at or _utc_now_iso()
+    updated = manifest.model_copy(deep=True)
+    existing = _calibration_record_for_iteration(updated, iteration)
+    if existing is not None and existing.input_digests != input_digests:
+        _append_calibration_transition(
+            existing,
+            to_state="invalidated",
+            timestamp=timestamp,
+            reason="calibration input digest changed",
+        )
+        existing = None
+
+    if existing is None:
+        existing = CalibrationRunRecord(
+            calibration_id=calibration_id,
+            iteration=iteration,
+            stage="preop",
+            status="planned",
+            local_dir=local_dir,
+            remote_dir=remote_dir,
+            local_job_script_path=local_job_script_path,
+            remote_job_script_path=remote_job_script_path,
+            local_config_path=local_config_path,
+            remote_config_path=remote_config_path,
+            input_artifacts=dict(input_artifacts),
+            input_digests=dict(input_digests),
+            lineage=dict(lineage or {}),
+            postprocess_job_id=postprocess_job_id,
+            dependency_job_id=postprocess_job_id,
+            notes=[note] if note else [],
+        )
+        updated.calibration_runs.append(existing)
+    else:
+        existing.local_dir = local_dir
+        existing.remote_dir = remote_dir
+        existing.local_job_script_path = local_job_script_path
+        existing.remote_job_script_path = remote_job_script_path
+        existing.local_config_path = local_config_path
+        existing.remote_config_path = remote_config_path
+        existing.scheduler_job_id = scheduler_job_id
+        existing.postprocess_job_id = postprocess_job_id
+        existing.dependency_job_id = postprocess_job_id
+        existing.input_artifacts = dict(input_artifacts)
+        existing.input_digests = dict(input_digests)
+        existing.lineage = dict(lineage or existing.lineage)
+        if note:
+            existing.notes.append(note)
+
+    existing.scheduler_job_id = scheduler_job_id
+    existing.submitted_at = timestamp
+    existing.updated_at = timestamp
+    _append_calibration_transition(
+        existing,
+        to_state="submitted",
+        timestamp=timestamp,
+        note=note,
+    )
+    updated.updated_at = timestamp
+    return updated
+
+
+def record_calibration_state(
+    manifest: RunManifest,
+    *,
+    iteration: int,
+    status: str,
+    terminal_state: str | None = None,
+    reason: str | None = None,
+    note: str | None = None,
+    at: str | None = None,
+) -> RunManifest:
+    """Append a calibration lifecycle transition without scientific parsing."""
+
+    timestamp = at or _utc_now_iso()
+    updated = manifest.model_copy(deep=True)
+    record = _calibration_record_for_iteration(updated, iteration)
+    if record is None:
+        raise ConfigError(
+            f"run '{updated.run_id}' missing calibration record for iter-{iteration:02d}"
+        )
+    _append_calibration_transition(
+        record,
+        to_state=str(status),
+        timestamp=timestamp,
+        reason=reason,
+        note=note,
+    )
+    if terminal_state is not None:
+        record.terminal_state = str(terminal_state)
+    record.updated_at = timestamp
+    updated.updated_at = timestamp
+    return updated
+
+
+def record_calibration_result(
+    manifest: RunManifest,
+    *,
+    iteration: int,
+    status: str,
+    terminal_state: str | None = None,
+    output_artifacts: dict[str, str] | None = None,
+    output_digests: dict[str, str] | None = None,
+    validated_lineage: bool = False,
+    reason: str | None = None,
+    at: str | None = None,
+) -> RunManifest:
+    timestamp = at or _utc_now_iso()
+    updated = manifest.model_copy(deep=True)
+    record = _calibration_record_for_iteration(updated, iteration)
+    if record is None:
+        raise ConfigError(
+            f"run '{updated.run_id}' missing calibration record for iter-{iteration:02d}"
+        )
+    _append_calibration_transition(
+        record,
+        to_state=str(status),
+        timestamp=timestamp,
+        reason=reason,
+    )
+    record.terminal_state = terminal_state
+    record.output_artifacts = dict(output_artifacts or {})
+    record.output_digests = dict(output_digests or {})
+    record.validated_lineage = bool(validated_lineage)
+    record.promotion_reason = reason
+    record.updated_at = timestamp
+    updated.updated_at = timestamp
+    return updated
+
+
+def record_promotion_decision(
+    manifest: RunManifest,
+    *,
+    iteration: int,
+    status: str,
+    decision: str,
+    calibration_input_digest: str | None = None,
+    source_calibration_id: str | None = None,
+    tuned_model_digest: str | None = None,
+    descriptor_digest: str | None = None,
+    calibrated_model_digest: str | None = None,
+    candidate_path: str | None = None,
+    previous_seed_path: str | None = None,
+    promoted_seed_path: str | None = None,
+    reason: str | None = None,
+    validated_lineage: bool = False,
+    terminal_state: str | None = None,
+    at: str | None = None,
+) -> RunManifest:
+    timestamp = at or _utc_now_iso()
+    updated = manifest.model_copy(deep=True)
+    record = PromotionRecord(
+        iteration=iteration,
+        status=status,
+        decision=decision,
+        source_calibration_id=source_calibration_id,
+        calibration_input_digest=calibration_input_digest,
+        tuned_model_digest=tuned_model_digest,
+        descriptor_digest=descriptor_digest,
+        calibrated_model_digest=calibrated_model_digest,
+        candidate_path=candidate_path,
+        previous_seed_path=previous_seed_path,
+        promoted_seed_path=promoted_seed_path,
+        reason=reason,
+        validated_lineage=validated_lineage,
+        terminal_state=terminal_state,
+        at=timestamp,
+    )
+    updated.promotion_records.append(record)
+    # Keep the current successful promotion as the last-known-good seed.  A
+    # rejected candidate is still recorded in history but must not replace it.
+    if status == "promoted" or decision == "promoted":
+        updated.calibration_promotion = record
+        updated.last_known_good_promotion = record
+    calibration = _calibration_record_for_iteration(updated, iteration)
+    if calibration is not None:
+        calibration.promotion_status = status
+        calibration.promotion_reason = reason
+        calibration.updated_at = timestamp
     updated.updated_at = timestamp
     return updated
 
@@ -985,10 +1321,33 @@ def record_poll_observation(
     )
 
 
-def write_progress_tracker(tracker: ProgressTracker, path: Path) -> None:
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace a manifest-side artifact atomically within its parent directory."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(tracker.model_dump(mode="json"), f, sort_keys=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def write_progress_tracker(tracker: ProgressTracker, path: Path) -> None:
+    payload = yaml.safe_dump(tracker.model_dump(mode="json"), sort_keys=True)
+    _atomic_write_text(path, payload)
 
 
 def create_manifest(
@@ -1049,6 +1408,7 @@ def create_manifest(
             "threed_defaults": patient.threed.model_dump(mode="json"),
             "impedance_defaults": patient.impedance.model_dump(mode="json"),
             "rcr_defaults": patient.rcr.model_dump(mode="json"),
+            "calibration_defaults": patient.calibration.model_dump(mode="json"),
             "adaptation_defaults": patient.adaptation.model_dump(mode="json"),
             "scheduler_defaults": config.defaults.scheduler.model_dump(mode="json"),
             "monitoring_defaults": config.defaults.monitoring.model_dump(mode="json"),
@@ -1169,9 +1529,8 @@ def record_fetch(
 
 
 def write_manifest(manifest: RunManifest, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(manifest.model_dump(mode="json"), f, sort_keys=True)
+    payload = yaml.safe_dump(manifest.model_dump(mode="json"), sort_keys=True)
+    _atomic_write_text(path, payload)
 
     if manifest.progress_tracker is not None:
         write_progress_tracker(manifest.progress_tracker, Path(manifest.local_paths.progress_tracker))
@@ -1209,6 +1568,12 @@ def read_manifest(path: Path) -> RunManifest:
         }
     if not manifest.tuning_iteration_tracker.iterations:
         manifest.tuning_iteration_tracker = _default_tuning_iteration_tracker()
+    # New calibration fields are optional on disk so manifests created before
+    # TASK-016 load unchanged.  Normalize the successful pointer for records
+    # written by early TASK-016 versions that predate the explicit alias.
+    if manifest.last_known_good_promotion is None and manifest.calibration_promotion is not None:
+        if manifest.calibration_promotion.status == "promoted":
+            manifest.last_known_good_promotion = manifest.calibration_promotion
     return manifest
 
 

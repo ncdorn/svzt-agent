@@ -34,6 +34,7 @@ from svztagent.core.plan import (
     write_plan_yaml,
 )
 from svztagent.core.plan_validate import assert_valid_execution_plan
+from svztagent.core.seed_policy import manifest_effective_tuning_model
 from svztagent.hpc.interfaces import (
     ExecutionMode,
     FileTransferAdapter,
@@ -127,6 +128,32 @@ def _adaptation_remote_layout(
     }
 
 
+# Adaptation starts from these artifacts of the selected preop iteration
+# (svZeroDTrees writes them next to optimized_params.csv).
+TUNED_CONFIG_FILENAME = "svzerod_3d_coupling_tuned.json"
+OUTLET_CAP_MAPPING_FILENAME = "outlet_cap_mapping.json"
+# These models adapt one LPA and one RPA tree inside a reduced-order PA model.
+REDUCED_PA_ADAPTATION_MODELS = frozenset({"M1", "M3"})
+
+
+def _selected_tuning_artifacts(manifest) -> dict[str, str | bool]:
+    """Remote tuning artifacts of the selected preop iteration used by adaptation.
+
+    Full-PA tuning pairs caps to BCs geometrically and records the pairing in
+    ``outlet_cap_mapping.json``; adaptation must use that file.
+    """
+    selected = manifest.converged_preop_iteration
+    results_dir = PurePosixPath(selected.remote_preop_dir).parent / "results"
+    tuning_model = manifest_effective_tuning_model(manifest, selected.iteration)
+    return {
+        "tuning_model": tuning_model,
+        "optimized_params_csv": str(results_dir / "optimized_params.csv"),
+        "tuned_config": str(results_dir / TUNED_CONFIG_FILENAME),
+        "outlet_cap_mapping": str(results_dir / OUTLET_CAP_MAPPING_FILENAME),
+        "require_outlet_cap_mapping": tuning_model == "full_pa",
+    }
+
+
 def _fingerprint_inflow(path: str) -> tuple[str | None, dict[str, str | int | float | bool | None]]:
     candidate = Path(path)
     metadata: dict[str, str | int | float | bool | None] = {
@@ -203,6 +230,13 @@ def _build_adapt_plan(
         raise ConfigError("converged_preop_iteration is required for adaptation workflow")
     if postop_run is None or not postop_run.remote_dir:
         raise ConfigError("completed postop_run is required for adaptation workflow")
+    tuning_artifacts = _selected_tuning_artifacts(manifest)
+    # The job uses the outlet mapping whenever it exists; full-PA requires it.
+    tuning_reads = [
+        tuning_artifacts["optimized_params_csv"],
+        tuning_artifacts["tuned_config"],
+        tuning_artifacts["outlet_cap_mapping"],
+    ]
 
     steps = [
         PlanStep(
@@ -213,6 +247,7 @@ def _build_adapt_plan(
             outputs={
                 "source_preop_iteration": str(selected.iteration),
                 "source_postop_dir": postop_run.remote_dir,
+                "tuned_config": str(tuning_artifacts["tuned_config"]),
             },
             remote_paths={
                 "read": [
@@ -220,6 +255,7 @@ def _build_adapt_plan(
                     selected.remote_tuned_zerod_config,
                     selected.remote_canonical_coupler,
                     postop_run.remote_dir,
+                    *tuning_reads,
                 ],
                 "write": [],
             },
@@ -340,6 +376,10 @@ def _build_adapt_plan(
             "parameter_set": parameter_set,
             "inflow_source_path": inflow_source_path,
             "remote_adaptation_dir": remote_layout["remote_adaptation_dir"],
+            "source_tuning_model": tuning_artifacts["tuning_model"],
+            "tuned_config": tuning_artifacts["tuned_config"],
+            "outlet_cap_mapping": tuning_artifacts["outlet_cap_mapping"],
+            "outlet_cap_mapping_required": tuning_artifacts["require_outlet_cap_mapping"],
         },
     )
     validation = assert_valid_execution_plan(
@@ -380,6 +420,7 @@ def _render_adapt_job_script(
     if not postop_mesh:
         raise ConfigError("postop mesh-complete path is required for adaptation")
     clinical_targets = svzerodtrees_paths.get("clinical_targets")
+    tuning_artifacts = _selected_tuning_artifacts(manifest)
     centerline = svzerodtrees_paths.get("centerlines")
     if not clinical_targets:
         raise ConfigError("clinical target path is required for adaptation")
@@ -484,6 +525,9 @@ svslicer_path = Path({json.dumps(str(svslicer_path))})
 postop_mesh_complete = Path({json.dumps(str(postop_mesh))})
 reduced_order_pa = Path({json.dumps(selected.remote_tuned_zerod_config)})
 tree_params_csv = preop_dir.parent / "results" / "optimized_params.csv"
+tuned_config_path = Path({json.dumps(str(tuning_artifacts["tuned_config"]))})
+outlet_cap_mapping_path = Path({json.dumps(str(tuning_artifacts["outlet_cap_mapping"]))})
+require_outlet_cap_mapping = {repr(bool(tuning_artifacts["require_outlet_cap_mapping"]))}
 parameter_payload = json.loads({json.dumps(json.dumps(parameter_payload, sort_keys=True))})
 model = {json.dumps(model)}
 parameter_set = {json.dumps(parameter_set)}
@@ -525,6 +569,14 @@ if not postop_simulation_dir.exists():
     raise RuntimeError(f"adaptation requires completed postop simulation directory: {{postop_simulation_dir}}")
 if not tree_params_csv.exists():
     raise RuntimeError(f"adaptation requires optimized_params.csv from selected preop iteration: {{tree_params_csv}}")
+if not tuned_config_path.exists():
+    raise RuntimeError(f"adaptation requires the tuned config of the selected preop iteration: {{tuned_config_path}}")
+if require_outlet_cap_mapping and not outlet_cap_mapping_path.exists():
+    raise RuntimeError(
+        "adaptation of a full-PA tuned iteration requires its outlet cap mapping "
+        f"(caps are never paired to BCs by position): {{outlet_cap_mapping_path}}"
+    )
+outlet_cap_mapping = str(outlet_cap_mapping_path) if outlet_cap_mapping_path.exists() else None
 
 
 def _safe_remove(path: Path) -> None:
@@ -902,6 +954,8 @@ try:
         model=model,
         territory_scheme=territory_scheme,
         target_stage=target_stage,
+        tuned_config=str(tuned_config_path),
+        outlet_cap_mapping=outlet_cap_mapping,
     )
     adaptation_result = run_structured_tree_adaptation(
         preop_dir=str(preop_dir),
@@ -916,6 +970,8 @@ try:
         mode=adaptation_mode,
         convert_to_cm=False,
         output_root=str(remote_results_dir),
+        tuned_config=str(tuned_config_path),
+        outlet_cap_mapping=outlet_cap_mapping,
     )
     _record_event(
         "adaptation_completed",
@@ -1059,38 +1115,28 @@ try:
 
     _record_event("baseline_postprocess_started", "info")
     baseline_output_dir = Path({json.dumps(str(baseline_postprocess_dir))})
-    baseline_original_rmtree = _preserve_intermediate_centerlines(
-        baseline_output_dir / "resistance_map" / "intermediate_centerlines"
+    baseline_postprocess_kwargs = {{
+        "simulation_dir": str(postop_simulation_dir),
+        "centerline": str(centerline),
+        "svslicer_path": str(svslicer_path),
+        "output_dir": str(baseline_output_dir),
+        "clinical_targets": str(clinical_targets_csv),
+        "stage": target_stage,
+        "inflow_csv": str(inflow_source_path),
+        "resistance_map_workers": {postprocess_workers},
+    }}
+    if {camera_offset_expr} is not None:
+        baseline_postprocess_kwargs["camera_offset_dir"] = {camera_offset_expr}
+    if {camera_view_up_expr} is not None:
+        baseline_postprocess_kwargs["camera_view_up"] = {camera_view_up_expr}
+    baseline_meta = _run_postprocess_suite_with_optional_camera(
+        run_pulmonary_threed_postprocess_suite,
+        baseline_postprocess_kwargs,
     )
-    try:
-        baseline_postprocess_kwargs = {{
-            "simulation_dir": str(postop_simulation_dir),
-            "centerline": str(centerline),
-            "svslicer_path": str(svslicer_path),
-            "output_dir": str(baseline_output_dir),
-            "clinical_targets": str(clinical_targets_csv),
-            "stage": target_stage,
-            "inflow_csv": str(inflow_source_path),
-            "resistance_map_workers": {postprocess_workers},
-        }}
-        if {camera_offset_expr} is not None:
-            baseline_postprocess_kwargs["camera_offset_dir"] = {camera_offset_expr}
-        if {camera_view_up_expr} is not None:
-            baseline_postprocess_kwargs["camera_view_up"] = {camera_view_up_expr}
-        baseline_meta = _run_postprocess_suite_with_optional_camera(
-            run_pulmonary_threed_postprocess_suite,
-            baseline_postprocess_kwargs,
-        )
-        _write_stacked_centerline_timeseries(
-            output_dir=baseline_output_dir,
-            suite_metadata_path=baseline_output_dir / "postprocess_suite_metadata.json",
-            result=baseline_meta,
-        )
-    finally:
-        _cleanup_intermediate_centerlines(
-            baseline_output_dir / "resistance_map" / "intermediate_centerlines",
-            baseline_original_rmtree,
-        )
+    baseline_meta = _consume_upstream_suite_descriptor(
+        suite_metadata_path=baseline_output_dir / "postprocess_suite_metadata.json",
+        result=baseline_meta,
+    )
     _record_event(
         "baseline_postprocess_completed",
         "info",
@@ -1098,38 +1144,28 @@ try:
     )
     _record_event("adapted_postprocess_started", "info")
     adapted_output_dir = Path({json.dumps(str(adapted_postprocess_dir))})
-    adapted_original_rmtree = _preserve_intermediate_centerlines(
-        adapted_output_dir / "resistance_map" / "intermediate_centerlines"
+    adapted_postprocess_kwargs = {{
+        "simulation_dir": str(simulation_dir),
+        "centerline": str(centerline),
+        "svslicer_path": str(svslicer_path),
+        "output_dir": str(adapted_output_dir),
+        "clinical_targets": str(clinical_targets_csv),
+        "stage": target_stage,
+        "inflow_csv": str(inflow_source_path),
+        "resistance_map_workers": {postprocess_workers},
+    }}
+    if {camera_offset_expr} is not None:
+        adapted_postprocess_kwargs["camera_offset_dir"] = {camera_offset_expr}
+    if {camera_view_up_expr} is not None:
+        adapted_postprocess_kwargs["camera_view_up"] = {camera_view_up_expr}
+    adapted_meta = _run_postprocess_suite_with_optional_camera(
+        run_pulmonary_threed_postprocess_suite,
+        adapted_postprocess_kwargs,
     )
-    try:
-        adapted_postprocess_kwargs = {{
-            "simulation_dir": str(simulation_dir),
-            "centerline": str(centerline),
-            "svslicer_path": str(svslicer_path),
-            "output_dir": str(adapted_output_dir),
-            "clinical_targets": str(clinical_targets_csv),
-            "stage": target_stage,
-            "inflow_csv": str(inflow_source_path),
-            "resistance_map_workers": {postprocess_workers},
-        }}
-        if {camera_offset_expr} is not None:
-            adapted_postprocess_kwargs["camera_offset_dir"] = {camera_offset_expr}
-        if {camera_view_up_expr} is not None:
-            adapted_postprocess_kwargs["camera_view_up"] = {camera_view_up_expr}
-        adapted_meta = _run_postprocess_suite_with_optional_camera(
-            run_pulmonary_threed_postprocess_suite,
-            adapted_postprocess_kwargs,
-        )
-        _write_stacked_centerline_timeseries(
-            output_dir=adapted_output_dir,
-            suite_metadata_path=adapted_output_dir / "postprocess_suite_metadata.json",
-            result=adapted_meta,
-        )
-    finally:
-        _cleanup_intermediate_centerlines(
-            adapted_output_dir / "resistance_map" / "intermediate_centerlines",
-            adapted_original_rmtree,
-        )
+    adapted_meta = _consume_upstream_suite_descriptor(
+        suite_metadata_path=adapted_output_dir / "postprocess_suite_metadata.json",
+        result=adapted_meta,
+    )
     _record_event(
         "adapted_postprocess_completed",
         "info",
@@ -1235,6 +1271,14 @@ def run_adapt(
         )
     if adaptation_mode not in {"predict", "retrospective_fit"}:
         raise ConfigError("adaptation_mode must be one of predict|retrospective_fit")
+    selected_tuning_model = manifest_effective_tuning_model(manifest, selected.iteration)
+    if model.upper() in REDUCED_PA_ADAPTATION_MODELS and selected_tuning_model == "full_pa":
+        raise ConfigError(
+            f"adaptation model {model.upper()} adapts one LPA and one RPA tree inside a "
+            f"reduced-order PA model, but {iteration_dir_name(selected.iteration)} was tuned "
+            "with the full-PA per-cap model; use M2 (it adapts every tuned per-cap tree). "
+            "See docs/TUNING_MODEL.md section 8."
+        )
 
     inflow_source_path = str(
         (manifest.remote.get("svzerodtrees_paths") or {}).get("inflow") or ""

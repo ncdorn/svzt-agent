@@ -267,14 +267,8 @@ def test_preop_select_submits_selected_preop_postprocess(sample_config_files):
     assert 'if [0.0, 0.0, 1.0] is not None:' in script_text
     assert 'postprocess_kwargs["camera_view_up"] = [0.0, 0.0, 1.0]' in script_text
     assert "_run_postprocess_suite_with_optional_camera(" in script_text
-    assert "_repair_failed_suite_result_if_outputs_exist(" in script_text
-    assert "_write_stacked_centerline_timeseries(" in script_text
-    assert "centerline_timeseries_last_cycle.vtp" in script_text
-    assert "centerline_timeseries_last_cycle_metadata.json" in script_text
-    assert "_preserve_intermediate_centerlines" in script_text
-    assert "_cleanup_intermediate_centerlines" in script_text
-    assert "_validate_mpa_pressure_csv_inputs(" in script_text
-    assert "pressure_step_diagnostics" in script_text
+    assert "_consume_upstream_suite_descriptor(" in script_text
+    assert "validate_centerline_timeseries_descriptor(suite_metadata_path)" in script_text
 
 
 def test_preop_select_skips_duplicate_paraview_submission(sample_config_files):
@@ -571,10 +565,8 @@ def test_run_postop_dry_run_writes_plan_without_manifest_submission(sample_confi
     assert "srun -N {nodes} -n {total_tasks}" in script_text
     assert "paraview_viz_submission.json" in script_text
     assert "paraview_viz_job_id" in script_text
-    assert "_write_stacked_centerline_timeseries(" in script_text
-    assert "centerline_timeseries_last_cycle_vtp" in script_text
-    assert "_validate_mpa_pressure_csv_inputs(" in script_text
-    assert "pressure_step_diagnostics" in script_text
+    assert "_consume_upstream_suite_descriptor(" in script_text
+    assert "validate_centerline_timeseries_descriptor(suite_metadata_path)" in script_text
 
     manifest = read_manifest(paths.manifest)
     assert manifest.postop_run is None
@@ -645,10 +637,8 @@ def test_run_postop_execute_first_generates_plan_and_records_job(sample_config_f
     assert 'threed_config["prestress_file_path"] = str(_generate_postop_prestress_file())' in script_text
     assert "paraview_viz_submission.json" in script_text
     assert "ParaView visualization job submitted" in script_text
-    assert "_write_stacked_centerline_timeseries(" in script_text
-    assert "centerline_timeseries_last_cycle_metadata.json" in script_text
-    assert "_validate_mpa_pressure_csv_inputs(" in script_text
-    assert "pressure_step_diagnostics" in script_text
+    assert "_consume_upstream_suite_descriptor(" in script_text
+    assert "validate_centerline_timeseries_descriptor(suite_metadata_path)" in script_text
 
 
 def test_run_postop_fails_fast_for_invalid_centerline_path(sample_config_files):

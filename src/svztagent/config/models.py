@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
-from typing import Literal
+import warnings
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 class SchedulerConfig(BaseModel):
@@ -275,8 +283,12 @@ class PostprocessDefaults(BaseModel):
 
 
 class Iteration1SeedConfig(BaseModel):
-    source: Literal["path", "generate"] = "path"
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["path", "generate", "learned_zerod"] = "path"
     path: str = "simplified_nonlinear_zerod.json"
+    learned_zerod_executable: str = "learned-zerod"
+    svzerodsolver_executable: str = "svzerodsolver"
 
     @field_validator("path")
     @classmethod
@@ -288,6 +300,56 @@ class Iteration1SeedConfig(BaseModel):
         if ".." in normalized.parts:
             raise ValueError("iteration-1 seed path cannot contain '..'")
         return str(normalized)
+
+    @field_validator("learned_zerod_executable", "svzerodsolver_executable")
+    @classmethod
+    def _validate_executable(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("seed-generation executable cannot be empty")
+        return cleaned
+
+
+class CalibrationPolicyConfig(BaseModel):
+    """Agent-owned enablement and next-seed policy for calibration.
+
+    Scientific calibration settings and artifact validation remain owned by
+    svZeroDTrees.  This small policy block only controls whether a future
+    agent workflow may run calibration and which explicitly selected seed
+    policy it may use.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Full-PA iterations require a calibrated full-PA successor by default.
+    # ``False`` remains an explicit opt-out for the legacy reduced-RRI policy.
+    enabled: bool = True
+    next_iteration_seed_policy: Literal[
+        "calibrated_full_pa", "legacy_rri_after_first"
+    ] = "calibrated_full_pa"
+
+    @property
+    def seed_policy(self) -> str:
+        """Compatibility accessor for callers using the shorter label."""
+
+        return self.next_iteration_seed_policy
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_seed_policy_alias(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        payload = dict(data)
+        short = payload.pop("seed_policy", None)
+        long = payload.get("next_iteration_seed_policy")
+        if short is not None and long is not None and str(short) != str(long):
+            raise ValueError(
+                "calibration.seed_policy and "
+                "calibration.next_iteration_seed_policy disagree"
+            )
+        if short is not None:
+            payload["next_iteration_seed_policy"] = short
+        return payload
 
 
 class TissueSupportConfig(BaseModel):
@@ -610,7 +672,188 @@ def _default_impedance_tune_space() -> TuneSpaceConfig:
     )
 
 
+class ObjectiveTreePolicyConfig(BaseModel):
+    """Full-PA tree policy used only inside the optimizer objective.
+
+    Forwarded unchanged to svZeroDTrees, which owns cross-field validation
+    (``resolve_objective_tree_policy``) and fills omitted fields from the final
+    policy.  Only explicitly set fields are serialized so that omission keeps
+    meaning "inherit"; an explicit ``diameter_std_cap: null`` means "no cap".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    use_mean: bool | None = None
+    diameter_scale: float | None = None
+    diameter_std_cap: float | None = None
+    reference_diameter: Literal["arithmetic_mean", "conductance_matched"] | None = None
+
+    @field_validator("diameter_scale", "diameter_std_cap")
+    @classmethod
+    def _nonnegative(cls, value: float | None) -> float | None:
+        if value is not None and value < 0.0:
+            raise ValueError("value must be >= 0")
+        return value
+
+    @model_serializer(mode="wrap")
+    def _serialize_set_fields(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        return {key: value for key, value in data.items() if key in self.model_fields_set}
+
+
+# Outlet (distal) pressure policies forwarded to svZeroDTrees
+# (``ClinicalTargets.from_csv``); see docs/TUNING_MODEL.md for the rationale.
+WedgePressurePolicy = Literal[
+    "clamp_to_diastolic", "measured", "precapillary_fraction", "diastolic_offset"
+]
+
+
+class TuningObjectiveConfig(BaseModel):
+    """Impedance tuning objective forwarded to svZeroDTrees.
+
+    ``relative`` is the historical weighted relative squared error;
+    ``likelihood`` is sum(((model - target) / sigma)^2) with one measurement
+    sigma for catheter pressures and one for the RPA flow split.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["relative", "likelihood"] = "relative"
+    pressure_sigma_mmhg: float = 2.0
+    split_sigma: float = 0.02
+    # Likelihood only: Nelder-Mead target stop and iteration gate use
+    # |model - target| <= target_sigma * sigma; null disables the target stop.
+    target_sigma: float | None = 1.0
+
+    @field_validator("pressure_sigma_mmhg", "split_sigma")
+    @classmethod
+    def _positive_sigma(cls, value: float) -> float:
+        if not value > 0.0:
+            raise ValueError("sigma must be > 0")
+        return value
+
+    @field_validator("target_sigma")
+    @classmethod
+    def _positive_target_sigma(cls, value: float | None) -> float | None:
+        if value is not None and not value > 0.0:
+            raise ValueError("target_sigma must be > 0 or null")
+        return value
+
+
+class ProximalComplianceConfig(BaseModel):
+    """Thin-wall compliance C = 3 A L / (2 Eh/r) on every full-PA seed vessel."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    wall_ehr: float
+
+    @field_validator("wall_ehr")
+    @classmethod
+    def _positive_ehr(cls, value: float) -> float:
+        if not value > 0.0:
+            raise ValueError("wall_ehr must be > 0")
+        return value
+
+
+class LeafResistanceConfig(BaseModel):
+    """Per-leaf capillary + venous resistance at every structured tree (full_pa only).
+
+    Each tree's leaves get one resistance to the outlet pressure that carries
+    ``downstream_fraction`` of the tree's DC resistance; the outlet pressure is
+    the measured PCWP (``wedge_pressure_policy: measured``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    downstream_fraction: float
+
+    @field_validator("downstream_fraction")
+    @classmethod
+    def _fraction_range(cls, value: float) -> float:
+        if not 0.0 < value < 1.0:
+            raise ValueError("leaf_resistance.downstream_fraction must be in (0, 1)")
+        return value
+
+
+class PolishConfig(BaseModel):
+    """Per-cap re-tune after a shared objective-tree fit (full_pa only)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    maxfev: int = 100
+    # Optional smaller simplex for a local search around the shared optimum.
+    initial_simplex_step: float | None = None
+
+    @field_validator("maxfev")
+    @classmethod
+    def _positive_maxfev(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("maxfev must be > 0")
+        return value
+
+    @field_validator("initial_simplex_step")
+    @classmethod
+    def _simplex_step(cls, value: float | None) -> float | None:
+        if value is not None and not 0.0 < value <= 0.5:
+            raise ValueError("initial_simplex_step must be in (0, 0.5]")
+        return value
+
+    @model_serializer(mode="wrap")
+    def _drop_unset_step(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if data.get("initial_simplex_step") is None:
+            data.pop("initial_simplex_step", None)
+        return data
+
+
+class NelderMeadStoppingConfig(BaseModel):
+    """Clinically scaled Nelder-Mead stopping policy for impedance tuning.
+
+    Forwarded to svZeroDTrees (``resolve_nelder_mead_stopping``), which owns
+    the semantics.  ``enabled: false`` restores the historical maxiter-only
+    runs.  ``target_tolerance`` is a relative error per objective metric;
+    ``xatol`` is in bounds-normalized [0, 1] parameter units.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    target_tolerance: float | None = 0.025
+    stall_window: int | None = None  # None -> 5 x number of free parameters
+    stall_rel_improvement: float | None = 0.01
+    xatol: float = 1e-3
+    fatol: float = 1e-3
+    maxfev: int = 200
+    initial_simplex_step: float = 0.1
+    restart_min_rel_improvement: float | None = 0.05
+
+    @field_validator(
+        "target_tolerance", "stall_rel_improvement", "restart_min_rel_improvement", "xatol", "fatol"
+    )
+    @classmethod
+    def _positive_or_none(cls, value: float | None) -> float | None:
+        if value is not None and value <= 0.0:
+            raise ValueError("value must be > 0")
+        return value
+
+    @field_validator("stall_window", "maxfev")
+    @classmethod
+    def _positive_count(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("value must be > 0")
+        return value
+
+    @field_validator("initial_simplex_step")
+    @classmethod
+    def _simplex_step_range(cls, value: float) -> float:
+        if not 0.0 < value <= 0.5:
+            raise ValueError("initial_simplex_step must be in (0, 0.5]")
+        return value
+
+
 class ImpedanceTuningConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     solver: str = "Nelder-Mead"
     nm_iter: int = 5
     n_procs: int = 24
@@ -623,8 +866,42 @@ class ImpedanceTuningConfig(BaseModel):
     compliance_model: Literal["constant", "olufsen"] = "olufsen"
     diameter_scale: float = 0.0
     diameter_std_cap: float | None = None
-    allow_ordered_outlet_mapping: bool = False
     tuning_model: Literal["rri", "full_pa"] = "rri"
+    # How svZeroDTrees derives the tree outlet pressure Pd:
+    # clamp_to_diastolic = min(wedge, diastolic MPA target) (upstream default);
+    # measured = the measured wedge pressure as-is;
+    # precapillary_fraction = wedge + precapillary_fraction * (mean - wedge)
+    #   (regurgitant patients); diastolic_offset = diastolic - diastolic_offset_mmhg
+    #   (non-regurgitant patients; needs no wedge).
+    wedge_pressure_policy: WedgePressurePolicy = "clamp_to_diastolic"
+    precapillary_fraction: float = 0.332
+    diastolic_offset_mmhg: float = 2.0
+    # Keep the diastolic term when its target is below Pd (regurgitation).
+    keep_diastolic_target: bool = False
+    # None keeps the historical relative objective.
+    objective: TuningObjectiveConfig | None = None
+    # full_pa only: seed-vessel thin-wall compliance; None keeps a rigid seed.
+    proximal_compliance: ProximalComplianceConfig | None = None
+    # Structured-tree node budget; None keeps the svZeroDTrees default (100k).
+    tree_max_nodes: int | None = None
+    # full_pa only, requires objective_tree_policy: per-cap polish budget.
+    polish: PolishConfig | None = None
+    # full_pa only, requires wedge_pressure_policy 'measured'.
+    leaf_resistance: LeafResistanceConfig | None = None
+    outlet_mapping_mode: Literal[
+        "auto", "metadata", "cap_name", "centerline", "serialized_cap_order", "explicit"
+    ] | None = None
+    outlet_mapping: dict[str, str] | None = None
+    # Centerline VTP the full-PA 0D seed was generated from.  Patient
+    # resolution defaults it to the patient centerline for auto/centerline.
+    outlet_mapping_centerline: str | None = None
+    # Deprecated input-only alias.  The final typed config never serializes it
+    # and canonical workflow code consumes only outlet_mapping_mode/outlet_mapping.
+    allow_ordered_outlet_mapping: bool | None = Field(default=None, exclude=True)
+    # Optional full_pa objective-only tree policy; None means the objective
+    # uses the final policy (use_mean/diameter_scale/diameter_std_cap).
+    objective_tree_policy: ObjectiveTreePolicyConfig | None = None
+    stopping: NelderMeadStoppingConfig = Field(default_factory=NelderMeadStoppingConfig)
     tune_space: TuneSpaceConfig = Field(default_factory=_default_impedance_tune_space)
 
     @field_validator("solver")
@@ -663,6 +940,130 @@ class ImpedanceTuningConfig(BaseModel):
             raise ValueError("diameter_std_cap must be >= 0")
         return value
 
+    @field_validator("precapillary_fraction")
+    @classmethod
+    def _fraction_range(cls, value: float) -> float:
+        if not 0.0 <= value < 1.0:
+            raise ValueError("precapillary_fraction must be in [0, 1)")
+        return value
+
+    @field_validator("diastolic_offset_mmhg")
+    @classmethod
+    def _nonnegative_offset(cls, value: float) -> float:
+        if value < 0.0:
+            raise ValueError("diastolic_offset_mmhg must be >= 0")
+        return value
+
+    @field_validator("tree_max_nodes")
+    @classmethod
+    def _positive_max_nodes(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("tree_max_nodes must be > 0")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_full_pa_only_controls(self) -> "ImpedanceTuningConfig":
+        if self.tuning_model != "full_pa":
+            if self.proximal_compliance is not None:
+                raise ValueError("proximal_compliance is supported only for tuning_model='full_pa'")
+            if self.polish is not None:
+                raise ValueError("polish is supported only for tuning_model='full_pa'")
+            if self.leaf_resistance is not None:
+                raise ValueError("leaf_resistance is supported only for tuning_model='full_pa'")
+        if self.leaf_resistance is not None and self.wedge_pressure_policy != "measured":
+            raise ValueError(
+                "leaf_resistance requires wedge_pressure_policy 'measured': the leaf resistance "
+                "carries the capillary and venous pressure drop down to the measured PCWP"
+            )
+        if self.polish is not None and self.objective_tree_policy is None:
+            raise ValueError(
+                "polish requires objective_tree_policy: without it the optimizer already "
+                "uses the final per-cap trees"
+            )
+        return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def _translate_legacy_outlet_mapping(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        payload = dict(data)
+        legacy_supplied = "allow_ordered_outlet_mapping" in payload and payload[
+            "allow_ordered_outlet_mapping"
+        ] is not None
+        canonical_supplied = (
+            "outlet_mapping_mode" in payload
+            and payload.get("outlet_mapping_mode") is not None
+        )
+        if legacy_supplied:
+            warnings.warn(
+                "allow_ordered_outlet_mapping is deprecated and maps to "
+                "outlet_mapping_mode='serialized_cap_order', which mispairs caps "
+                "and BCs on centerline-generated seeds; use outlet_mapping_mode "
+                "'auto' or 'centerline' instead",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            if canonical_supplied:
+                raise ValueError(
+                    "allow_ordered_outlet_mapping cannot be combined with "
+                    "outlet_mapping_mode"
+                )
+            if str(payload.get("tuning_model", "rri")).strip().lower() == "full_pa" and bool(
+                payload["allow_ordered_outlet_mapping"]
+            ):
+                payload["outlet_mapping_mode"] = "serialized_cap_order"
+        return payload
+
+    @model_validator(mode="after")
+    def _validate_outlet_mapping_contract(self) -> "ImpedanceTuningConfig":
+        mode = self.outlet_mapping_mode
+        if self.tuning_model == "full_pa" and mode is None:
+            mode = "auto"
+            object.__setattr__(self, "outlet_mapping_mode", mode)
+        if self.outlet_mapping is not None:
+            if mode != "explicit":
+                raise ValueError(
+                    "outlet_mapping requires outlet_mapping_mode='explicit'"
+                )
+            if not self.outlet_mapping:
+                raise ValueError("outlet_mapping must not be empty")
+            normalized: dict[str, str] = {}
+            for cap, bc_name in self.outlet_mapping.items():
+                cap_name = str(cap).strip()
+                outlet_name = str(bc_name).strip()
+                if not cap_name or not outlet_name:
+                    raise ValueError(
+                        "outlet_mapping keys and values must be non-empty"
+                    )
+                if cap_name in normalized:
+                    raise ValueError(f"outlet_mapping contains duplicate cap '{cap_name}'")
+                normalized[cap_name] = outlet_name
+            object.__setattr__(self, "outlet_mapping", normalized)
+        if self.outlet_mapping_centerline is not None:
+            centerline = self.outlet_mapping_centerline.strip()
+            if not centerline:
+                raise ValueError("outlet_mapping_centerline must not be empty")
+            if self.tuning_model == "full_pa" and mode not in {"auto", "centerline"}:
+                raise ValueError(
+                    "outlet_mapping_centerline is used only by "
+                    "outlet_mapping_mode 'auto' or 'centerline'"
+                )
+            object.__setattr__(self, "outlet_mapping_centerline", centerline)
+        if self.tuning_model == "rri" and (
+            mode is not None
+            or self.outlet_mapping is not None
+            or self.outlet_mapping_centerline is not None
+        ):
+            raise ValueError(
+                "outlet mapping controls are supported only for tuning_model='full_pa'"
+            )
+        if self.tuning_model == "rri" and self.objective_tree_policy is not None:
+            raise ValueError(
+                "objective_tree_policy is supported only for tuning_model='full_pa'"
+            )
+        return self
+
 
 class RCRTuningConfig(BaseModel):
     solver: Literal["Nelder-Mead"] = "Nelder-Mead"
@@ -686,6 +1087,8 @@ class PatientRCROverrides(BaseModel):
 
 
 class PatientImpedanceOverrides(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     solver: str | None = None
     nm_iter: int | None = None
     n_procs: int | None = None
@@ -698,8 +1101,32 @@ class PatientImpedanceOverrides(BaseModel):
     compliance_model: Literal["constant", "olufsen"] | None = None
     diameter_scale: float | None = None
     diameter_std_cap: float | None = None
-    allow_ordered_outlet_mapping: bool | None = None
     tuning_model: Literal["rri", "full_pa"] | None = None
+    wedge_pressure_policy: WedgePressurePolicy | None = None
+    precapillary_fraction: float | None = None
+    diastolic_offset_mmhg: float | None = None
+    keep_diastolic_target: bool | None = None
+    # objective and polish patch the workspace block field-by-field;
+    # proximal_compliance, leaf_resistance and tree_max_nodes replace it.  An explicit null
+    # clears any of them (and objective_tree_policy / outlet_mapping_*) for
+    # this patient; see _resolve_patient_impedance_config.
+    objective: TuningObjectiveConfig | None = None
+    proximal_compliance: ProximalComplianceConfig | None = None
+    tree_max_nodes: int | None = None
+    polish: PolishConfig | None = None
+    # full_pa only, requires wedge_pressure_policy 'measured'.
+    leaf_resistance: LeafResistanceConfig | None = None
+    outlet_mapping_mode: Literal[
+        "auto", "metadata", "cap_name", "centerline", "serialized_cap_order", "explicit"
+    ] | None = None
+    outlet_mapping: dict[str, str] | None = None
+    # Centerline VTP the full-PA 0D seed was generated from.  Patient
+    # resolution defaults it to the patient centerline for auto/centerline.
+    outlet_mapping_centerline: str | None = None
+    allow_ordered_outlet_mapping: bool | None = None
+    objective_tree_policy: ObjectiveTreePolicyConfig | None = None
+    # Field-level patch over the workspace stopping policy.
+    stopping: NelderMeadStoppingConfig | None = None
     tune_space: TuneSpaceConfig | None = None
 
 
@@ -709,6 +1136,7 @@ class TuningDefaults(BaseModel):
     threed: ThreedTuningConfig = Field(default_factory=ThreedTuningConfig)
     impedance: ImpedanceTuningConfig = Field(default_factory=ImpedanceTuningConfig)
     rcr: RCRTuningConfig = Field(default_factory=RCRTuningConfig)
+    calibration: CalibrationPolicyConfig = Field(default_factory=CalibrationPolicyConfig)
 
 
 class PatientTuningOverrides(BaseModel):
@@ -717,6 +1145,7 @@ class PatientTuningOverrides(BaseModel):
     threed: PatientThreedOverrides | None = None
     impedance: PatientImpedanceOverrides | None = None
     rcr: PatientRCROverrides | None = None
+    calibration: CalibrationPolicyConfig | None = None
 
 
 class AdaptationModelConfig(BaseModel):
@@ -890,8 +1319,10 @@ class PatientAssetPaths(BaseModel):
     mesh_surfaces_dir: str
     postop_mesh_complete_dir: str | None = None
     postop_mesh_surfaces_dir: str | None = None
-    iteration1_seed_source: Literal["path", "generate"]
+    iteration1_seed_source: Literal["path", "generate", "learned_zerod"]
     iteration1_seed_path: str
+    iteration1_seed_learned_zerod_executable: str
+    iteration1_seed_svzerodsolver_executable: str
 
 
 class ResolvedPatient(BaseModel):
@@ -903,6 +1334,7 @@ class ResolvedPatient(BaseModel):
     threed: ThreedTuningConfig
     impedance: ImpedanceTuningConfig
     rcr: RCRTuningConfig
+    calibration: CalibrationPolicyConfig
     adaptation: AdaptationDefaults
     mesh_scale_factor: float
     data_policy: str

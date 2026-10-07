@@ -9,8 +9,14 @@
 With `--auto-advance`, `watch` performs a closed-loop iteration controller:
 1. Monitor the current submitted iteration to terminal scheduler state.
 2. Pull `iteration_decision.json` and `iteration_metrics.json` from remote iteration results into local `runs/<run_id>/iterations/iter-XX/results/`.
-3. Advance + submit next iteration when decision is `not_close`.
-4. Stop on `converged`, `failed_max_iter`, or terminal scheduler `failed/cancelled`.
+3. Under `calibrated_full_pa` (full-PA tuning), for any decision other than
+   `needs_review` (including `converged` and the final iteration), record the
+   postprocess and calibration jobs the driver submitted (submitting them
+   agent-side only as a fallback), monitor calibration, fetch/validate the
+   publication, and promote the calibrated model before acting on the
+   decision; then advance + submit the next iteration on `not_close`.
+4. Stop on `converged`, `failed_max_iter`, `needs_review`, `calibration_failed`,
+   or terminal scheduler `failed/cancelled`.
    A converged preop iteration is ready for explicit postop handoff; postop is
    not auto-submitted by the tuning driver.
 
@@ -18,6 +24,20 @@ The iteration driver computes MPA pressure gate metrics from the last cardiac
 period of `mpa_pressure_vs_time.csv`, using the staged inflow period when it is
 available. This keeps monitoring and auto-advance decisions aligned with the
 steady-state pressure window used for reduced RRI regeneration.
+
+Gate thresholds: by default each metric (MPA systolic, diastolic, mean, RPA
+split) must be within 10% of its target. When the rendered impedance config
+uses `objective.type: likelihood` with a non-null `target_sigma`, the job uses
+sigma mode instead: |model - target| <= `target_sigma` x sigma, with sigma =
+`pressure_sigma_mmhg` for pressures and `split_sigma` for the split. The same
+thresholds apply to the 0D pre-mapping gate (`zerod_pre_mapping_metrics.json`).
+`iteration_decision.json` records `gate_mode` and the sigmas used. See
+`docs/TUNING_MODEL.md`; note that a patient whose best 0D fit is outside the
+gate (e.g. TST-STAN-5 diastolic) reports `not_close` until `max_iterations`.
+
+`svzt status` also prints a `Seed generation` section from the driver's
+`iteration_decision.json`: the strategy and status, the regenerated RRI seed,
+or the postprocess and calibration job IDs with their scheduler states.
 
 ## Lifecycle normalization
 Slurm scheduler states are normalized into internal lifecycle states:
@@ -37,7 +57,8 @@ Defaults:
 - minimum poll interval: `5` seconds
 - timeout: disabled unless set
 - max polls: disabled unless set
-- In auto-advance mode, `timeout` and `max polls` apply per iteration watch cycle.
+- In auto-advance mode, `timeout` and `max polls` apply to both the tuning-job
+  watch and any required full-PA calibration wait.
 
 ## Post-terminal behavior
 - `--fetch-on-complete` triggers deterministic artifact fetch after `completed`.

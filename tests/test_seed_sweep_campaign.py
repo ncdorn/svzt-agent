@@ -129,7 +129,12 @@ def test_seed_sweep_plan_creates_three_tst_stan_5_child_runs(
         impedance = tuning["impedance"]
         assert impedance["diameter_scale"] == children[case_id]["diameter_scale"]
         assert impedance["tuning_model"] == children[case_id]["tuning_model"]
-        assert impedance["allow_ordered_outlet_mapping"] is True
+        assert "allow_ordered_outlet_mapping" not in impedance
+        if children[case_id]["tuning_model"] == "full_pa":
+            assert impedance["outlet_mapping_mode"] == "auto"
+            assert children[case_id]["outlet_mapping_mode"] == "auto"
+        else:
+            assert "outlet_mapping_mode" not in impedance
         if case_id == "learned-tree-dscale-0p1":
             assert impedance["use_mean"] is False
         if case_id == "learned-rri-reduced":

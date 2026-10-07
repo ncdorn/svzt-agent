@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import shlex
 import shutil
 
+import pytest
+
+from svztagent.core.errors import ConfigError
 from svztagent.core.manifest import read_manifest, record_lifecycle_transition, write_manifest
 from svztagent.core.state import RunLifecycleState
 from svztagent.hpc.fake import (
@@ -10,7 +15,7 @@ from svztagent.hpc.fake import (
     FakeRemoteExecAdapter,
     FakeSchedulerAdapter,
 )
-from svztagent.hpc.interfaces import ExecutionMode
+from svztagent.hpc.interfaces import CommandResult, ExecutionMode
 from svztagent.workflows.tune_trees import _iteration_impedance_config, run_tune_trees
 
 
@@ -39,6 +44,100 @@ def test_iteration_impedance_config_nonzero_diameter_scale_disables_mean_assignm
     assert rendered["use_mean"] is False
 
 
+def test_iteration_impedance_config_omits_unset_outlet_mapping_keys_for_rri():
+    rendered = _iteration_impedance_config(
+        {
+            "tuning_model": "rri",
+            "outlet_mapping_mode": None,
+            "outlet_mapping": None,
+            "outlet_mapping_centerline": None,
+        },
+        iteration=1,
+    )
+
+    assert "outlet_mapping_mode" not in rendered
+    assert "outlet_mapping" not in rendered
+    assert "outlet_mapping_centerline" not in rendered
+
+
+def test_iteration_impedance_config_passes_full_pa_mapping_centerline():
+    rendered = _iteration_impedance_config(
+        {
+            "tuning_model": "full_pa",
+            "outlet_mapping_mode": "auto",
+            "outlet_mapping": None,
+            "outlet_mapping_centerline": "/oak/patient/centerlines.vtp",
+        },
+        iteration=2,
+    )
+
+    assert rendered["outlet_mapping_mode"] == "auto"
+    assert rendered["outlet_mapping_centerline"] == "/oak/patient/centerlines.vtp"
+    assert "outlet_mapping" not in rendered
+
+
+def test_iteration_impedance_config_legacy_rri_drops_full_pa_mapping():
+    rendered = _iteration_impedance_config(
+        {
+            "tuning_model": "full_pa",
+            "outlet_mapping_mode": "centerline",
+            "outlet_mapping_centerline": "/oak/patient/centerlines.vtp",
+        },
+        iteration=2,
+        seed_policy="legacy_rri_after_first",
+    )
+
+    assert rendered["tuning_model"] == "rri"
+    assert "outlet_mapping_mode" not in rendered
+    assert "outlet_mapping_centerline" not in rendered
+
+
+def test_iteration_impedance_config_forwards_objective_tree_policy_unchanged():
+    policy = {"use_mean": True, "reference_diameter": "conductance_matched"}
+    rendered = _iteration_impedance_config(
+        {
+            "tuning_model": "full_pa",
+            "use_mean": False,
+            "diameter_scale": 0.2,
+            "objective_tree_policy": policy,
+        },
+        iteration=1,
+    )
+
+    assert rendered["objective_tree_policy"] == policy
+
+
+def test_iteration_impedance_config_forwards_stopping_for_every_tuning_model():
+    stopping = {"enabled": True, "target_tolerance": 0.025, "maxfev": 200}
+    for iteration, seed_policy in ((1, "calibrated_full_pa"), (2, "legacy_rri_after_first")):
+        rendered = _iteration_impedance_config(
+            {"tuning_model": "full_pa", "stopping": stopping},
+            iteration=iteration,
+            seed_policy=seed_policy,
+        )
+        assert rendered["stopping"] == stopping
+
+
+def test_iteration_impedance_config_omits_unset_objective_tree_policy():
+    rendered = _iteration_impedance_config(
+        {"tuning_model": "full_pa", "objective_tree_policy": None},
+        iteration=1,
+    )
+
+    assert "objective_tree_policy" not in rendered
+
+
+def test_iteration_impedance_config_legacy_rri_drops_objective_tree_policy():
+    rendered = _iteration_impedance_config(
+        {"tuning_model": "full_pa", "objective_tree_policy": {"use_mean": True}},
+        iteration=2,
+        seed_policy="legacy_rri_after_first",
+    )
+
+    assert rendered["tuning_model"] == "rri"
+    assert "objective_tree_policy" not in rendered
+
+
 def test_run_tune_dry_run_updates_manifest_and_previews(sample_config_files):
     result = run_tune_trees(
         workspace_root=sample_config_files,
@@ -61,6 +160,35 @@ def test_run_tune_dry_run_updates_manifest_and_previews(sample_config_files):
     )
     assert manifest.execution.plan_path.endswith("/run-dry-001/execution_plan.yaml")
     assert manifest.jobs[0]["mode"] == "dry_run"
+
+
+def test_run_tune_default_submission_matches_rendered_tune_cpus(sample_config_files):
+    defaults_path = sample_config_files / "config" / "defaults.yaml"
+    defaults_path.write_text(
+        defaults_path.read_text(encoding="utf-8").replace(
+            'cpus: "<count>"', 'cpus: "4"', 1
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-dry-default-cpus",
+        mode=ExecutionMode.DRY_RUN,
+    )
+
+    rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
+    submit_preview = next(
+        command
+        for command in result.command_previews
+        if command[0] == "ssh" and "sbatch" in command[-1]
+    )
+    submit_command = shlex.split(submit_preview[-1])
+    cpus_index = submit_command.index("--cpus-per-task")
+    assert submit_command[cpus_index + 1] == "24"
+    assert "#SBATCH --cpus-per-task=24" in rendered_script
 
 
 def test_run_tune_dry_run_supports_sibling_repo_layout_without_changing_run_contract(
@@ -329,6 +457,216 @@ defaults:
     rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
     assert "if not staged_seed_path.exists():" in rendered_script
     assert "_generate_iteration_seed(staged_seed_path)" in rendered_script
+
+
+def test_run_tune_learned_zerod_seed_defers_full_pa_generation_to_remote_driver(
+    sample_config_files,
+):
+    patient_root = (
+        sample_config_files
+        / "remote_data"
+        / "permanent"
+        / "TST-STAN-x"
+    )
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        f"""
+patients:
+  - alias: "TST-STAN-x"
+    permanent_remote_path: "{patient_root.as_posix()}"
+    data_policy: "read_only"
+    tuning:
+      iteration1_seed:
+        source: "learned_zerod"
+        learned_zerod_executable: "/opt/learned/bin/learned-zerod"
+        svzerodsolver_executable: "/opt/svzerod/bin/svzerodsolver"
+      impedance:
+        tuning_model: "full_pa"
+        outlet_mapping_mode: "centerline"
+        diameter_scale: 0.2
+        objective_tree_policy:
+          use_mean: true
+          reference_diameter: "conductance_matched"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-dry-learned-seed",
+        mode=ExecutionMode.DRY_RUN,
+    )
+
+    staged_seed = (
+        sample_config_files
+        / "runs"
+        / "run-dry-learned-seed"
+        / "iterations"
+        / "iter-01"
+        / "inputs"
+        / "full_pa_zerod.json"
+    )
+    assert not staged_seed.exists()
+    staged_source = (
+        sample_config_files
+        / "runs"
+        / "run-dry-learned-seed"
+        / "iterations"
+        / "iter-01"
+        / "inputs"
+        / "source_0d_config.json"
+    )
+    assert staged_source.read_text(encoding="utf-8") == '{"default_seed": true}'
+    rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
+    assert '"source": "learned_zerod"' in rendered_script
+    assert '"path": "' + result.remote_run_dir + '/iterations/iter-01/inputs/source_0d_config.json"' in rendered_script
+    assert (
+        '"learned_zerod_executable": "/opt/learned/bin/learned-zerod"'
+        in rendered_script
+    )
+    assert (
+        '"svzerodsolver_executable": "/opt/svzerod/bin/svzerodsolver"'
+        in rendered_script
+    )
+    assert '"outlet_mapping_mode": "centerline"' in rendered_script
+    assert (
+        '"objective_tree_policy": {"reference_diameter": "conductance_matched", '
+        '"use_mean": true}'
+    ) in rendered_script
+    assert (
+        '"outlet_mapping_centerline": "'
+        + patient_root.as_posix()
+        + '/centerlines.vtp"'
+    ) in rendered_script
+    assert "def _generate_learned_iteration_seed(seed_path: Path)" in rendered_script
+    assert "_generate_learned_iteration_seed(staged_seed_path)" in rendered_script
+    learned_helper = rendered_script[
+        rendered_script.index("def _generate_learned_iteration_seed(seed_path: Path)") :
+        rendered_script.index("_NESTED_SBATCH_STRIP_ENV_VARS")
+    ]
+    assert "_generate_iteration_seed(source_seed_path)" not in learned_helper
+    assert "run_steady_sims()" not in learned_helper
+    assert 'seed_workspace / "preop"' not in learned_helper
+    assert 'seed_workspace / "postop"' not in learned_helper
+    assert 'seed_workspace / "steady"' not in learned_helper
+    assert "input 0D JSON is missing or unreadable" in learned_helper
+    assert 'junction_type.lower() == "internal_junction"' in learned_helper
+    assert 'junction["junction_type"] = "NORMAL_JUNCTION"' in learned_helper
+    assert 'log["learned_seed_normalized_internal_junctions"]' in learned_helper
+    assert 'output_filename="full_pa_zerod.json"' in rendered_script
+    python_blocks = re.split(r"<<'PY'[^\n]*\n", rendered_script)[1:]
+    assert len(python_blocks) == 2
+    for index, block in enumerate(python_blocks):
+        source, separator, _remainder = block.partition("\nPY\n")
+        assert separator
+        compile(source, f"<rendered-tune-job-{index}>", "exec")
+
+
+def test_run_tune_learned_zerod_remote_only_source_is_referenced_without_local_staging(
+    sample_config_files,
+):
+    remote_patient_root = "/oak/stanford/groups/amarsden/PPAS-study/tof-stent/TST-STAN-x"
+    cluster_config = sample_config_files / "config" / "clusters.yaml"
+    cluster_config.write_text(
+        cluster_config.read_text(encoding="utf-8").replace(
+            (sample_config_files / "remote_data" / "permanent").as_posix(),
+            "/oak/stanford/groups/amarsden/PPAS-study/tof-stent",
+        ),
+        encoding="utf-8",
+    )
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        f"""
+patients:
+  - alias: "TST-STAN-x"
+    permanent_remote_path: "{remote_patient_root}"
+    data_policy: "read_only"
+    tuning:
+      iteration1_seed:
+        source: "learned_zerod"
+        path: "zerod-models/baseline_0d_learned.json"
+      impedance:
+        tuning_model: "full_pa"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-dry-learned-remote-only",
+        mode=ExecutionMode.DRY_RUN,
+    )
+
+    staged_source = (
+        sample_config_files
+        / "runs"
+        / "run-dry-learned-remote-only"
+        / "iterations"
+        / "iter-01"
+        / "inputs"
+        / "source_0d_config.json"
+    )
+    assert not staged_source.exists()
+    rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
+    assert (
+        '"path": "/oak/stanford/groups/amarsden/PPAS-study/tof-stent/'
+        'TST-STAN-x/zerod-models/baseline_0d_learned.json"'
+    ) in rendered_script
+
+
+def test_run_tune_learned_zerod_missing_remote_source_fails_before_submission(
+    sample_config_files,
+):
+    cluster_config = sample_config_files / "config" / "clusters.yaml"
+    cluster_config.write_text(
+        cluster_config.read_text(encoding="utf-8").replace(
+            (sample_config_files / "remote_data" / "permanent").as_posix(),
+            "/oak/stanford/groups/amarsden/PPAS-study/tof-stent",
+        ),
+        encoding="utf-8",
+    )
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        """
+patients:
+  - alias: "TST-STAN-x"
+    permanent_remote_path: "/oak/stanford/groups/amarsden/PPAS-study/tof-stent/TST-STAN-x"
+    data_policy: "read_only"
+    tuning:
+      iteration1_seed:
+        source: "learned_zerod"
+        path: "zerod-models/missing-baseline.json"
+      impedance:
+        tuning_model: "full_pa"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    remote = FakeRemoteExecAdapter()
+    remote.queue_response(
+        CommandResult(
+            argv=["test", "-f", "/oak/stanford/groups/amarsden/PPAS-study/tof-stent/TST-STAN-x/zerod-models/missing-baseline.json"],
+            returncode=1,
+            stdout="",
+            stderr="",
+            dry_run=False,
+        )
+    )
+
+    with pytest.raises(ConfigError, match="configured learned source is unavailable"):
+        run_tune_trees(
+            workspace_root=sample_config_files,
+            cluster_name="sherlock",
+            patient_alias="TST-STAN-x",
+            run_id="run-exec-learned-missing-source",
+            mode=ExecutionMode.EXECUTE,
+            remote_exec_adapter=remote,
+            transfer_adapter=FakeFileTransferAdapter(),
+            scheduler_adapter=FakeSchedulerAdapter(),
+        )
 
 
 def test_run_tune_dry_run_renders_threed_defaults_and_stage_paths(sample_config_files):

@@ -39,7 +39,7 @@ else
 fi
 
 echo "[svzt] python_bin=${PYTHON_BIN}"
-"${PYTHON_BIN}" - <<'PY'
+"${PYTHON_BIN}" - <<'PY' || exit $?
 import importlib
 import importlib.util
 import sys
@@ -86,6 +86,32 @@ if missing_symbols:
         file=sys.stderr,
     )
     sys.exit(5)
+# The rendered impedance config must be fully understood by this svZeroDTrees
+# install; an older install would otherwise silently ignore new controls.
+import json as _json
+if ("{{TUNING_BC_TYPE}}".strip().lower() or "impedance") == "impedance":
+    _rendered = _json.loads(r'''{{ZEROD_TUNING_CONFIG_JSON}}''')
+    _supported = getattr(tuning, "SUPPORTED_IMPEDANCE_KEYS", None)
+    if _supported is not None:
+        _unknown = sorted(set(_rendered) - set(_supported))
+    else:
+        _new_policies = {"precapillary_fraction", "diastolic_offset"}
+        _unknown = sorted(
+            key
+            for key in ("objective", "proximal_compliance", "polish", "tree_max_nodes", "leaf_resistance")
+            if _rendered.get(key) is not None
+        )
+        if _rendered.get("keep_diastolic_target"):
+            _unknown.append("keep_diastolic_target")
+        if _rendered.get("wedge_pressure_policy") in _new_policies:
+            _unknown.append("wedge_pressure_policy=" + str(_rendered["wedge_pressure_policy"]))
+    if _unknown:
+        print(
+            "[svzt] error: this svZeroDTrees install does not support impedance tuning "
+            "settings " + ", ".join(_unknown) + "; update svZeroDTrees on the cluster",
+            file=sys.stderr,
+        )
+        sys.exit(8)
 if not hasattr(post_processing, "write_mpa_pressure_timeseries_csv"):
     print(
         "[svzt] error: svzerodtrees.post_processing missing required symbol: "
@@ -102,7 +128,7 @@ mkdir -p "{{REMOTE_INPUTS_DIR}}" "{{REMOTE_RESULTS_DIR}}" "{{REMOTE_LOGS_DIR}}"
 # 2) preop 3D simulation submission/execution
 # 3) centerline + flow-split metric extraction
 # 4) clinical gate evaluation
-# 5) branch to reduced-PA regeneration or postop submission intent
+# 5) branch to reduced-PA regeneration (skipped under calibrated_full_pa) or postop submission intent
 "${PYTHON_BIN}" - <<'PY'
 from __future__ import annotations
 
@@ -123,6 +149,8 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import vtk
 
+import svzerodtrees.config as svzerodtrees_config
+import svzerodtrees.tuning as svzerodtrees_tuning
 from svzerodtrees.simulation import Simulation, SimulationDirectory
 from svzerodtrees.post_processing import write_mpa_pressure_timeseries_csv
 from svzerodtrees.tuning import (
@@ -162,7 +190,30 @@ solver_execution["svfsiplus_path"] = cluster_svfsiplus_path
 threed_config["execution"] = solver_execution
 tuning_bc_type = "{{TUNING_BC_TYPE}}".strip().lower() or "impedance"
 zerod_tuning_config = json.loads(r'''{{ZEROD_TUNING_CONFIG_JSON}}''')
+# Iteration gate: with the likelihood objective, accept metrics within
+# target_sigma measurement standard deviations instead of 10% relative (which
+# would demand ~0.3 mmHg on a 3 mmHg diastolic target).
+_gate_objective = zerod_tuning_config.get("objective") or {}
+gate_kwargs = {}
+if _gate_objective.get("type") == "likelihood" and _gate_objective.get("target_sigma") is not None:
+    gate_kwargs = {
+        "sigma": {
+            "pressure_mmhg": float(_gate_objective.get("pressure_sigma_mmhg") or 2.0),
+            "split": float(_gate_objective.get("split_sigma") or 0.02),
+        },
+        "sigma_multiple": float(_gate_objective["target_sigma"]),
+    }
+iteration1_seed_config = json.loads(r'''{{ITERATION1_SEED_CONFIG_JSON}}''')
 skip_zerod_tuning = json.loads(r'''{{SKIP_ZEROD_TUNING_JSON}}''')
+# Next-seed generation strategy chosen by the agent's seed policy:
+# - "reduced_rri": regenerate simplified_zerod_tuned_RRI.json inline on not_close.
+# - "calibrated_full_pa": after not_close or converged, submit the pre-rendered
+#   preop postprocess job and the dependent (afterok) full-PA calibration job,
+#   and report both job IDs in iteration_decision.json. The agent validates and
+#   promotes the calibrated model; it seeds the next iteration or postop.
+seed_generation = json.loads(r'''{{SEED_GENERATION_JSON}}''')
+seed_strategy = str(seed_generation.get("strategy") or "reduced_rri")
+regenerate_reduced_seed = seed_strategy != "calibrated_full_pa"
 mesh_scale_factor = float("{{MESH_SCALE_FACTOR}}")
 scheduler_defaults = {
     "account": "{{SBATCH_ACCOUNT}}",
@@ -364,6 +415,126 @@ def _generate_iteration_seed(seed_path: Path) -> None:
     seed_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(generated, seed_path)
     log["steps"].append("iteration_seed_generated")
+
+
+def _generate_learned_iteration_seed(seed_path: Path) -> None:
+    if iteration != 1:
+        raise RuntimeError(
+            "learned-zerod seed generation is supported only for iteration 1"
+        )
+    if centerline_path is None or not centerline_path.exists():
+        raise RuntimeError(
+            f"learned-zerod seed generation requires centerline input: {centerline_path}"
+        )
+
+    learned_config_type = getattr(
+        svzerodtrees_config, "LearnedSeedGenerationConfig", None
+    )
+    learned_generator = getattr(
+        svzerodtrees_tuning, "generate_full_pa_learned_seed", None
+    )
+    if learned_config_type is None or learned_generator is None:
+        raise RuntimeError(
+            "source=learned_zerod requires a svZeroDTrees installation exposing "
+            "LearnedSeedGenerationConfig and generate_full_pa_learned_seed"
+        )
+
+    seed_workspace = remote_iter_dir / "seed_generation"
+    source_seed_path = seed_workspace / "learned" / "source_0d_config.json"
+    configured_source = str(iteration1_seed_config.get("path", "")).strip()
+    if not configured_source:
+        raise RuntimeError(
+            "source=learned_zerod requires a configured input 0D JSON path"
+        )
+    configured_source_path = Path(configured_source).expanduser()
+    if not configured_source_path.is_file():
+        raise RuntimeError(
+            "source=learned_zerod input 0D JSON is missing or unreadable: "
+            f"{configured_source_path}"
+        )
+    source_seed_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copy2(configured_source_path, source_seed_path)
+    except OSError as exc:
+        raise RuntimeError(
+            "source=learned_zerod input 0D JSON could not be staged: "
+            f"{configured_source_path}"
+        ) from exc
+
+    try:
+        source_config = json.loads(source_seed_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "source=learned_zerod input 0D JSON could not be parsed after staging: "
+            f"{source_seed_path}"
+        ) from exc
+    if not isinstance(source_config, dict):
+        raise RuntimeError(
+            "source=learned_zerod input 0D JSON must contain a JSON object: "
+            f"{source_seed_path}"
+        )
+
+    normalized_internal_junctions = 0
+    junctions = source_config.get("junctions", [])
+    if not isinstance(junctions, list):
+        raise RuntimeError(
+            "source=learned_zerod input 0D JSON has a non-list junctions field: "
+            f"{source_seed_path}"
+        )
+    for junction in junctions:
+        if not isinstance(junction, dict):
+            raise RuntimeError(
+                "source=learned_zerod input 0D JSON has a non-object junction: "
+                f"{source_seed_path}"
+            )
+        junction_type = junction.get("junction_type")
+        if (
+            isinstance(junction_type, str)
+            and junction_type.lower() == "internal_junction"
+        ):
+            junction["junction_type"] = "NORMAL_JUNCTION"
+            normalized_internal_junctions += 1
+    if normalized_internal_junctions:
+        source_seed_path.write_text(
+            json.dumps(source_config, indent=2) + "\n", encoding="utf-8"
+        )
+        log["learned_seed_normalized_internal_junctions"] = (
+            normalized_internal_junctions
+        )
+
+    learned_output_dir = seed_workspace / "learned"
+    generated = learned_generator(
+        learned_config_type(
+            method="learned_zerod",
+            anatomy="pulmonary",
+            input_zerod_config=str(source_seed_path),
+            centerline=str(centerline_path),
+            svzerodsolver=str(
+                iteration1_seed_config.get(
+                    "svzerodsolver_executable", "svzerodsolver"
+                )
+            ),
+            output_dir=str(learned_output_dir),
+            learned_zerod_executable=str(
+                iteration1_seed_config.get(
+                    "learned_zerod_executable", "learned-zerod"
+                )
+            ),
+            output_filename="full_pa_zerod.json",
+            keep_tmp=False,
+        )
+    )
+    generated_seed_path = Path(generated.seed_path)
+    if not generated_seed_path.exists():
+        raise RuntimeError(
+            "svZeroDTrees learned seed generation did not write "
+            f"{generated_seed_path}"
+        )
+    seed_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(generated_seed_path, seed_path)
+    log["learned_seed_path"] = str(generated_seed_path)
+    log["learned_seed_metadata_path"] = str(generated.metadata_path)
+    log["steps"].append("learned_iteration_seed_generated")
 
 
 _NESTED_SBATCH_STRIP_ENV_VARS = (
@@ -789,6 +960,39 @@ def _ensure_generated_prestress_file() -> Path:
     return generated
 
 
+def _record_threed_wall_match(diagnostics_path_raw) -> None:
+    """Compare the deformable 3D wall with the tuned 0D proximal compliance.
+
+    svZeroDTrees reports the E*h of a uniform wall with the same total
+    compliance as the seed's proximal compliance; a 3D wall more than 2x away
+    from it gives the 3D-coupled model a different proximal compliance than
+    the tuned 0D model (docs/TUNING_MODEL.md).  Diagnostic only.
+    """
+    try:
+        if str(threed_config.get("wall_model", "deformable")) != "deformable" or not diagnostics_path_raw:
+            return
+        with open(diagnostics_path_raw, encoding="utf-8") as stream:
+            proximal = (json.load(stream) or {}).get("proximal_compliance") or {}
+        matched = proximal.get("matched_uniform_wall_eh")
+        if not matched:
+            return
+        wall_eh = float(threed_config["elasticity_modulus"]) * float(threed_config["shell_thickness"])
+        ratio = wall_eh / float(matched)
+        log["threed_wall_vs_proximal_compliance"] = {
+            "threed_wall_eh": wall_eh,
+            "matched_uniform_wall_eh": float(matched),
+            "ratio": ratio,
+            "matched_elasticity_modulus": float(matched) / float(threed_config["shell_thickness"]),
+        }
+        if not 0.5 <= ratio <= 2.0:
+            log["warnings"].append(
+                f"threed_wall_mismatch: 3D wall E*h={wall_eh:.3g} is {ratio:.2f}x the E*h "
+                f"({float(matched):.3g}) matching the tuned 0D proximal compliance"
+            )
+    except Exception as exc:  # diagnostic only
+        log["warnings"].append(f"threed_wall_match_failed: {exc}")
+
+
 def _force_xml_text(xml_path: Path, tag: str, value: str) -> None:
     if not xml_path.exists():
         raise RuntimeError(f"expected XML file missing: {xml_path}")
@@ -1015,6 +1219,61 @@ def _prepare_and_submit_stage(
     return job_id, stage_dir
 
 
+def _submit_prepared_sbatch(argv: list[str]) -> str:
+    script_path = Path(argv[-1])
+    proc = subprocess.run(
+        argv,
+        cwd=script_path.parent,
+        capture_output=True,
+        env=_nested_sbatch_env(),
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"sbatch failed rc={proc.returncode}: {proc.stderr.strip()}")
+    stdout = proc.stdout.strip()
+    if not stdout:
+        raise RuntimeError("sbatch returned empty stdout")
+    return stdout.split(";")[0].strip()
+
+
+def _submit_calibrated_full_pa_seed_jobs(tuned_model: Path) -> dict:
+    postprocess_spec = dict(seed_generation.get("postprocess") or {})
+    calibration_spec = dict(seed_generation.get("calibration") or {})
+    report = {
+        "strategy": "calibrated_full_pa",
+        "status": "failed",
+        "tuned_zerod_config": str(tuned_model.resolve()),
+        "postprocess": {key: postprocess_spec.get(key) for key in ("remote_script", "remote_results_dir")},
+        "calibration": {
+            key: calibration_spec.get(key)
+            for key in ("remote_root", "remote_script", "remote_config_path")
+        },
+        "error": None,
+    }
+    try:
+        request = json.loads(Path(calibration_spec["remote_request_path"]).read_text(encoding="utf-8"))
+        request["paths"]["zerod_config"] = str(tuned_model.resolve())
+        config_path = Path(calibration_spec["remote_config_path"])
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        # JSON is valid YAML for the upstream calibrate-0d-from-3d loader.
+        config_path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        for logs_dir in (postprocess_spec["remote_logs_dir"], calibration_spec["remote_logs_dir"]):
+            Path(logs_dir).mkdir(parents=True, exist_ok=True)
+
+        postprocess_job_id = _submit_prepared_sbatch(list(postprocess_spec["sbatch_argv"]))
+        report["postprocess"]["job_id"] = postprocess_job_id
+        calibration_argv = list(calibration_spec["sbatch_argv"])
+        calibration_argv.insert(len(calibration_argv) - 1, f"--dependency=afterok:{postprocess_job_id}")
+        report["calibration"]["job_id"] = _submit_prepared_sbatch(calibration_argv)
+        report["status"] = "submitted"
+    except Exception as exc:
+        # The agent falls back to submitting these jobs itself on advance.
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        log["warnings"].append(f"calibrated_full_pa_seed_submission_failed: {exc}")
+    return report
+
+
 try:
     poll_seconds = int(threed_config.get("wait_poll_seconds", 30))
     timeout_seconds = int(threed_config.get("wait_timeout_seconds", 43200))
@@ -1053,7 +1312,13 @@ try:
             )
             tuned_config_path = None
     elif not staged_seed_path.exists():
-        if tuning_model == "full_pa":
+        iteration1_seed_source = str(
+            iteration1_seed_config.get("source", "path")
+        ).strip().lower()
+        if iteration == 1 and iteration1_seed_source == "learned_zerod":
+            log["steps"].append("learned_iteration_seed_generation_started")
+            _generate_learned_iteration_seed(staged_seed_path)
+        elif tuning_model == "full_pa":
             _mark_needs_review(f"staged full-PA 0D seed missing: {staged_seed_path}")
         else:
             log["steps"].append("iteration_seed_generation_started")
@@ -1126,9 +1391,13 @@ try:
                     "pa_config_snapshot": tuning.get("pa_config_snapshot"),
                     "tuned_zerod_config": tuning.get("tuned_zerod_config"),
                     "zerod_pre_mapping_metrics": str(remote_results_dir / "zerod_pre_mapping_metrics.json"),
+                    # Present when svZeroDTrees writes them (impedance tuning).
+                    "tuning_diagnostics": tuning.get("tuning_diagnostics"),
+                    "seed_with_proximal_compliance": tuning.get("seed_with_proximal_compliance"),
                 }
             )
             log["steps"].append("0d_tuning_completed")
+            _record_threed_wall_match(tuning.get("tuning_diagnostics"))
 
             snapshot_path_raw = tuning.get("pa_config_snapshot")
             snapshot_path = Path(snapshot_path_raw) if snapshot_path_raw else None
@@ -1138,6 +1407,7 @@ try:
                     zerod_gate = evaluate_iteration_gate(
                         metrics={key: float(zerod_metrics[key]) for key in ("mpa_sys", "mpa_dia", "mpa_mean", "rpa_split")},
                         clinical_targets=clinical_targets_path,
+                        **gate_kwargs,
                     )
                     zerod_payload = {
                         "run_id": run_id,
@@ -1246,13 +1516,18 @@ try:
 
             if decision_payload["decision"] != "needs_review":
                 if clinical_targets_path and clinical_targets_path.exists() and set(metrics.keys()) >= {"mpa_sys", "mpa_dia", "mpa_mean", "rpa_split"}:
-                    gate = evaluate_iteration_gate(metrics=metrics, clinical_targets=clinical_targets_path)
+                    gate = evaluate_iteration_gate(
+                        metrics=metrics, clinical_targets=clinical_targets_path, **gate_kwargs
+                    )
                     decision_payload.update(gate)
                     log["steps"].append("clinical_gate_evaluated")
                 else:
                     _mark_needs_review("clinical gate prerequisites missing (targets or required metrics)")
 
-            if decision_payload["decision"] == "not_close":
+            if decision_payload["decision"] == "not_close" and not regenerate_reduced_seed:
+                log["steps"].append("reduced_pa_regeneration_skipped_calibrated_full_pa")
+
+            elif decision_payload["decision"] == "not_close":
                 tuned_pa_config = decision_payload["tuning_artifacts"].get("pa_config_snapshot")
                 try:
                     regen = generate_reduced_pa_from_iteration(
@@ -1285,6 +1560,23 @@ try:
 
             elif decision_payload["decision"] == "converged":
                 log["steps"].append("postop_ready_for_explicit_submission")
+
+            if (
+                seed_strategy == "calibrated_full_pa"
+                and decision_payload["decision"] in {"not_close", "converged"}
+            ):
+                seed_report = _submit_calibrated_full_pa_seed_jobs(tuned_config_path)
+                decision_payload["seed_generation"] = seed_report
+                log["steps"].append(f"calibrated_full_pa_seed_jobs_{seed_report['status']}")
+            elif (
+                decision_payload["decision"] == "not_close"
+                and decision_payload.get("regenerated_config_path")
+            ):
+                decision_payload["seed_generation"] = {
+                    "strategy": "reduced_rri",
+                    "status": "regenerated",
+                    "regenerated_config_path": decision_payload["regenerated_config_path"],
+                }
 
 except Exception as exc:
     _mark_needs_review(f"iteration_driver_unhandled_error: {exc}")
