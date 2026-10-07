@@ -291,6 +291,9 @@ job as `COMPLETED` and that `preop/` holds result VTUs, keeps that log as
 `logs/iteration_driver_log.preop_<job>.json`, and reruns only the post-3D
 steps. Without that evidence the iteration enters `needs_review`; it never
 resubmits the 3D run.
+Either way the re-submission is a new attempt: the iteration's earlier decision
+and metrics are cleared in the manifest and the earlier local progress files
+are kept as `*.tune_<previous-job>.json` (see `docs/MANIFEST.md`).
 
 ---
 

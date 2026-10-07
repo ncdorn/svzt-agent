@@ -447,6 +447,23 @@ def _resolve_iteration_progress_remote_dir(*, manifest, cluster, run_id: str, it
     )["remote_iter_dir"]
 
 
+def _archive_local_progress_artifacts(local_iteration_paths: dict, *, previous_job_id: str) -> None:
+    """Keep a resubmitted iteration's earlier local progress artifacts aside.
+
+    Progress loading prefers local copies and pulls only missing ones, so the
+    previous attempt's driver log, decision, and metrics are renamed
+    ``<name>.tune_<job>.json`` to make the next poll pull the new attempt's.
+    """
+    for path in (
+        local_iteration_paths["logs"] / "iteration_driver_log.json",
+        local_iteration_paths["decision"],
+        local_iteration_paths["metrics"],
+    ):
+        path = Path(path)
+        if path.exists():
+            path.rename(path.with_name(f"{path.stem}.tune_{previous_job_id}{path.suffix}"))
+
+
 def _load_iteration_progress_artifacts(
     *,
     run_id: str,
@@ -1845,6 +1862,24 @@ def run_tune_trees(
                 normalized_scheduler_state=RunLifecycleState.UNKNOWN,
                 note="Dry-run submission preview generated",
             )
+    if mode == ExecutionMode.EXECUTE:
+        previous_record = next(
+            (
+                rec
+                for rec in manifest.tuning_iteration_tracker.iterations
+                if rec.iteration == resolved_iteration
+            ),
+            None,
+        )
+        if (
+            previous_record is not None
+            and previous_record.tune_job_id
+            and previous_record.tune_job_id != submit_result.job_id
+        ):
+            _archive_local_progress_artifacts(
+                build_iteration_local_paths(local_paths, resolved_iteration),
+                previous_job_id=previous_record.tune_job_id,
+            )
     manifest = mark_iteration_submitted(
         manifest,
         iteration=resolved_iteration,
@@ -1857,6 +1892,7 @@ def run_tune_trees(
             if mode == ExecutionMode.EXECUTE
             else "Iteration submission preview generated"
         ),
+        reset_previous_outcome=mode == ExecutionMode.EXECUTE,
     )
     manifest.artifacts["job_script_local"] = str(local_script_path)
     write_manifest(manifest, local_paths.manifest)

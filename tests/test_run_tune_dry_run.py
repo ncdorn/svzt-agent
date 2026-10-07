@@ -1263,3 +1263,59 @@ def test_run_tune_iter_reuse_preop_3d_uses_only_completed_evidence(sample_config
     job_id, error = check(preop_dir)
     assert (job_id, error) == ("4242", None)
     assert json.loads((logs_dir / "iteration_driver_log.preop_4242.json").read_text()) == previous
+
+
+def test_run_tune_iter_resubmission_resets_previous_outcome(sample_config_files):
+    """A re-submitted iteration is decided by the new attempt, not the stale one."""
+    import json
+
+    from svztagent.core.manifest import mark_iteration_decision
+    from svztagent.hpc.interfaces import SubmitResult
+
+    def _submit(job_id: str, **kwargs):
+        scheduler = FakeSchedulerAdapter()
+        scheduler.set_submit_result(
+            SubmitResult(
+                job_id=job_id,
+                command=CommandResult(argv=["sbatch"], returncode=0, stdout=job_id, stderr="", dry_run=False),
+            )
+        )
+        return run_tune_trees(
+            workspace_root=sample_config_files,
+            cluster_name="sherlock",
+            patient_alias="TST-STAN-x",
+            run_id="run-exec-resubmit",
+            mode=ExecutionMode.EXECUTE,
+            remote_exec_adapter=FakeRemoteExecAdapter(),
+            transfer_adapter=FakeFileTransferAdapter(),
+            scheduler_adapter=scheduler,
+            **kwargs,
+        )
+
+    _submit("1001")
+    run_dir = sample_config_files / "runs" / "run-exec-resubmit"
+    manifest_path = run_dir / "manifest.yaml"
+    manifest = mark_iteration_decision(
+        read_manifest(manifest_path),
+        iteration=1,
+        decision="needs_review",
+        metrics={"mpa_sys": 1.0},
+        deltas={"mpa_sys": 1.0},
+    )
+    write_manifest(manifest, manifest_path)
+    iter_dir = run_dir / "iterations" / "iter-01"
+    (iter_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (iter_dir / "results").mkdir(parents=True, exist_ok=True)
+    stale_log = {"errors": ["old failure"]}
+    (iter_dir / "logs" / "iteration_driver_log.json").write_text(json.dumps(stale_log), encoding="utf-8")
+    (iter_dir / "results" / "iteration_decision.json").write_text('{"decision": "needs_review"}', encoding="utf-8")
+
+    _submit("1002", iteration=1, skip_zerod_tuning=True)
+
+    record = read_manifest(manifest_path).tuning_iteration_tracker.iterations[0]
+    assert record.tune_job_id == "1002"
+    assert record.decision is None and record.metrics is None and record.deltas is None
+    assert any("previous tune job 1001 ended with decision needs_review" in note for note in record.notes)
+    assert not (iter_dir / "logs" / "iteration_driver_log.json").exists()
+    assert json.loads((iter_dir / "logs" / "iteration_driver_log.tune_1001.json").read_text()) == stale_log
+    assert (iter_dir / "results" / "iteration_decision.tune_1001.json").exists()

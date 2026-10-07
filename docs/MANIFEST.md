@@ -40,6 +40,14 @@ Each iteration record can include:
 - carry-forward config (`regenerated_config_path`)
 - legacy postop submission intent / job id, if present in older iteration artifacts
 
+Re-submitting an iteration (`svzt run tune-iter --execute` with a new tune job)
+starts a new attempt: the record's decision, metrics, deltas,
+`regenerated_config_path`, `calibrated_seed_path`, and postop intent are
+cleared and a note names the previous tune job and its decision, so the new
+driver artifacts decide the iteration. The earlier attempt stays in
+`progress_tracker.iterations.records`, and its local driver log, decision, and
+metrics are kept as `*.tune_<previous-job>.json` beside the new ones.
+
 ## Converged preop handoff
 `converged_preop_iteration` records the preop iteration to use for explicit
 postop generation. It is written by:

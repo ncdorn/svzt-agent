@@ -514,12 +514,35 @@ def mark_iteration_submitted(
     job_script_path: str,
     note: str | None = None,
     at: str | None = None,
+    reset_previous_outcome: bool = False,
 ) -> RunManifest:
+    """Record an iteration tune-job submission.
+
+    With ``reset_previous_outcome`` (real resubmissions), an earlier attempt's
+    decision, metrics, deltas, and seed paths are cleared so the new driver
+    artifacts decide the iteration; the earlier attempt stays in
+    ``progress_tracker.iterations.records`` and in a note.
+    """
     timestamp = at or _utc_now_iso()
     updated = manifest.model_copy(deep=True)
     tracker = updated.tuning_iteration_tracker
     tracker.current_iteration = iteration
     record = _ensure_iteration_record(tracker, iteration=iteration, at=timestamp)
+    if (
+        reset_previous_outcome
+        and record.tune_job_id
+        and record.tune_job_id != tune_job_id
+    ):
+        record.notes.append(
+            f"Resubmitted; previous tune job {record.tune_job_id} "
+            f"ended with decision {record.decision}"
+        )
+        record.decision = None
+        record.metrics = None
+        record.deltas = None
+        record.regenerated_config_path = None
+        record.calibrated_seed_path = None
+        record.postop_submission_requested = False
     record.status = "submitted"
     record.tune_job_id = tune_job_id
     record.local_dir = local_dir
