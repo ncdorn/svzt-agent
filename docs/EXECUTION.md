@@ -5,7 +5,9 @@
 - `svzt config validate`
 - `svzt doctor`
 - `svzt run tune --cluster <name> --patient <alias> [--run-id <id>] [--execute]`
-- `svzt run tune-iter --cluster <name> --patient <alias> --run-id <id> [--iteration <n>] [--execute]`
+- `svzt run tune-iter --cluster <name> --patient <alias> --run-id <id> [--iteration <n>] [--skip-zerod-tuning | --reuse-preop-3d] [--execute]`
+  (`--reuse-preop-3d` reruns only the post-3D steps on the iteration's completed
+  preop 3D result; see `docs/OPERATOR_RUNBOOK.md`)
 - `svzt plan calibrate --run-id <id> [--iteration <n>]`
 - `svzt run calibrate --run-id <id> [--iteration <n>] [--dry-run|--execute]`
 - `svzt calibration-status <run-id> [--iteration <n>]`

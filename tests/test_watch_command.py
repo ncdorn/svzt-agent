@@ -374,3 +374,43 @@ def test_cli_status_prints_failure_error_log(sample_config_files, monkeypatch, c
     assert "Failure error log: /tmp/run-fail_12345.error" in captured.out
     assert "Failure error tail:" in captured.out
     assert "traceback line 2" in captured.out
+
+
+def test_cli_run_tune_iter_reuse_preop_3d_implies_skip_zerod_tuning(sample_config_files, monkeypatch, capsys):
+    seen: dict[str, object] = {}
+
+    def _fake_run_tune_trees(**kwargs):
+        seen.update(kwargs)
+        return TuneExecutionResult(
+            run_id="run-reuse",
+            iteration=1,
+            mode=ExecutionMode.DRY_RUN,
+            plan_path=sample_config_files / "runs" / "run-reuse" / "execution_plan.yaml",
+            remote_run_dir="/scratch/users/ndorn/svzt_runs/run-reuse",
+            remote_job_script_path="/scratch/users/ndorn/svzt_runs/run-reuse/iterations/iter-01/run_tune_iter.sh",
+            local_job_script_path=sample_config_files / "runs" / "run-reuse" / "iterations" / "iter-01" / "run_tune_iter.sh",
+            submitted_job_id="dryrun-run-reuse",
+            command_previews=[],
+        )
+
+    monkeypatch.setattr("svztagent.cli.main.run_tune_trees", _fake_run_tune_trees)
+    rc = main(
+        [
+            "--workspace-root",
+            str(sample_config_files),
+            "run",
+            "tune-iter",
+            "--cluster",
+            "sherlock",
+            "--patient",
+            "TST-STAN-x",
+            "--run-id",
+            "run-reuse",
+            "--iteration",
+            "1",
+            "--reuse-preop-3d",
+        ]
+    )
+    assert rc == 0
+    assert seen["reuse_preop_3d"] is True
+    assert seen["skip_zerod_tuning"] is True

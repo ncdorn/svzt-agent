@@ -1198,3 +1198,68 @@ patients:
     calls.clear()
     assert namespace["_seed_generation_mean_result_dir"]() == mean_dir / "48-procs"
     assert "submitted" not in calls
+
+
+def test_run_tune_iter_reuse_preop_3d_requires_skip_zerod_tuning(sample_config_files):
+    with pytest.raises(ConfigError, match="reuse_preop_3d requires skip_zerod_tuning"):
+        run_tune_trees(
+            workspace_root=sample_config_files,
+            cluster_name="sherlock",
+            patient_alias="TST-STAN-x",
+            run_id="run-dry-reuse-no-skip",
+            mode=ExecutionMode.DRY_RUN,
+            reuse_preop_3d=True,
+        )
+
+
+def test_run_tune_iter_reuse_preop_3d_uses_only_completed_evidence(sample_config_files, tmp_path):
+    """Reuse needs a COMPLETED preop job in the previous driver log plus result VTUs."""
+    import ast
+    import json
+    import shutil as _shutil
+
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-dry-reuse-preop",
+        mode=ExecutionMode.DRY_RUN,
+        skip_zerod_tuning=True,
+        reuse_preop_3d=True,
+    )
+    rendered = result.local_job_script_path.read_text(encoding="utf-8")
+    assert "reuse_preop_3d = json.loads(r'''true''')" in rendered
+    assert 'log["steps"].append(f"preop_reused:{reused_job_id}")' in rendered
+
+    body = re.split(r"<<'PY'[^\n]*\n", rendered)[2]
+    tree = ast.parse(body[: body.index("\nPY\n")])
+    wanted = {"_extract_result_step", "_latest_result_vtu", "_completed_preop_job_for_reuse"}
+    module = ast.Module(
+        body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted],
+        type_ignores=[],
+    )
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    preop_dir = tmp_path / "preop"
+    namespace = {"json": json, "re": re, "Path": Path, "shutil": _shutil, "remote_logs_dir": logs_dir}
+    exec(compile(module, "driver", "exec"), namespace)
+    check = namespace["_completed_preop_job_for_reuse"]
+
+    job_id, error = check(preop_dir)
+    assert job_id is None and "previous driver log unreadable" in error
+
+    previous = {"preop_job_id": "4242", "preop_terminal_state": "FAILED", "steps": ["preop_submitted"]}
+    (logs_dir / "iteration_driver_log.json").write_text(json.dumps(previous), encoding="utf-8")
+    job_id, error = check(preop_dir)
+    assert job_id is None and "does not record a completed preop job" in error
+
+    previous.update(preop_terminal_state="COMPLETED", steps=["preop_submitted", "preop_completed"])
+    (logs_dir / "iteration_driver_log.json").write_text(json.dumps(previous), encoding="utf-8")
+    job_id, error = check(preop_dir)
+    assert job_id is None and "no preop result VTUs" in error
+
+    (preop_dir / "72-procs").mkdir(parents=True)
+    (preop_dir / "72-procs" / "result_4000.vtu").write_text("", encoding="utf-8")
+    job_id, error = check(preop_dir)
+    assert (job_id, error) == ("4242", None)
+    assert json.loads((logs_dir / "iteration_driver_log.preop_4242.json").read_text()) == previous

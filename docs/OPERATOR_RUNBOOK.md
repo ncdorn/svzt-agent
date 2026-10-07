@@ -283,6 +283,14 @@ svzt continue <run-id> --execute
 svzt run tune-iter --cluster sherlock --patient <patient-alias> --run-id <run-id> --execute
 ```
 Add `--skip-zerod-tuning` to reuse existing 0D tuning artifacts and only redo the 3D submission.
+Add `--iteration N --reuse-preop-3d` instead when the iteration's preop 3D run
+already completed and only a post-3D step failed (centerline pressure CSV,
+metrics, gate, postprocess/calibration submission): it implies
+`--skip-zerod-tuning`, verifies that the previous driver log records the preop
+job as `COMPLETED` and that `preop/` holds result VTUs, keeps that log as
+`logs/iteration_driver_log.preop_<job>.json`, and reruns only the post-3D
+steps. Without that evidence the iteration enters `needs_review`; it never
+resubmits the 3D run.
 
 ---
 
@@ -407,3 +415,4 @@ last iteration, select that iteration with `svzt preop select`.
 | `svzt continue R --execute` | Force-advance after driver timeout |
 | `svzt run tune-iter --cluster C --patient P --run-id R --execute` | Re-submit a stuck/failed iteration |
 | `svzt run tune-iter ... --skip-zerod-tuning --execute` | Re-submit 3D only, reuse 0D artifacts |
+| `svzt run tune-iter ... --iteration N --reuse-preop-3d --execute` | Rerun post-3D steps on a completed preop 3D result |

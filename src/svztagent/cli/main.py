@@ -134,6 +134,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reuse existing iteration 0D tuning artifacts and submit only the 3D stage",
     )
+    run_tune_iter.add_argument(
+        "--reuse-preop-3d",
+        action="store_true",
+        help=(
+            "Reuse the iteration's completed preop 3D result and rerun only the "
+            "post-3D steps (implies --skip-zerod-tuning)"
+        ),
+    )
     mode_group_iter = run_tune_iter.add_mutually_exclusive_group()
     mode_group_iter.add_argument(
         "--dry-run", action="store_true", help="Preview commands only (default)"
@@ -574,7 +582,8 @@ def cmd_run_tune_iter(args: argparse.Namespace) -> int:
         run_id=args.run_id,
         iteration=args.iteration,
         mode=mode,
-        skip_zerod_tuning=args.skip_zerod_tuning,
+        skip_zerod_tuning=args.skip_zerod_tuning or args.reuse_preop_3d,
+        reuse_preop_3d=args.reuse_preop_3d,
         progress_callback=_print_progress,
     )
     print(f"Run ID: {result.run_id}")

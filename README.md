@@ -40,6 +40,7 @@ svzt plan tune --cluster sherlock --patient TST-STAN-x --run-id demo-run
 svzt run tune --cluster sherlock --patient TST-STAN-x --run-id demo-run --execute
 svzt watch demo-run --fetch-on-complete --auto-advance
 svzt advance-iter --run-id demo-run --execute
+svzt run tune-iter --cluster sherlock --patient TST-STAN-x --run-id demo-run --iteration 1 --reuse-preop-3d --execute
 svzt preop select --run-id demo-run --iteration 3 --reason "best tuned preop"
 svzt run postop --run-id demo-run --execute
 svzt postprocess cfd-results --run-id demo-run

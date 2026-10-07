@@ -1231,6 +1231,7 @@ def _render_tune_job_script(
     env_hooks: list[str],
     python_executable: str,
     skip_zerod_tuning: bool = False,
+    reuse_preop_3d: bool = False,
     seed_generation: dict | None = None,
 ) -> str:
     template = _template_text()
@@ -1258,6 +1259,7 @@ def _render_tune_job_script(
         ),
         "{{MESH_SCALE_FACTOR}}": str(mesh_scale_factor),
         "{{SKIP_ZEROD_TUNING_JSON}}": json.dumps(bool(skip_zerod_tuning)),
+        "{{REUSE_PREOP_3D_JSON}}": json.dumps(bool(reuse_preop_3d)),
         "{{SEED_GENERATION_JSON}}": json.dumps(
             seed_generation or {"strategy": "reduced_rri"}, sort_keys=True
         ),
@@ -1544,8 +1546,11 @@ def run_tune_trees(
     scheduler_adapter: SchedulerAdapter | None = None,
     remote_exec_adapter: RemoteExecAdapter | None = None,
     skip_zerod_tuning: bool = False,
+    reuse_preop_3d: bool = False,
     progress_callback: Callable[[str], None] | None = None,
 ) -> TuneExecutionResult:
+    if reuse_preop_3d and not skip_zerod_tuning:
+        raise ConfigError("reuse_preop_3d requires skip_zerod_tuning")
     resolved_run_id = validate_run_id(run_id or generate_run_id())
     _emit_progress(
         progress_callback,
@@ -1774,6 +1779,7 @@ def run_tune_trees(
         env_hooks=config.defaults.execution.env_activation_hooks,
         python_executable=config.defaults.execution.python_executable,
         skip_zerod_tuning=skip_zerod_tuning,
+        reuse_preop_3d=reuse_preop_3d,
         seed_generation=seed_generation.spec,
     )
     local_script_path.write_text(script_body, encoding="utf-8")

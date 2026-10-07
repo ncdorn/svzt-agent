@@ -205,6 +205,10 @@ if _gate_objective.get("type") == "likelihood" and _gate_objective.get("target_s
     }
 iteration1_seed_config = json.loads(r'''{{ITERATION1_SEED_CONFIG_JSON}}''')
 skip_zerod_tuning = json.loads(r'''{{SKIP_ZEROD_TUNING_JSON}}''')
+# Reuse this iteration's completed preop 3D result (recorded as COMPLETED by
+# the previous driver run, with result VTUs present) and rerun only the
+# post-3D steps.  Missing evidence is needs_review, never a silent resubmit.
+reuse_preop_3d = json.loads(r'''{{REUSE_PREOP_3D_JSON}}''')
 # Next-seed generation strategy chosen by the agent's seed policy:
 # - "reduced_rri": regenerate simplified_zerod_tuned_RRI.json inline on not_close.
 # - "calibrated_full_pa": after not_close or converged, submit the pre-rendered
@@ -906,6 +910,31 @@ def _write_mean_wall_traction_and_pressure(
     _write_wall_field(mean_p, out_path=pressure_path, wall_path=wall_path, name="Pressure")
 
 
+def _completed_preop_job_for_reuse(preop_dir: Path) -> tuple[str | None, str | None]:
+    """Job ID of this iteration's completed preop 3D run, or the reason it is unusable.
+
+    Evidence: the previous driver log records the preop job as COMPLETED with
+    a preop_completed step, and preop_dir holds result VTUs.
+    """
+    previous_log_path = remote_logs_dir / "iteration_driver_log.json"
+    try:
+        previous_log = json.loads(previous_log_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"previous driver log unreadable: {previous_log_path} ({exc})"
+    job_id = previous_log.get("preop_job_id")
+    terminal = str(previous_log.get("preop_terminal_state") or "")
+    if not job_id or terminal.upper() != "COMPLETED" or "preop_completed" not in (previous_log.get("steps") or []):
+        return None, (
+            f"previous driver log does not record a completed preop job "
+            f"(job={job_id}, state={terminal or None})"
+        )
+    if _latest_result_vtu(preop_dir) is None:
+        return None, f"no preop result VTUs under {preop_dir}"
+    # This run overwrites the driver log; keep the one that produced the 3D result.
+    shutil.copy2(previous_log_path, remote_logs_dir / f"iteration_driver_log.preop_{job_id}.json")
+    return str(job_id), None
+
+
 def _generate_mpa_pressure_csv(preop_dir: Path) -> Path:
     """Use the shared svZeroDTrees helper to write mpa_pressure_vs_time.csv."""
     if centerline_path is None or not centerline_path.exists():
@@ -1531,23 +1560,40 @@ try:
                 f"tuned 0D config missing after {tuning_bc_type} tuning: {tuned_config_path}"
             )
 
+    if (
+        decision_payload["decision"] != "needs_review"
+        and tuned_config_path is not None
+        and reuse_preop_3d
+    ):
+        preop_dir = remote_iter_dir / "preop"
+        reused_job_id, reuse_error = _completed_preop_job_for_reuse(preop_dir)
+        if reuse_error is not None:
+            _mark_needs_review(f"reuse_preop_3d: {reuse_error}")
+        else:
+            log["preop_job_id"] = reused_job_id
+            log["preop_terminal_state"] = "COMPLETED"
+            log["steps"].append(f"preop_reused:{reused_job_id}")
+
     if decision_payload["decision"] != "needs_review" and tuned_config_path is not None:
-        log["steps"].append("preop_3d_setup_started")
+        if reuse_preop_3d:
+            ok, terminal = True, "COMPLETED"
+        else:
+            log["steps"].append("preop_3d_setup_started")
 
-        preop_job_id, preop_dir = _prepare_and_submit_stage(
-            stage_name="preop",
-            mesh_complete_path=preop_mesh_complete_path,
-            zerod_config_path=tuned_config_path,
-        )
-        log["preop_job_id"] = preop_job_id
-        log["steps"].append("preop_submitted")
+            preop_job_id, preop_dir = _prepare_and_submit_stage(
+                stage_name="preop",
+                mesh_complete_path=preop_mesh_complete_path,
+                zerod_config_path=tuned_config_path,
+            )
+            log["preop_job_id"] = preop_job_id
+            log["steps"].append("preop_submitted")
 
-        ok, terminal = _wait_for_completion(
-            preop_job_id,
-            poll_seconds=poll_seconds,
-            timeout_seconds=timeout_seconds,
-        )
-        log["preop_terminal_state"] = terminal
+            ok, terminal = _wait_for_completion(
+                preop_job_id,
+                poll_seconds=poll_seconds,
+                timeout_seconds=timeout_seconds,
+            )
+            log["preop_terminal_state"] = terminal
         if not ok:
             _mark_needs_review(f"preop simulation did not complete successfully: {terminal}")
         else:
