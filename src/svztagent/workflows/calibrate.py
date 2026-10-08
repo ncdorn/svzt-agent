@@ -310,19 +310,52 @@ def _render_calibration_script(
     hooks = render_env_activation_hooks(activation_hooks)
     quoted_python = shlex.quote(str(python_executable))
     quoted_config = shlex.quote(str(remote_config_path))
+    resolved_config = str(
+        PurePosixPath(str(remote_config_path)).with_name(RESOLVED_CALIBRATION_CONFIG_FILENAME)
+    )
+    quoted_resolved = shlex.quote(resolved_config)
     return "\n".join(
         [
             "#!/usr/bin/env bash",
             *header,
             "set -euo pipefail",
             hooks,
-            f"{quoted_python} -m svzerodtrees.cli calibrate-0d-from-3d {quoted_config}",
+            # target_focused QC needs MPA/LPA/RPA roles, which only exist once the
+            # tuned model and its outlet mapping are on disk; resolve them here.
+            f"{quoted_python} - {quoted_config} {quoted_resolved} <<'PY'",
+            _RESOLVE_TARGETS_PY,
+            "PY",
+            f"{quoted_python} -m svzerodtrees.cli calibrate-0d-from-3d {quoted_resolved}",
             "",
         ]
     )
 
 
 render_calibration_script = _render_calibration_script
+
+RESOLVED_CALIBRATION_CONFIG_FILENAME = "calibrate_0d_from_3d.resolved.yaml"
+
+# Runs on the cluster inside the calibration job.  Leaves the staged request
+# untouched and writes the config actually passed to svZeroDTrees beside it.
+_RESOLVE_TARGETS_PY = """import json
+import sys
+from pathlib import Path
+
+import yaml
+
+config_path, resolved_path = Path(sys.argv[1]), Path(sys.argv[2])
+config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+calibration = config.setdefault("calibration", {})
+enforcement = str((calibration.get("observation_qc") or {}).get("enforcement", "")).lower()
+if enforcement == "target_focused" and not calibration.get("targets"):
+    from svzerodtrees.calibration.target_roles import full_pa_calibration_targets
+
+    model = Path(config["paths"]["zerod_config"])
+    calibration["targets"] = full_pa_calibration_targets(
+        model, model.parent / "outlet_cap_mapping.json"
+    )
+resolved_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+print(f"[svzt] calibration config resolved: {resolved_path}")"""
 
 
 def _build_calibration_config(
@@ -333,7 +366,7 @@ def _build_calibration_config(
     remote_root: str,
     target_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build only the public upstream YAML envelope; no scientific defaults."""
+    """Build the upstream calibrate_0d_from_3d request (R-only, target_focused QC)."""
 
     payload: dict[str, Any] = {
         "version": 1,
@@ -348,10 +381,15 @@ def _build_calibration_config(
                 "mode": "postprocess_suite",
                 "postprocess_metadata_json": remote_descriptor,
             },
+            # Resistance only: C (proximal compliance) and L stay as tuned.
             "parameters": {
-                "vessels": {"default": ["R_poiseuille", "C", "L"], "overrides": {}},
-                "junctions": {"default": ["R_poiseuille", "L"], "overrides": {}},
+                "vessels": {"default": ["R_poiseuille"], "overrides": {}},
+                "junctions": {"default": [], "overrides": {}},
             },
+            # svZeroDTrees' production profile: root waveform is fatal, the
+            # whole-network checks are advisory, and the calibrated model must
+            # meet the MPA pressure / RPA split targets the job resolves.
+            "observation_qc": {"enforcement": "target_focused"},
         },
     }
     if target_policy:

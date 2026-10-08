@@ -179,6 +179,17 @@ The rendered postprocess job passes the iteration's
 `results/svzerod_3d_coupling_tuned.json` to the suite (when the file exists) so
 the descriptor declares that model's `lineage` (relative path + sha256);
 calibration rejects a descriptor without it.
+The request calibrates vessel `R_poiseuille` only (C, including the proximal
+compliance, and L stay as tuned; junction values are not calibrated) under
+`observation_qc.enforcement: target_focused`, svZeroDTrees' production
+profile: the root waveform is fatal, the whole-network checks are advisory, and
+the calibrated model must meet the MPA pressure-waveform and RPA split targets.
+The calibration job resolves those MPA/LPA/RPA roles on the cluster from the
+tuned model and `results/outlet_cap_mapping.json`
+(`svzerodtrees.calibration.target_roles`) and runs svZeroDTrees on
+`calibration/inputs/calibrate_0d_from_3d.resolved.yaml`; the staged request is
+left unchanged. Holding parameters constant requires an svZeroDSolver build
+with the calibrator's per-block `calibrate` selection (svZeroDSolver #226).
 The agent only stages the request, submits it after the postprocess job with an
 `afterok` dependency, records paths/digests, and applies the final promotion
 gate. It does not parse VTP, stack centerlines, validate observations, or tune

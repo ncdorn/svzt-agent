@@ -808,3 +808,84 @@ def test_preop_postprocess_job_splits_cpus_between_frame_workers_and_svslicer_th
     spec = _rendered_seed_generation(result.local_job_script_path.read_text(encoding="utf-8"))
     argv = spec["postprocess"]["sbatch_argv"]
     assert argv[argv.index("--cpus-per-task") + 1] == "24"
+
+
+def _resolve_step(script: str) -> str:
+    start = script.index("<<'PY'\n") + len("<<'PY'\n")
+    return script[start : script.index("\nPY\n", start)]
+
+
+def test_calibration_job_requests_r_only_target_focused_and_resolves_targets(tmp_path):
+    import importlib.util
+    import subprocess
+    import sys
+
+    from svztagent.workflows.calibrate import _build_calibration_config, render_calibration_script
+
+    request = _build_calibration_config(
+        remote_tuned_model=str(tmp_path / "results" / "svzerod_3d_coupling_tuned.json"),
+        remote_descriptor="/remote/postprocess_suite_metadata.json",
+        remote_output_config="/remote/calibrated_full_pa_zerod.json",
+        remote_root="/remote",
+    )
+    assert request["calibration"]["parameters"] == {
+        "vessels": {"default": ["R_poiseuille"], "overrides": {}},
+        "junctions": {"default": [], "overrides": {}},
+    }
+    assert request["calibration"]["observation_qc"] == {"enforcement": "target_focused"}
+
+    config_path = tmp_path / "inputs" / "calibrate_0d_from_3d.yaml"
+    script = render_calibration_script(
+        remote_root=str(tmp_path),
+        remote_logs_dir=str(tmp_path / "logs"),
+        remote_config_path=str(config_path),
+        postprocess_job_id=None,
+        dependency_via_submit=True,
+    )
+    resolved_path = config_path.with_name("calibrate_0d_from_3d.resolved.yaml")
+    assert f"-m svzerodtrees.cli calibrate-0d-from-3d {resolved_path}" in script
+
+    config_path.parent.mkdir(parents=True)
+    step = tmp_path / "resolve.py"
+    step.write_text(_resolve_step(script), encoding="utf-8")
+
+    # Explicit targets pass through unchanged and the staged request is untouched.
+    explicit = json.loads(json.dumps(request))
+    explicit["calibration"]["targets"] = {"mpa_pressure": {"vessel": "x"}}
+    config_path.write_text(json.dumps(explicit), encoding="utf-8")
+    subprocess.run([sys.executable, str(step), str(config_path), str(resolved_path)], check=True)
+    assert json.loads(resolved_path.read_text())["calibration"]["targets"] == {"mpa_pressure": {"vessel": "x"}}
+    assert json.loads(config_path.read_text()) == explicit
+
+    if importlib.util.find_spec("svzerodtrees") is None:
+        pytest.skip("svzerodtrees is not importable; target inference runs on the cluster")
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "svzerod_3d_coupling_tuned.json").write_text(
+        json.dumps(
+            {
+                "vessels": [
+                    {"vessel_id": 0, "vessel_name": "branch0_seg0", "boundary_conditions": {"inlet": "INFLOW"}},
+                    {"vessel_id": 1, "vessel_name": "branch1_seg0", "boundary_conditions": {"outlet": "R0"}},
+                    {"vessel_id": 2, "vessel_name": "branch2_seg0", "boundary_conditions": {"outlet": "R1"}},
+                ],
+                "junctions": [{"junction_name": "J0", "inlet_vessels": [0], "outlet_vessels": [1, 2]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (results / "outlet_cap_mapping.json").write_text(
+        json.dumps({"pairs": [{"bc_name": "R0", "side": "rpa"}, {"bc_name": "R1", "side": "lpa"}]}),
+        encoding="utf-8",
+    )
+    config_path.write_text(json.dumps(request), encoding="utf-8")
+    subprocess.run([sys.executable, str(step), str(config_path), str(resolved_path)], check=True)
+    targets = json.loads(resolved_path.read_text())["calibration"]["targets"]
+    assert targets["rpa_flow_split"] == {
+        "rpa_vessel": "branch1_seg0",
+        "lpa_vessel": "branch2_seg0",
+        "interface": "upstream",
+        "weight": 1.0,
+        "absolute_tolerance": 0.02,
+    }
+    assert targets["mpa_pressure"]["vessel"] == "branch0_seg0"
