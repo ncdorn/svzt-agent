@@ -115,6 +115,11 @@ class PatientConfig(BaseModel):
     permanent_remote_path: str | None = None
     data_policy: Literal["read_only", "mutable"] = "read_only"
     mesh_scale_factor: float | None = None
+    # Run-scoped cap renames for the preop mesh (source file -> staged name),
+    # e.g. {"r_pa_x_2.vtp": "inflow.vtp"} when the inlet cap is not named
+    # inflow.  Patient data is never modified; the tune driver stages a
+    # symlinked mesh-complete under the run directory.
+    preop_mesh_surface_aliases: dict[str, str] = Field(default_factory=dict)
     tuning: "PatientTuningOverrides | None" = None
     adaptation: "PatientAdaptationOverrides | None" = None
     postprocess: PatientPostprocessOverrides | None = None
@@ -136,6 +141,21 @@ class PatientConfig(BaseModel):
             return value
         if value <= 0.0:
             raise ValueError("mesh_scale_factor must be > 0")
+        return value
+
+    @field_validator("preop_mesh_surface_aliases")
+    @classmethod
+    def _mesh_surface_aliases_valid(cls, value: dict[str, str]) -> dict[str, str]:
+        for source, target in value.items():
+            for name in (source, target):
+                if "/" in name or not name.endswith(".vtp") or name in {".vtp", ""}:
+                    raise ValueError(
+                        f"mesh surface alias '{name}' must be a .vtp file name without a path"
+                    )
+        if len(set(value.values())) != len(value):
+            raise ValueError("mesh surface aliases must map to distinct names")
+        if set(value) & set(value.values()):
+            raise ValueError("a mesh surface alias target may not also be renamed")
         return value
 
 
@@ -1347,6 +1367,7 @@ class ResolvedPatient(BaseModel):
     calibration: CalibrationPolicyConfig
     adaptation: AdaptationDefaults
     mesh_scale_factor: float
+    preop_mesh_surface_aliases: dict[str, str] = Field(default_factory=dict)
     data_policy: str
     permanent_data_root: str | None = None
     runs_root: str

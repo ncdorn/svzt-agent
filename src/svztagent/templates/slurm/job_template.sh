@@ -228,6 +228,8 @@ scheduler_defaults = {
 
 metrics_path = remote_results_dir / "iteration_metrics.json"
 decision_path = remote_results_dir / "iteration_decision.json"
+# Run-scoped preop cap renames (source file -> staged name); empty for most patients.
+preop_mesh_surface_aliases = json.loads(r'''{{PREOP_MESH_SURFACE_ALIASES_JSON}}''')
 
 log = {
     "run_id": run_id,
@@ -243,6 +245,46 @@ log = {
     "prestress_traction_source": None,
     "preop_terminal_state": None,
 }
+
+
+def _stage_aliased_mesh_complete(source: Path, aliases: dict) -> Path:
+    """Symlinked run-scoped copy of mesh-complete with renamed caps.
+
+    Patient data stays read-only: every entry is a symlink to the original,
+    and only the link names of aliased caps differ.  Re-running reuses the
+    staged copy and fails on any link that points elsewhere.
+    """
+    source_surfaces = source / "mesh-surfaces"
+    missing = sorted(name for name in aliases if not (source_surfaces / name).is_file())
+    if missing:
+        raise RuntimeError(f"mesh surface aliases name missing caps: {missing}")
+    clashes = sorted(
+        target for target in aliases.values() if (source_surfaces / target).exists()
+    )
+    if clashes:
+        raise RuntimeError(f"mesh surface alias targets already exist: {clashes}")
+    staged = remote_run_dir / "staged_inputs" / "preop-mesh-complete"
+    staged_surfaces = staged / "mesh-surfaces"
+    staged_surfaces.mkdir(parents=True, exist_ok=True)
+
+    def _link(link: Path, target: Path) -> None:
+        if link.is_symlink() or link.exists():
+            if link.resolve() != target.resolve():
+                raise RuntimeError(f"staged mesh entry {link} does not point to {target}")
+            return
+        link.symlink_to(target)
+
+    for item in source.iterdir():
+        if item.name != "mesh-surfaces":
+            _link(staged / item.name, item)
+    for item in source_surfaces.iterdir():
+        _link(staged_surfaces / aliases.get(item.name, item.name), item)
+    log["steps"].append(
+        "preop_mesh_surfaces_aliased:"
+        + ",".join(f"{src}->{dst}" for src, dst in sorted(aliases.items()))
+    )
+    return staged
+
 
 metrics = {}
 decision_payload = {
@@ -1375,6 +1417,10 @@ def _submit_calibrated_full_pa_seed_jobs(tuned_model: Path) -> dict:
 
 
 try:
+    if preop_mesh_surface_aliases and preop_mesh_complete_path is not None:
+        preop_mesh_complete_path = _stage_aliased_mesh_complete(
+            preop_mesh_complete_path, preop_mesh_surface_aliases
+        )
     poll_seconds = int(threed_config.get("wait_poll_seconds", 30))
     timeout_seconds = int(threed_config.get("wait_timeout_seconds", 43200))
     tuned_config_path: Path | None = None

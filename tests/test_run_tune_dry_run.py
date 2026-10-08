@@ -1319,3 +1319,63 @@ def test_run_tune_iter_resubmission_resets_previous_outcome(sample_config_files)
     assert not (iter_dir / "logs" / "iteration_driver_log.json").exists()
     assert json.loads((iter_dir / "logs" / "iteration_driver_log.tune_1001.json").read_text()) == stale_log
     assert (iter_dir / "results" / "iteration_decision.tune_1001.json").exists()
+
+
+def test_preop_mesh_surface_aliases_stage_symlinked_mesh(sample_config_files, tmp_path):
+    """Aliased caps get a run-scoped symlinked mesh-complete; patient data is untouched."""
+    import ast
+    import json
+
+    patients = sample_config_files / "config" / "patients.yaml"
+    patients.write_text(
+        patients.read_text(encoding="utf-8").replace(
+            '    data_policy: "read_only"\n',
+            '    data_policy: "read_only"\n    preop_mesh_surface_aliases:\n      r_pa_x_2.vtp: inflow.vtp\n',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-dry-mesh-aliases",
+        mode=ExecutionMode.DRY_RUN,
+    )
+    rendered = result.local_job_script_path.read_text(encoding="utf-8")
+    assert 'preop_mesh_surface_aliases = json.loads(r\'\'\'{"r_pa_x_2.vtp": "inflow.vtp"}\'\'\')' in rendered
+
+    body = re.split(r"<<'PY'[^\n]*\n", rendered)[2]
+    tree = ast.parse(body[: body.index("\nPY\n")])
+    module = ast.Module(
+        body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_stage_aliased_mesh_complete"],
+        type_ignores=[],
+    )
+    source = tmp_path / "patient" / "preop-mesh-complete"
+    (source / "mesh-surfaces").mkdir(parents=True)
+    for name in ("mesh-complete.mesh.vtu", "walls_combined.vtp"):
+        (source / name).write_text(name, encoding="utf-8")
+    for name in ("r_pa_x_2.vtp", "l_pa_1_x.vtp"):
+        (source / "mesh-surfaces" / name).write_text(name, encoding="utf-8")
+    namespace = {"Path": Path, "remote_run_dir": tmp_path / "run", "log": {"steps": []}}
+    exec(compile(module, "driver", "exec"), namespace)
+    stage = namespace["_stage_aliased_mesh_complete"]
+
+    staged = stage(source, {"r_pa_x_2.vtp": "inflow.vtp"})
+    surfaces = sorted(p.name for p in (staged / "mesh-surfaces").iterdir())
+    assert surfaces == ["inflow.vtp", "l_pa_1_x.vtp"]
+    assert (staged / "mesh-surfaces" / "inflow.vtp").read_text() == "r_pa_x_2.vtp"
+    assert (staged / "walls_combined.vtp").is_symlink()
+    assert sorted(p.name for p in (source / "mesh-surfaces").iterdir()) == ["l_pa_1_x.vtp", "r_pa_x_2.vtp"]
+    assert stage(source, {"r_pa_x_2.vtp": "inflow.vtp"}) == staged  # idempotent
+    with pytest.raises(RuntimeError, match="missing caps"):
+        stage(source, {"nope.vtp": "inflow.vtp"})
+
+
+def test_preop_mesh_surface_aliases_reject_paths_and_collisions(sample_config_files):
+    from svztagent.config.models import PatientConfig
+
+    PatientConfig(alias="X", preop_mesh_surface_aliases={"r_pa_x_2.vtp": "inflow.vtp"})
+    for bad in ({"a/b.vtp": "inflow.vtp"}, {"a.vtp": "inflow.vtp", "b.vtp": "inflow.vtp"}, {"a.vtp": "b.vtp", "b.vtp": "c.vtp"}):
+        with pytest.raises(ValueError):
+            PatientConfig(alias="X", preop_mesh_surface_aliases=bad)

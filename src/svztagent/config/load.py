@@ -527,6 +527,7 @@ def resolve_patient_alias(
         calibration=_resolve_patient_calibration_policy(config, patient),
         adaptation=_resolve_patient_adaptation_config(config, patient),
         mesh_scale_factor=_resolve_patient_mesh_scale_factor(config, patient),
+        preop_mesh_surface_aliases=dict(patient.preop_mesh_surface_aliases),
         data_policy=patient.data_policy,
         permanent_data_root=cluster.remote_roots.permanent_data_root,
         runs_root=cluster.remote_roots.runs_root,

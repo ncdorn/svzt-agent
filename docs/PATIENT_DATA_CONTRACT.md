@@ -78,6 +78,25 @@ Iteration-1 simplified 0D seed behavior is also config-driven:
   `advance-iter --execute` after each `not_close` iteration and must promote
   before the next full-PA iteration. No patient asset is mutated.
 
+## Cap Naming
+
+Caps are classified by file name: the inlet cap must be named `inflow.vtp`,
+and outlet caps must name one side (`lpa…`/`rpa…`, or a separated
+`l_pa…`/`r_pa…` token). When a mesh's inlet cap has another name, set a
+run-scoped rename instead of editing patient data:
+
+```yaml
+patients:
+  - alias: "TST-STAN-2"
+    preop_mesh_surface_aliases:
+      r_pa_x_2.vtp: inflow.vtp
+```
+
+The tune driver then builds `<runs_root>/<run_id>/staged_inputs/preop-mesh-complete/`,
+a copy made of symlinks to the patient's files in which only the aliased caps
+have new link names, and uses it for every preop stage. Names must be bare
+`.vtp` file names, targets must be distinct and must not already exist.
+
 ## svZeroDTrees Mapping
 
 The resolved Oak assets map directly to svZeroDTrees path keys:
