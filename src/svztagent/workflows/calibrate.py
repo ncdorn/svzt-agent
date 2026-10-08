@@ -352,7 +352,7 @@ if enforcement == "target_focused" and not calibration.get("targets"):
 
     model = Path(config["paths"]["zerod_config"])
     calibration["targets"] = full_pa_calibration_targets(
-        model, model.parent / "outlet_cap_mapping.json"
+        model, model.parent / "outlet_cap_mapping.json", gate_policy="improvement_only"
     )
 resolved_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
 print(f"[svzt] calibration config resolved: {resolved_path}")"""

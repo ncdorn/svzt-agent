@@ -889,3 +889,4 @@ def test_calibration_job_requests_r_only_target_focused_and_resolves_targets(tmp
         "absolute_tolerance": 0.02,
     }
     assert targets["mpa_pressure"]["vessel"] == "branch0_seg0"
+    assert targets["gate_policy"] == "improvement_only"

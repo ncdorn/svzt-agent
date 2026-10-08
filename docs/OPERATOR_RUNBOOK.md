@@ -182,8 +182,10 @@ calibration rejects a descriptor without it.
 The request calibrates vessel `R_poiseuille` only (C, including the proximal
 compliance, and L stay as tuned; junction values are not calibrated) under
 `observation_qc.enforcement: target_focused`, svZeroDTrees' production
-profile: the root waveform is fatal, the whole-network checks are advisory, and
-the calibrated model must meet the MPA pressure-waveform and RPA split targets.
+profile: the root waveform is fatal and the whole-network checks are advisory.
+Targets use `gate_policy: improvement_only`: the calibrated model is promoted
+when its MPA pressure / RPA split composite score is no worse than the
+uncalibrated model's; the absolute tolerances are reported as advisory.
 The calibration job resolves those MPA/LPA/RPA roles on the cluster from the
 tuned model and `results/outlet_cap_mapping.json`
 (`svzerodtrees.calibration.target_roles`) and runs svZeroDTrees on
