@@ -75,7 +75,10 @@ single-node postprocess allocation instead of forcing a 4-worker cap:
 selected-preop uses `defaults.scheduler.cpus` when it is numeric, and explicit
 postop uses the resolved 3D `procs_per_node`. Both postprocess jobs request
 matching `--cpus-per-task`; selected-preop also uses `selected_preop_mem` when
-more than one worker is requested.
+more than one worker is requested. svSlicer is OpenMP-parallel within a frame:
+`svslicer_threads` (default 1) is exported as `OMP_NUM_THREADS`, selected-preop
+jobs request `workers x svslicer_threads` CPUs, and explicit postop splits its
+CPUs into `procs_per_node // svslicer_threads` frame workers.
 
 Run-scoped CFD output JSONs are built locally with:
 

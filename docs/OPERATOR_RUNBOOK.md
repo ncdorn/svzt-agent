@@ -164,10 +164,11 @@ Scheduler logs for that job are written under
 `postprocess_submission.json` and `postprocess_suite_metadata.json` so partial
 artifact generation and failure context are preserved. Resistance-map frame
 mapping now supports bounded parallelism controlled by
-`defaults.postprocess.resistance_map.workers`. Selected-preop jobs request
-matching `--cpus-per-task`, resolving `auto` against the selected-preop
-allocation, and when more than one worker is requested they also request
-`defaults.postprocess.resistance_map.selected_preop_mem`.
+`defaults.postprocess.resistance_map.workers`, each svSlicer using
+`svslicer_threads` OpenMP threads. Selected-preop jobs request
+`workers x svslicer_threads` CPUs, resolving `auto` workers against the
+selected-preop allocation, and when more than one CPU is requested they also
+request `defaults.postprocess.resistance_map.selected_preop_mem`.
 
 ### Full-PA calibration and seed promotion
 

@@ -652,7 +652,16 @@ def _render_postop_job_script(
         clinical_targets_payload=clinical_targets_payload,
         fallback_clinical_targets_csv=str(clinical_targets) if clinical_targets else None,
         inflow_csv=str(inflow_csv) if inflow_csv else None,
-        resistance_map_workers=postop_postprocess_cpus,
+        # Same CPU count as before; frame workers share it with svSlicer threads.
+        resistance_map_workers=max(
+            1,
+            postop_postprocess_cpus
+            // int(config.defaults.postprocess.resistance_map.svslicer_threads),
+        ),
+        svslicer_threads=min(
+            postop_postprocess_cpus,
+            int(config.defaults.postprocess.resistance_map.svslicer_threads),
+        ),
         camera_offset_dir=camera_offset_dir,
         camera_view_up=camera_view_up,
         cpus_per_task=postop_postprocess_cpus,

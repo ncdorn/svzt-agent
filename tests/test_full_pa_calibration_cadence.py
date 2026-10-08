@@ -774,3 +774,37 @@ def test_status_reports_driver_seed_generation_jobs(sample_config_files):
     assert seed.postprocess_job_id == "8101"
     assert seed.calibration_job_id == "8102"
     assert seed.calibration_state == "completed"
+
+
+def test_preop_postprocess_job_splits_cpus_between_frame_workers_and_svslicer_threads(
+    sample_config_files,
+):
+    defaults_path = sample_config_files / "config" / "defaults.yaml"
+    defaults_path.write_text(
+        defaults_path.read_text(encoding="utf-8").replace(
+            '      workers: "auto"\n      selected_preop_mem: "64G"\n',
+            '      workers: 6\n      svslicer_threads: 4\n      selected_preop_mem: "32G"\n',
+        ),
+        encoding="utf-8",
+    )
+    _write_patient(sample_config_files, tuning_model="full_pa", seed_policy="calibrated_full_pa")
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias=PATIENT_ALIAS,
+        run_id="run-postprocess-threads",
+        mode=ExecutionMode.DRY_RUN,
+        transfer_adapter=FakeFileTransferAdapter(),
+        scheduler_adapter=FakeSchedulerAdapter(),
+        remote_exec_adapter=FakeRemoteExecAdapter(),
+    )
+    script = (
+        result.local_job_script_path.parent / "postprocess" / "run_postprocess.sh"
+    ).read_text(encoding="utf-8")
+    assert "#SBATCH --cpus-per-task=24" in script
+    assert "#SBATCH --mem=32G" in script
+    assert "export OMP_NUM_THREADS=4\n" in script
+    assert '"resistance_map_workers": 6' in script
+    spec = _rendered_seed_generation(result.local_job_script_path.read_text(encoding="utf-8"))
+    argv = spec["postprocess"]["sbatch_argv"]
+    assert argv[argv.index("--cpus-per-task") + 1] == "24"

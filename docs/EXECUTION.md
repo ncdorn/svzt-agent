@@ -514,7 +514,14 @@ run—do not “repair” a failed stage by replacing its manifest evidence.
 ## Postprocess Configuration
 - Configure workflow-owned resistance-map postprocess defaults in YAML:
   - `defaults.postprocess.resistance_map.workers`
+  - `defaults.postprocess.resistance_map.svslicer_threads` (OpenMP threads per
+    svSlicer process, exported as `OMP_NUM_THREADS`; default 1)
   - `defaults.postprocess.resistance_map.selected_preop_mem`
+- Selected-preop postprocess jobs request `workers x svslicer_threads` CPUs;
+  explicit postop keeps its CPU count and runs
+  `procs_per_node // svslicer_threads` frame workers. One svSlicer frame takes
+  ~550 core-seconds at ~0.2 GB (TST-STAN-5, 1,890 slices) and scales ~linearly
+  to 8 threads, so CPU count, not memory, sets postprocess wall time.
 - `workers` accepts:
   - `auto`: resolve to the full single-node postprocess allocation that
     `svzt-agent` requests for the job. Selected-preop prefers a numeric

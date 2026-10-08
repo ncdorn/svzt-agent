@@ -198,7 +198,17 @@ class MonitoringDefaults(BaseModel):
 
 class ResistanceMapPostprocessConfig(BaseModel):
     workers: Literal["auto"] | int = "auto"
+    # OpenMP threads per svSlicer process (exported as OMP_NUM_THREADS).
+    # Postprocess jobs request workers x svslicer_threads CPUs.
+    svslicer_threads: int = 1
     selected_preop_mem: str = "64G"
+
+    @field_validator("svslicer_threads")
+    @classmethod
+    def _svslicer_threads_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("svslicer_threads must be > 0")
+        return value
 
     @field_validator("workers", mode="before")
     @classmethod

@@ -366,6 +366,7 @@ def _render_postprocess_script(
     partition: str | None = None,
     wall_time_hours: int | None = None,
     tuned_zerod_config_path: str | None = None,
+    svslicer_threads: int = 1,
 ) -> str:
     clinical_targets_expr = (
         json.dumps(clinical_targets_payload, sort_keys=True)
@@ -389,6 +390,10 @@ def _render_postprocess_script(
 set -euo pipefail
 
 {_python_bootstrap(config)}
+
+# svSlicer is OpenMP-parallel; each of the resistance-map frame workers gets
+# this many threads so workers x threads matches --cpus-per-task.
+export OMP_NUM_THREADS={int(svslicer_threads)}
 
 mkdir -p {json.dumps(output_dir)}
 
@@ -575,8 +580,13 @@ class PreparedPostprocessScript:
     submit_options: SlurmSubmitOptions
 
 
+def _svslicer_threads(config) -> int:
+    return int(config.defaults.postprocess.resistance_map.svslicer_threads)
+
+
 def _preop_postprocess_resources(config) -> tuple[int, str | None]:
-    cpus_per_task = _resolved_postprocess_worker_count(config)
+    """CPUs (frame workers x svSlicer threads) and memory for a preop postprocess job."""
+    cpus_per_task = _resolved_postprocess_worker_count(config) * _svslicer_threads(config)
     mem = None
     if cpus_per_task > 1:
         mem = config.defaults.postprocess.resistance_map.selected_preop_mem
@@ -639,11 +649,12 @@ def prepare_preop_postprocess_script(
         clinical_targets_payload=clinical_targets_payload,
         fallback_clinical_targets_csv=str(fallback_csv) if fallback_csv else None,
         inflow_csv=str(inflow_csv) if inflow_csv else None,
-        resistance_map_workers=cpus_per_task,
+        resistance_map_workers=_resolved_postprocess_worker_count(config),
         camera_offset_dir=camera_offset_dir,
         camera_view_up=camera_view_up,
         cpus_per_task=cpus_per_task,
         mem=mem,
+        svslicer_threads=_svslicer_threads(config),
         tuned_zerod_config_path=str(
             PurePosixPath(remote_layout["remote_results_dir"]).parent
             / TUNED_ZEROD_CONFIG_FILENAME
