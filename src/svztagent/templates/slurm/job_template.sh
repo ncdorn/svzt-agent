@@ -1102,6 +1102,35 @@ def _ensure_generated_prestress_file() -> Path:
     return generated
 
 
+MATCH_PROXIMAL_COMPLIANCE = "match_proximal_compliance"
+
+
+def _resolve_threed_elasticity_modulus(diagnostics_path_raw) -> None:
+    """Set threed_config E from the tuned seed when it asks to match the 0D.
+
+    elasticity_modulus = "match_proximal_compliance" gives the uniform 3D wall
+    the seed's total proximal compliance: E = matched_uniform_wall_eh / h from
+    this iteration's tuning_diagnostics.json.  Runs before any deformable 3D
+    setup (preop and prestress) so every stage uses the same E.
+    """
+    if threed_config.get("elasticity_modulus") != MATCH_PROXIMAL_COMPLIANCE:
+        return
+    from svzerodtrees.tune_bcs.tuning_diagnostics import matched_wall_elasticity_modulus
+
+    try:
+        if not diagnostics_path_raw:
+            raise ValueError("no tuning_diagnostics.json for this iteration")
+        record = matched_wall_elasticity_modulus(
+            diagnostics_path_raw, threed_config["shell_thickness"]
+        )
+    except Exception as exc:
+        _mark_needs_review(f"threed_elasticity_modulus_unresolved: {exc}")
+        return
+    threed_config["elasticity_modulus"] = record["elasticity_modulus"]
+    log["threed_elasticity_modulus"] = {"source": MATCH_PROXIMAL_COMPLIANCE, **record}
+    log["steps"].append(f"threed_elasticity_modulus_matched:{record['elasticity_modulus']:.6g}")
+
+
 def _record_threed_wall_match(diagnostics_path_raw) -> None:
     """Compare the deformable 3D wall with the tuned 0D proximal compliance.
 
@@ -1319,6 +1348,10 @@ def _prepare_and_submit_stage(
     )
 
     sim_cfg = dict(threed_config)
+    if sim_cfg.get("elasticity_modulus") == MATCH_PROXIMAL_COMPLIANCE:
+        raise RuntimeError(
+            "elasticity_modulus=match_proximal_compliance was not resolved before the 3D stage"
+        )
     prestress_file_path = _resolve_prestress_file_path(sim_cfg)
     if prestress_file_path:
         sim_cfg["prestress_file_path"] = prestress_file_path
@@ -1457,6 +1490,13 @@ try:
                 + ", ".join(missing_tuning_artifacts)
             )
             tuned_config_path = None
+        else:
+            skipped_diagnostics = remote_results_dir / "tuning_diagnostics.json"
+            skipped_diagnostics_raw = str(skipped_diagnostics) if skipped_diagnostics.exists() else None
+            if skipped_diagnostics_raw:
+                decision_payload["tuning_artifacts"]["tuning_diagnostics"] = skipped_diagnostics_raw
+            _resolve_threed_elasticity_modulus(skipped_diagnostics_raw)
+            _record_threed_wall_match(skipped_diagnostics_raw)
     elif not staged_seed_path.exists():
         iteration1_seed_source = str(
             iteration1_seed_config.get("source", "path")
@@ -1543,6 +1583,7 @@ try:
                 }
             )
             log["steps"].append("0d_tuning_completed")
+            _resolve_threed_elasticity_modulus(tuning.get("tuning_diagnostics"))
             _record_threed_wall_match(tuning.get("tuning_diagnostics"))
 
             snapshot_path_raw = tuning.get("pa_config_snapshot")

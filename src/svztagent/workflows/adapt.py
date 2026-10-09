@@ -537,6 +537,13 @@ target_stage = {json.dumps(target_stage)}
 inflow_source_path = Path({json.dumps(inflow_source_path)})
 mesh_scale_factor = float({json.dumps(str(mesh_scale_factor))})
 threed_config = json.loads({json.dumps(json.dumps(threed_config, sort_keys=True))})
+if threed_config.get("elasticity_modulus") == "match_proximal_compliance":
+    # Same E as the selected preop iteration: its tuned seed's matched wall.
+    from svzerodtrees.tune_bcs.tuning_diagnostics import matched_wall_elasticity_modulus
+
+    threed_config["elasticity_modulus"] = matched_wall_elasticity_modulus(
+        reduced_order_pa.parent / "tuning_diagnostics.json", threed_config["shell_thickness"]
+    )["elasticity_modulus"]
 partition = {json.dumps(partition)}
 account = {json.dumps(account) if account is not None else "None"}
 cluster_svfsiplus_path = {json.dumps(svfsiplus_path)}

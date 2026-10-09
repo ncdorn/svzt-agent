@@ -9,7 +9,12 @@ import yaml
 from pydantic import ValidationError
 
 from svztagent.config.load import _resolve_patient_impedance_config, load_workspace_config
-from svztagent.config.models import ImpedanceTuningConfig
+from svztagent.config.models import (
+    MATCH_PROXIMAL_COMPLIANCE,
+    ImpedanceTuningConfig,
+    PatientThreedOverrides,
+    ThreedTuningConfig,
+)
 from svztagent.config.tuning_checks import tuning_model_warnings
 from svztagent.workflows.tune_trees import _iteration_impedance_config
 
@@ -245,6 +250,63 @@ def test_job_records_threed_wall_vs_proximal_compliance(tmp_path, modulus, warns
     assert record["ratio"] == pytest.approx(modulus * 0.2 / 2.751e4)
     assert record["matched_elasticity_modulus"] == pytest.approx(2.751e4 / 0.2)
     assert bool(namespace["log"]["warnings"]) is warns
+
+
+def test_threed_config_accepts_match_proximal_compliance_for_deformable_walls():
+    assert ThreedTuningConfig(elasticity_modulus=MATCH_PROXIMAL_COMPLIANCE).elasticity_modulus == MATCH_PROXIMAL_COMPLIANCE
+    assert PatientThreedOverrides(elasticity_modulus=MATCH_PROXIMAL_COMPLIANCE).elasticity_modulus == MATCH_PROXIMAL_COMPLIANCE
+    with pytest.raises(ValidationError, match="only valid with wall_model=deformable"):
+        ThreedTuningConfig(
+            elasticity_modulus=MATCH_PROXIMAL_COMPLIANCE, wall_model="rigid", tissue_support=None
+        )
+    with pytest.raises(ValidationError):
+        ThreedTuningConfig(elasticity_modulus="stiff")
+
+
+def _driver_namespace(monkeypatch, modulus, matched):
+    import sys
+    import types
+
+    def matched_wall_elasticity_modulus(path, shell_thickness):
+        if matched is None:
+            raise ValueError("no matched_uniform_wall_eh")
+        return {"elasticity_modulus": matched / shell_thickness, "matched_uniform_wall_eh": matched}
+
+    module = types.ModuleType("svzerodtrees.tune_bcs.tuning_diagnostics")
+    module.matched_wall_elasticity_modulus = matched_wall_elasticity_modulus
+    monkeypatch.setitem(sys.modules, "svzerodtrees.tune_bcs.tuning_diagnostics", module)
+    reviews = []
+    namespace = {
+        "log": {"steps": [], "warnings": []},
+        "threed_config": {"elasticity_modulus": modulus, "shell_thickness": 0.2},
+        "_mark_needs_review": reviews.append,
+        "MATCH_PROXIMAL_COMPLIANCE": MATCH_PROXIMAL_COMPLIANCE,
+    }
+    exec(_template_function("_resolve_threed_elasticity_modulus"), namespace)
+    return namespace, reviews
+
+
+def test_job_resolves_matched_elasticity_modulus_from_tuning_diagnostics(monkeypatch):
+    namespace, reviews = _driver_namespace(monkeypatch, MATCH_PROXIMAL_COMPLIANCE, 4.91e4)
+    namespace["_resolve_threed_elasticity_modulus"]("/runs/r/iterations/iter-01/results/tuning_diagnostics.json")
+    assert namespace["threed_config"]["elasticity_modulus"] == pytest.approx(4.91e4 / 0.2)
+    assert namespace["log"]["threed_elasticity_modulus"]["source"] == MATCH_PROXIMAL_COMPLIANCE
+    assert not reviews
+
+
+def test_job_keeps_explicit_elasticity_modulus(monkeypatch):
+    namespace, reviews = _driver_namespace(monkeypatch, 1.375e5, 4.91e4)
+    namespace["_resolve_threed_elasticity_modulus"]("/unused.json")
+    assert namespace["threed_config"]["elasticity_modulus"] == 1.375e5
+    assert "threed_elasticity_modulus" not in namespace["log"]
+
+
+@pytest.mark.parametrize("diagnostics, matched", [(None, 4.91e4), ("/r/tuning_diagnostics.json", None)])
+def test_job_needs_review_when_matched_modulus_is_unavailable(monkeypatch, diagnostics, matched):
+    namespace, reviews = _driver_namespace(monkeypatch, MATCH_PROXIMAL_COMPLIANCE, matched)
+    namespace["_resolve_threed_elasticity_modulus"](diagnostics)
+    assert namespace["threed_config"]["elasticity_modulus"] == MATCH_PROXIMAL_COMPLIANCE
+    assert reviews and reviews[0].startswith("threed_elasticity_modulus_unresolved")
 
 
 LEAF_IMPEDANCE = {

@@ -36,10 +36,11 @@ Before starting:
    `diastolic_offset` covers patients without regurgitation.
 4. Record `regurgitation` and `wedge_pressure` in `config/clinical_targets.yaml`
    and run `svzt config validate`; resolve or acknowledge every tuning warning.
-   After the first tuning, check `threed_wall_vs_proximal_compliance` in
-   `iteration_driver_log.json`; if the ratio is outside 0.5–2, set the
-   patient's `tuning.threed.elasticity_modulus` to the logged
-   `matched_elasticity_modulus`.
+   With `tuning.threed.elasticity_modulus: "match_proximal_compliance"` the
+   job sets E per patient (`threed_elasticity_modulus` in
+   `iteration_driver_log.json`). With an explicit E, check
+   `threed_wall_vs_proximal_compliance` after the first tuning; if the ratio is
+   outside 0.5–2, use the logged `matched_elasticity_modulus`.
 5. Make sure the cluster's svZeroDTrees is current (`svzt update`); otherwise the
    job exits with code 8 before running.
 6. After tuning, read `results/tuning_diagnostics.json`: `published_fit`

@@ -205,8 +205,15 @@ Full evidence is in `svZeroDTrees/docs/pulmonary_tuning_model.md` §2.
      (`proximal_compliance.matched_uniform_wall_eh`). The job records the
      ratio of the 3D wall to it in `iteration_driver_log.json`
      (`threed_wall_vs_proximal_compliance`), with a warning outside 0.5–2×.
-     If a patient is outside, set `tuning.threed.elasticity_modulus` to
-     `matched_elasticity_modulus` in `patients.yaml`.
+   - `tuning.threed.elasticity_modulus: "match_proximal_compliance"` (the
+     workspace default since 2026-10-09) sets E = `matched_uniform_wall_eh` / h
+     per patient and iteration, from that iteration's `tuning_diagnostics.json`,
+     before any deformable 3D stage (preop, prestress; postop and adaptation
+     use the selected preop iteration's value). The driver log records it as
+     `threed_elasticity_modulus`; without `proximal_compliance` the iteration
+     goes to needs-review instead of running 3D. r_eff varies with PA size
+     (TST-STAN-1 0.47 cm to TST-STAN-9 0.98 cm), so one shared E left the 3D
+     wall up to 1.8× more compliant than the 0D model.
    - Only E changed, so the precomputed prestress files (TST-STAN-1, -5)
      remain usable: with uniform wall properties, the prestress that balances
      the mean traction is essentially independent of E. Tissue support carries

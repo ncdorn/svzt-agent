@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from .models import WorkspaceConfig
+from .models import MATCH_PROXIMAL_COMPLIANCE, WorkspaceConfig
 
 # Proximal PA radius range [cm] used to express the 3D wall as E*h/r.
 PROXIMAL_RADIUS_RANGE_CM = (0.2, 1.0)
@@ -89,7 +89,13 @@ def tuning_model_warnings(config: WorkspaceConfig, workspace_root: str | Path) -
                 "which clinical_targets.yaml does not list"
             )
         proximal = impedance.proximal_compliance
-        if proximal is not None and threed.wall_model == "deformable":
+        if threed.elasticity_modulus == MATCH_PROXIMAL_COMPLIANCE:
+            if proximal is None:
+                warnings.append(
+                    f"{patient.alias}: elasticity_modulus={MATCH_PROXIMAL_COMPLIANCE!r} needs "
+                    "tuning.impedance.proximal_compliance; the 3D stage will fail without it"
+                )
+        elif proximal is not None and threed.wall_model == "deformable":
             eh = float(threed.elasticity_modulus) * float(threed.shell_thickness)
             r_lo, r_hi = PROXIMAL_RADIUS_RANGE_CM
             ehr_lo, ehr_hi = eh / r_hi, eh / r_lo

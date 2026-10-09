@@ -436,10 +436,15 @@ class TissueSupportConfig(BaseModel):
         return self
 
 
+# threed.elasticity_modulus value that sets E per iteration to the uniform wall
+# with the tuned 0D seed's total proximal compliance (tuning_diagnostics.json).
+MATCH_PROXIMAL_COMPLIANCE = "match_proximal_compliance"
+
+
 class ThreedTuningConfig(BaseModel):
     wall_model: Literal["rigid", "deformable"] = "deformable"
     inflow_boundary_condition: Literal["neumann", "dirichlet"] = "neumann"
-    elasticity_modulus: float = 5062674.563165
+    elasticity_modulus: float | Literal["match_proximal_compliance"] = 5062674.563165
     poisson_ratio: float = 0.5
     shell_thickness: float = 0.12
     prestress_file: str | None = "auto"
@@ -461,7 +466,9 @@ class ThreedTuningConfig(BaseModel):
         mode="after",
     )
     @classmethod
-    def _must_be_positive_float(cls, value: float) -> float:
+    def _must_be_positive_float(cls, value: float | str) -> float | str:
+        if value == MATCH_PROXIMAL_COMPLIANCE:
+            return value
         if value <= 0.0:
             raise ValueError("value must be > 0")
         return value
@@ -511,11 +518,19 @@ class ThreedTuningConfig(BaseModel):
             raise ValueError("tissue_support is only valid with wall_model=deformable")
         return self
 
+    @model_validator(mode="after")
+    def _matched_modulus_requires_deformable(self) -> "ThreedTuningConfig":
+        if self.elasticity_modulus == MATCH_PROXIMAL_COMPLIANCE and self.wall_model != "deformable":
+            raise ValueError(
+                f"elasticity_modulus={MATCH_PROXIMAL_COMPLIANCE!r} is only valid with wall_model=deformable"
+            )
+        return self
+
 
 class PatientThreedOverrides(BaseModel):
     wall_model: Literal["rigid", "deformable"] | None = None
     inflow_boundary_condition: Literal["neumann", "dirichlet"] | None = None
-    elasticity_modulus: float | None = None
+    elasticity_modulus: float | Literal["match_proximal_compliance"] | None = None
     poisson_ratio: float | None = None
     shell_thickness: float | None = None
     prestress_file: str | None = None

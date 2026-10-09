@@ -731,6 +731,13 @@ tuned_clinical_targets = Path({json.dumps(str(clinical_targets))})
 tuned_zerod = Path({json.dumps(selected.remote_tuned_zerod_config)})
 canonical_coupler = Path({json.dumps(selected.remote_canonical_coupler)})
 threed_config = json.loads({json.dumps(json.dumps(threed_config, sort_keys=True))})
+if threed_config.get("elasticity_modulus") == "match_proximal_compliance":
+    # Same E as the selected preop iteration: its tuned seed's matched wall.
+    from svzerodtrees.tune_bcs.tuning_diagnostics import matched_wall_elasticity_modulus
+
+    threed_config["elasticity_modulus"] = matched_wall_elasticity_modulus(
+        tuned_zerod.parent / "tuning_diagnostics.json", threed_config["shell_thickness"]
+    )["elasticity_modulus"]
 mesh_scale_factor = float({json.dumps(str(mesh_scale_factor))})
 cluster_svfsiplus_path = {json.dumps(svfsiplus_path)}
 partition = {json.dumps(partition)}

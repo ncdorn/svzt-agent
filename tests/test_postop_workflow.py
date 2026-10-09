@@ -716,3 +716,24 @@ def test_run_postop_supports_sibling_repo_layout(sample_config_files):
     assert manifest.repos["svZeroDTrees"] == str(sibling_paths["svZeroDTrees"].resolve())
     assert manifest.repos["svZeroDSolver"] == str(sibling_paths["svZeroDSolver"].resolve())
     assert '"wall_model": "deformable"' in script_text
+
+
+def test_postop_script_resolves_matched_elasticity_modulus_from_selected_iteration(sample_config_files):
+    paths = _prepare_selected_run(sample_config_files, run_id="run-postop-matched-e")
+    manifest = read_manifest(paths.manifest)
+    manifest.remote["threed_defaults"]["elasticity_modulus"] = "match_proximal_compliance"
+    write_manifest(manifest, paths.manifest)
+
+    result = run_postop(
+        workspace_root=sample_config_files,
+        run_id="run-postop-matched-e",
+        mode=ExecutionMode.DRY_RUN,
+        transfer_adapter=FakeFileTransferAdapter(),
+        scheduler_adapter=FakeSchedulerAdapter(),
+        remote_exec_adapter=FakeRemoteExecAdapter(),
+    )
+
+    script_text = result.local_job_script_path.read_text(encoding="utf-8")
+    assert 'if threed_config.get("elasticity_modulus") == "match_proximal_compliance":' in script_text
+    assert 'tuned_zerod.parent / "tuning_diagnostics.json"' in script_text
+    assert script_text.index("matched_wall_elasticity_modulus(") < script_text.index("def _sync_postop_inflow")
