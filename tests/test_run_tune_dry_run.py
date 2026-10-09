@@ -1241,7 +1241,14 @@ def test_run_tune_iter_reuse_preop_3d_uses_only_completed_evidence(sample_config
     logs_dir = tmp_path / "logs"
     logs_dir.mkdir()
     preop_dir = tmp_path / "preop"
-    namespace = {"json": json, "re": re, "Path": Path, "shutil": _shutil, "remote_logs_dir": logs_dir}
+    namespace = {
+        "json": json,
+        "re": re,
+        "Path": Path,
+        "shutil": _shutil,
+        "remote_logs_dir": logs_dir,
+        "driver_phase": "pre3d",
+    }
     exec(compile(module, "driver", "exec"), namespace)
     check = namespace["_completed_preop_job_for_reuse"]
 

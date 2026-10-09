@@ -209,6 +209,19 @@ skip_zerod_tuning = json.loads(r'''{{SKIP_ZEROD_TUNING_JSON}}''')
 # the previous driver run, with result VTUs present) and rerun only the
 # post-3D steps.  Missing evidence is needs_review, never a silent resubmit.
 reuse_preop_3d = json.loads(r'''{{REUSE_PREOP_3D_JSON}}''')
+# Split driver: the pre-3D job (default) submits the preop 3D run, then this
+# same script as a post-3D job (--dependency=afterany:<3D>,
+# SVZT_DRIVER_PHASE=post3d) and exits instead of holding an allocation while the
+# 3D run waits and runs.  The post-3D job reuses the 3D result like
+# --reuse-preop-3d, with the 3D job's scheduler state as the evidence.
+DRIVER_HANDOFF_FILENAME = "iteration_handoff.json"
+driver_phase = (os.environ.get("SVZT_DRIVER_PHASE") or "pre3d").strip().lower()
+if driver_phase not in {"pre3d", "post3d"}:
+    raise SystemExit(f"[svzt] unknown SVZT_DRIVER_PHASE={driver_phase!r}")
+if driver_phase == "post3d":
+    reuse_preop_3d = True
+    skip_zerod_tuning = True
+handed_off_to_post3d = False
 # Next-seed generation strategy chosen by the agent's seed policy:
 # - "reduced_rri": regenerate simplified_zerod_tuned_RRI.json inline on not_close.
 # - "calibrated_full_pa": after not_close or converged, submit the pre-rendered
@@ -965,7 +978,14 @@ def _completed_preop_job_for_reuse(preop_dir: Path) -> tuple[str | None, str | N
         return None, f"previous driver log unreadable: {previous_log_path} ({exc})"
     job_id = previous_log.get("preop_job_id")
     terminal = str(previous_log.get("preop_terminal_state") or "")
-    if not job_id or terminal.upper() != "COMPLETED" or "preop_completed" not in (previous_log.get("steps") or []):
+    if driver_phase == "post3d":
+        if not job_id or "post3d_driver_submitted" not in " ".join(previous_log.get("steps") or []):
+            return None, f"pre-3D driver log does not record a 3D handoff (job={job_id})"
+        state, _source = _query_state(str(job_id))
+        log["preop_terminal_state"] = state
+        if state != "COMPLETED":
+            return None, f"preop simulation did not complete successfully: {state or 'unknown'}"
+    elif not job_id or terminal.upper() != "COMPLETED" or "preop_completed" not in (previous_log.get("steps") or []):
         return None, (
             f"previous driver log does not record a completed preop job "
             f"(job={job_id}, state={terminal or None})"
@@ -973,7 +993,8 @@ def _completed_preop_job_for_reuse(preop_dir: Path) -> tuple[str | None, str | N
     if _latest_result_vtu(preop_dir) is None:
         return None, f"no preop result VTUs under {preop_dir}"
     # This run overwrites the driver log; keep the one that produced the 3D result.
-    shutil.copy2(previous_log_path, remote_logs_dir / f"iteration_driver_log.preop_{job_id}.json")
+    kept_name = "pre3d" if driver_phase == "post3d" else "preop"
+    shutil.copy2(previous_log_path, remote_logs_dir / f"iteration_driver_log.{kept_name}_{job_id}.json")
     return str(job_id), None
 
 
@@ -1327,6 +1348,31 @@ def _wait_for_completion(job_id: str, poll_seconds: int, timeout_seconds: int) -
         time.sleep(max(poll_seconds, 5))
 
 
+def _submit_post3d_driver(preop_job_id: str) -> str:
+    """Queue this script as the post-3D job, to start once the 3D run ends."""
+    script_path = remote_iter_dir / "run_tune_iter.sh"
+    if not script_path.exists():
+        raise RuntimeError(f"driver script missing: {script_path}")
+    argv = [
+        "sbatch",
+        "--parsable",
+        f"--dependency=afterany:{preop_job_id}",
+        "--job-name",
+        os.environ.get("SLURM_JOB_NAME") or run_id,
+        "--export",
+        "ALL,SVZT_DRIVER_PHASE=post3d",
+        "--chdir",
+        str(script_path.parent),
+        str(script_path),
+    ]
+    proc = subprocess.run(
+        argv, capture_output=True, env=_nested_sbatch_env(), text=True, check=False
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise RuntimeError(f"sbatch failed rc={proc.returncode}: {proc.stderr.strip()}")
+    return proc.stdout.strip().split(";")[0].strip()
+
+
 def _prepare_and_submit_stage(
     *,
     stage_name: str,
@@ -1655,7 +1701,9 @@ try:
         preop_dir = remote_iter_dir / "preop"
         reused_job_id, reuse_error = _completed_preop_job_for_reuse(preop_dir)
         if reuse_error is not None:
-            _mark_needs_review(f"reuse_preop_3d: {reuse_error}")
+            _mark_needs_review(
+                reuse_error if driver_phase == "post3d" else f"reuse_preop_3d: {reuse_error}"
+            )
         else:
             log["preop_job_id"] = reused_job_id
             log["preop_terminal_state"] = "COMPLETED"
@@ -1675,13 +1723,28 @@ try:
             log["preop_job_id"] = preop_job_id
             log["steps"].append("preop_submitted")
 
-            ok, terminal = _wait_for_completion(
-                preop_job_id,
-                poll_seconds=poll_seconds,
-                timeout_seconds=timeout_seconds,
-            )
-            log["preop_terminal_state"] = terminal
-        if not ok:
+            post3d_job_id = None
+            try:
+                post3d_job_id = _submit_post3d_driver(preop_job_id)
+            except Exception as exc:
+                log["warnings"].append(
+                    f"post3d_driver_submission_failed: {exc}; waiting for the 3D run in this job"
+                )
+            if post3d_job_id:
+                log["post3d_job_id"] = post3d_job_id
+                log["steps"].append(f"post3d_driver_submitted:{post3d_job_id}")
+                handed_off_to_post3d = True
+                ok, terminal = True, None
+            else:
+                ok, terminal = _wait_for_completion(
+                    preop_job_id,
+                    poll_seconds=poll_seconds,
+                    timeout_seconds=timeout_seconds,
+                )
+                log["preop_terminal_state"] = terminal
+        if handed_off_to_post3d:
+            pass
+        elif not ok:
             _mark_needs_review(f"preop simulation did not complete successfully: {terminal}")
         else:
             log["steps"].append("preop_completed")
@@ -1805,12 +1868,26 @@ decision_payload.update(
     }
 )
 
-write_iteration_metrics(metrics_path, metrics_payload)
-write_iteration_decision(decision_path, decision_payload)
-
 with (remote_logs_dir / "iteration_driver_log.json").open("w", encoding="utf-8") as stream:
     json.dump(log, stream, indent=2, sort_keys=True)
 
-print(f"[svzt] iteration metrics written: {metrics_path}")
-print(f"[svzt] iteration decision written: {decision_path}")
+handoff_path = remote_results_dir / DRIVER_HANDOFF_FILENAME
+if handed_off_to_post3d and decision_payload["decision"] != "needs_review":
+    # The post-3D job writes the decision; the agent follows this handoff.
+    handoff = {
+        "run_id": run_id,
+        "iteration": iteration,
+        "pre3d_job_id": os.environ.get("SLURM_JOB_ID"),
+        "preop_job_id": log.get("preop_job_id"),
+        "post3d_job_id": log.get("post3d_job_id"),
+    }
+    handoff_path.write_text(json.dumps(handoff, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"[svzt] 3D run {handoff['preop_job_id']} handed off to post-3D driver {handoff['post3d_job_id']}")
+else:
+    if handoff_path.exists() and driver_phase == "pre3d":
+        handoff_path.unlink()
+    write_iteration_metrics(metrics_path, metrics_payload)
+    write_iteration_decision(decision_path, decision_payload)
+    print(f"[svzt] iteration metrics written: {metrics_path}")
+    print(f"[svzt] iteration decision written: {decision_path}")
 PY

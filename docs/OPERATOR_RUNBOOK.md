@@ -302,6 +302,12 @@ svzt continue <run-id> --execute
 svzt run tune-iter --cluster sherlock --patient <patient-alias> --run-id <run-id> --execute
 ```
 Add `--skip-zerod-tuning` to reuse existing 0D tuning artifacts and only redo the 3D submission.
+Each iteration's tune driver runs as two short jobs around the preop 3D run:
+the pre-3D job (tuning, 3D setup and submission) and the post-3D job (queued
+`afterany` on the 3D job: metrics, gate, postprocess/calibration submission).
+`svzt watch`/`status` follow the handoff via `results/iteration_handoff.json`.
+To stop an iteration while its 3D run is queued, cancel both the 3D job and
+the post-3D job (same job name as the tune job).
 To replace a job that is still queued or running, `scancel` it and run
 `svzt status <run-id>` first: `--execute` refuses, before touching the cluster,
 while the manifest still records the run's job as pending or running.

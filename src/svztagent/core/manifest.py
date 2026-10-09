@@ -609,6 +609,74 @@ def record_iteration_scheduler_state(
     return updated
 
 
+def record_driver_handoff(
+    manifest: RunManifest,
+    *,
+    iteration: int,
+    from_job_id: str,
+    to_job_id: str,
+    preop_job_id: str | None = None,
+    at: str | None = None,
+) -> RunManifest:
+    """Track the post-3D driver job after the pre-3D tune job handed off to it.
+
+    The split tune driver ends once it has queued the preop 3D run and a
+    post-3D copy of itself (afterany on the 3D job); the post-3D job writes the
+    iteration decision.  ``from_job_id`` must be the iteration's tracked tune
+    job and must have ended.  The earlier job stays in ``jobs`` and the
+    iteration's notes.
+    """
+    timestamp = at or _utc_now_iso()
+    tracker = manifest.tuning_iteration_tracker
+    record = next((rec for rec in tracker.iterations if rec.iteration == iteration), None)
+    if record is None or str(record.tune_job_id or "") != str(from_job_id):
+        raise ConfigError(
+            f"iteration {iteration} does not track tune job {from_job_id}; cannot hand off to {to_job_id}"
+        )
+    if _current_lifecycle_state(manifest) not in TERMINAL_STATES:
+        raise ConfigError(
+            f"tune job {from_job_id} has not ended; cannot hand off to {to_job_id}"
+        )
+    updated = manifest.model_copy(deep=True)
+    previous_jobs = [dict(job) for job in updated.jobs]
+    template = previous_jobs[0] if previous_jobs else {}
+    updated.jobs = [
+        {
+            "job_id": str(to_job_id),
+            "status": RunLifecycleState.SUBMITTED.value.upper(),
+            "scheduler": template.get("scheduler") or updated.execution.scheduler_type,
+            "mode": template.get("mode") or "execute",
+            "submitted_at": timestamp,
+            "job_script_path": template.get("job_script_path") or updated.execution.job_script_path,
+            "handoff_from_job_id": str(from_job_id),
+            "preop_job_id": preop_job_id,
+        },
+        *previous_jobs,
+    ]
+    updated.execution.submitted_job_id = str(to_job_id)
+    updated.execution.submission_timestamp = timestamp
+    updated.execution.terminal_reason = None
+    note = (
+        f"Post-3D driver job {to_job_id} continues tune job {from_job_id}"
+        + (f" after preop 3D job {preop_job_id}" if preop_job_id else "")
+    )
+    updated = record_lifecycle_transition(
+        updated,
+        to_state=RunLifecycleState.SUBMITTED,
+        normalized_scheduler_state=RunLifecycleState.SUBMITTED,
+        note=note,
+        at=timestamp,
+    )
+    record = next(rec for rec in updated.tuning_iteration_tracker.iterations if rec.iteration == iteration)
+    record.tune_job_id = str(to_job_id)
+    record.tune_job_state = RunLifecycleState.SUBMITTED.value
+    record.status = "submitted"
+    record.notes.append(note)
+    record.updated_at = timestamp
+    updated.updated_at = timestamp
+    return updated
+
+
 def mark_iteration_decision(
     manifest: RunManifest,
     *,

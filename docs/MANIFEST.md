@@ -40,6 +40,20 @@ Each iteration record can include:
 - carry-forward config (`regenerated_config_path`)
 - legacy postop submission intent / job id, if present in older iteration artifacts
 
+Split driver handoff: when the pre-3D tune job ends after queueing its
+post-3D job (`results/iteration_handoff.json`), `record_driver_handoff` makes
+the post-3D job the iteration's `tune_job_id` and `execution.submitted_job_id`,
+moves the lifecycle from the ended state to `submitted` with a note naming
+both jobs and the preop 3D job, adds a note to the iteration record, and puts
+the post-3D job first in `jobs` (entry fields `handoff_from_job_id`,
+`preop_job_id`) with the pre-3D job kept after it. It is not a re-submission:
+the iteration's outcome fields are left as they are. It refuses unless the
+tracked tune job is the handoff's pre-3D job and has ended.
+
+`svzt run tune-iter --execute` refuses before any remote step while the
+manifest records the run's job as pending or running; cancel the job and run
+`svzt status` first.
+
 Re-submitting an iteration (`svzt run tune-iter --execute` with a new tune job)
 starts a new attempt: the record's decision, metrics, deltas,
 `regenerated_config_path`, `calibrated_seed_path`, and postop intent are

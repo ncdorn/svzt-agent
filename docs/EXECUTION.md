@@ -675,8 +675,18 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
       caps must exist in the postop mesh under the same names.
   - validates the canonical `svzerod_3Dcoupling.json` directly; it does not require or generate deprecated `svZeroD_interface.dat`
   - links the generated coupling input into the patient preop 3D model directory for that iteration
-  - submits preop 3D (`SimulationDirectory`) and waits up to the configured
-    `wait_timeout_seconds` value, defaulting to 43200 seconds
+  - submits preop 3D (`SimulationDirectory`), then queues the same script as a
+    post-3D job (`sbatch --dependency=afterany:<3D job>`,
+    `SVZT_DRIVER_PHASE=post3d`), writes `results/iteration_handoff.json`
+    (`pre3d_job_id`, `preop_job_id`, `post3d_job_id`) and ends without a
+    decision, so no allocation is held while the 3D run waits and runs. The
+    post-3D job takes the 3D job's scheduler state (`sacct`) as evidence: if
+    it is `COMPLETED` and `preop/` holds result VTUs, it runs the post-3D steps
+    below as `--reuse-preop-3d` does (keeping the pre-3D log as
+    `logs/iteration_driver_log.pre3d_<3D job>.json`); otherwise the iteration
+    is `needs_review` (`preop simulation did not complete successfully: <state>`).
+    If queueing the post-3D job fails, the pre-3D job falls back to waiting for
+    the 3D run itself, up to `wait_timeout_seconds` (queue time included)
   - requires `results/mpa_pressure_vs_time.csv` plus preop flow split for gating
   - `not_close` regenerates a reduced PA config for reduced-RRI or explicitly
     selected legacy-policy continuation; `advance-iter --execute` automatically

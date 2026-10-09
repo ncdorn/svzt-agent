@@ -60,6 +60,17 @@ Defaults:
 - In auto-advance mode, `timeout` and `max polls` apply to both the tuning-job
   watch and any required full-PA calibration wait.
 
+## Split tune driver handoff
+- The tune driver's pre-3D job ends after queueing the preop 3D run and its
+  post-3D job (docs/EXECUTION.md). When the tracked tune job has ended,
+  `watch` (including auto-advance) and `status` pull
+  `results/iteration_handoff.json`; if it names that job as `pre3d_job_id` for
+  the current iteration, the manifest switches to the `post3d_job_id`
+  (`record_driver_handoff`, docs/MANIFEST.md) and `watch` keeps polling it.
+  Fetch, decision pull, and auto-advance act on the post-3D job's end.
+- A missing or stale handoff (another job or iteration) leaves the ended job
+  as the terminal state, as before the split.
+
 ## Post-terminal behavior
 - `--fetch-on-complete` triggers deterministic artifact fetch after `completed`.
 - Optional fetch-on-failure is controlled by `defaults.monitoring.fetch_on_failure`.

@@ -17,6 +17,9 @@
 
 This file is too central to remain the long-term implementation unit.
 
+Already extracted: split-driver handoff following lives in
+`src/svztagent/workflows/driver_handoff.py` (called from watch and status).
+
 ## Proposed Package Layout
 - `src/svztagent/workflows/tune_trees/types.py`
   - workflow-local result objects such as execution, status, fetch, and auto-advance return types

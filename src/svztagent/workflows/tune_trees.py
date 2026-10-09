@@ -70,6 +70,7 @@ from svztagent.core.seed_policy import (
 )
 from svztagent.core.state import RunLifecycleState, coerce_run_lifecycle_state
 from svztagent.core.transitions import can_transition
+from svztagent.workflows.driver_handoff import follow_driver_handoff
 from svztagent.core.status import NormalizedRunState
 from svztagent.hpc.executor import CommandExecutor
 from svztagent.hpc.interfaces import (
@@ -2136,6 +2137,14 @@ def query_run_status(
         state=poll_result.normalized_state,
     )
     write_manifest(updated, local_paths.manifest)
+    if follow_driver_handoff(local_paths=local_paths, transfer_adapter=transfer_adapter):
+        return query_run_status(
+            workspace_root=root,
+            run_id=validated_run_id,
+            mode=mode,
+            scheduler_adapter=scheduler_adapter,
+            transfer_adapter=transfer_adapter,
+        )
 
     tracker = updated.tuning_iteration_tracker
     current_iteration = tracker.current_iteration
@@ -2349,13 +2358,17 @@ def watch_run_lifecycle(
     root = detect_workspace_root(workspace_root)
     local_paths, _manifest, config, cluster = _resolve_cluster_for_run(root, validated_run_id)
 
-    if scheduler_adapter is None:
-        _, scheduler_adapter, _ = _build_default_adapters(
+    if scheduler_adapter is None or transfer_adapter is None:
+        default_transfer, default_scheduler, _ = _build_default_adapters(
             cluster=cluster,
             config=config,
             run_id=validated_run_id,
             mode=mode,
         )
+        scheduler_adapter = scheduler_adapter or default_scheduler
+        handoff_transfer_adapter = transfer_adapter or default_transfer
+    else:
+        handoff_transfer_adapter = transfer_adapter
 
     effective_poll_interval = (
         poll_interval_seconds
@@ -2371,7 +2384,17 @@ def watch_run_lifecycle(
     )
 
     monitor = RunMonitorService(scheduler_adapter=scheduler_adapter)
-    summary = monitor.watch(manifest_path=local_paths.manifest, settings=settings)
+    observations = []
+    first_summary = None
+    while True:
+        summary = monitor.watch(manifest_path=local_paths.manifest, settings=settings)
+        first_summary = first_summary or summary
+        observations.extend(summary.observations)
+        # A split tune driver's pre-3D job ends once its post-3D job is queued.
+        if follow_driver_handoff(
+            local_paths=local_paths, transfer_adapter=handoff_transfer_adapter
+        ) is None:
+            break
 
     fetch_error: str | None = None
     fetch_attempted = False
@@ -2425,7 +2448,7 @@ def watch_run_lifecycle(
     return WatchResult(
         run_id=validated_run_id,
         job_id=summary.job_id,
-        initial_state=summary.initial_state,
+        initial_state=first_summary.initial_state,
         final_state=final_state,
         terminal_state=terminal_state,
         raw_scheduler_state=manifest.execution.raw_scheduler_state,
@@ -2439,7 +2462,7 @@ def watch_run_lifecycle(
         fetch_attempted=fetch_attempted or manifest.execution.fetch_attempted,
         fetch_succeeded=fetch_succeeded if fetch_attempted else manifest.execution.fetch_succeeded,
         fetch_error=fetch_error,
-        observations=summary.observations,
+        observations=observations,
     )
 
 

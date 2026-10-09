@@ -78,6 +78,15 @@ default `SlurmSubmitOptions`; the generic Slurm adapter remains responsible
 only for command construction, and injected scheduler adapters remain
 unchanged.
 
+The tune driver is split around the preop 3D run so it holds no allocation
+while that run queues and runs: the pre-3D job queues the post-3D job itself
+(`afterany` on the 3D job) and writes `results/iteration_handoff.json`.
+`workflows/driver_handoff.py` owns following that handoff on the agent side
+(`follow_driver_handoff`, called by `watch` and `status`); the manifest
+mutation is `core/manifest.py::record_driver_handoff`. Note that Sherlock
+counts memory as CPUs (32 GB is about 5 cores), so the driver's `mem` sets its
+footprint too.
+
 ## Explicit postop/adaptation workflows
 - `svzt preop select` records the selected converged preop iteration and stages
   selected-preop postprocess.

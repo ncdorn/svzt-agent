@@ -127,7 +127,7 @@ def test_auto_advance_watch_converges(sample_config_files):
     pull_includes = [
         include
         for _, _, include, _, direction in transfer.sync_calls
-        if direction == SyncDirection.PULL
+        if direction == SyncDirection.PULL and include != ["iteration_handoff.json"]
     ]
     assert pull_includes
     assert all("full_pa_zerod.json" in include for include in pull_includes)

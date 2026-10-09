@@ -105,7 +105,9 @@ def test_watch_run_lifecycle_fetch_on_complete(sample_config_files):
     assert result.fetch_attempted is True
     assert result.fetch_succeeded is True
     assert result.final_state == RunLifecycleState.FETCHED
-    assert len(fetch_transfer.sync_calls) == 3
+    handoff_pulls = [call for call in fetch_transfer.sync_calls if call[2] == ["iteration_handoff.json"]]
+    assert len(handoff_pulls) == 1
+    assert len(fetch_transfer.sync_calls) - len(handoff_pulls) == 3
 
 
 def test_cli_watch_terminal_failure_returns_1(sample_config_files, monkeypatch, capsys):
