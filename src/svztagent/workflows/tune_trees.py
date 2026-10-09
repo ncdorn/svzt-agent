@@ -69,6 +69,7 @@ from svztagent.core.seed_policy import (
     uses_calibrated_full_pa,
 )
 from svztagent.core.state import RunLifecycleState, coerce_run_lifecycle_state
+from svztagent.core.transitions import can_transition
 from svztagent.core.status import NormalizedRunState
 from svztagent.hpc.executor import CommandExecutor
 from svztagent.hpc.interfaces import (
@@ -1556,6 +1557,24 @@ def _build_default_adapters(
     return transfer, scheduler, remote
 
 
+def _require_resubmittable(manifest, run_id: str) -> None:
+    """Fail before any remote side effect if the run cannot move to SUBMITTED.
+
+    The SUBMITTED transition is recorded after sbatch; rejecting it there left a
+    live job the manifest did not record (TST-STAN-1/2/3/9, 2026-10-09, after
+    cancelling jobs the manifest still showed as running).
+    """
+    current = coerce_run_lifecycle_state(manifest.execution.lifecycle_state)
+    if can_transition(current, RunLifecycleState.SUBMITTED):
+        return
+    raise ConfigError(
+        f"run {run_id} is '{current.value}' in its manifest "
+        f"(job {manifest.execution.submitted_job_id or '<none>'}), so a new job cannot be "
+        f"recorded; cancel that job if needed and run 'svzt status {run_id}' to record its "
+        "terminal state before resubmitting"
+    )
+
+
 def run_tune_trees(
     workspace_root: str | Path,
     cluster_name: str,
@@ -1597,6 +1616,8 @@ def run_tune_trees(
     )
 
     manifest = read_manifest(local_paths.manifest)
+    if mode == ExecutionMode.EXECUTE:
+        _require_resubmittable(manifest, resolved_run_id)
     resolved_iteration = _resolve_iteration(manifest, iteration)
     calibration_policy = getattr(patient, "calibration", None)
     seed_policy = (

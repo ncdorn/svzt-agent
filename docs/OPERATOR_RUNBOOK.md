@@ -302,6 +302,9 @@ svzt continue <run-id> --execute
 svzt run tune-iter --cluster sherlock --patient <patient-alias> --run-id <run-id> --execute
 ```
 Add `--skip-zerod-tuning` to reuse existing 0D tuning artifacts and only redo the 3D submission.
+To replace a job that is still queued or running, `scancel` it and run
+`svzt status <run-id>` first: `--execute` refuses, before touching the cluster,
+while the manifest still records the run's job as pending or running.
 Add `--iteration N --reuse-preop-3d` instead when the iteration's preop 3D run
 already completed and only a post-3D step failed (centerline pressure CSV,
 metrics, gate, postprocess/calibration submission): it implies

@@ -50,3 +50,44 @@ def test_run_tune_with_fake_adapters_executes_submission(sample_config_files):
     assert manifest.jobs[0]["mode"] == "execute"
     assert manifest.tuning_iteration_tracker.current_iteration == 1
     assert manifest.tuning_iteration_tracker.iterations[0].tune_job_id == "555123"
+
+
+def test_resubmit_refuses_before_side_effects_while_manifest_job_is_running(sample_config_files):
+    import pytest
+
+    from svztagent.core.errors import ConfigError
+    from svztagent.core.manifest import record_lifecycle_transition, write_manifest
+    from svztagent.core.state import RunLifecycleState
+
+    def _submit(scheduler, transfer):
+        return run_tune_trees(
+            workspace_root=sample_config_files,
+            cluster_name="sherlock",
+            patient_alias="TST-STAN-x",
+            run_id="run-fake-busy",
+            iteration=1,
+            mode=ExecutionMode.EXECUTE,
+            transfer_adapter=transfer,
+            scheduler_adapter=scheduler,
+            remote_exec_adapter=FakeRemoteExecAdapter(),
+        )
+
+    _submit(FakeSchedulerAdapter(), FakeFileTransferAdapter())
+    manifest_path = sample_config_files / "runs" / "run-fake-busy" / "manifest.yaml"
+    write_manifest(
+        record_lifecycle_transition(
+            read_manifest(manifest_path),
+            to_state=RunLifecycleState.RUNNING,
+            normalized_scheduler_state=RunLifecycleState.RUNNING,
+        ),
+        manifest_path,
+    )
+    job_before = read_manifest(manifest_path).execution.submitted_job_id
+
+    scheduler, transfer = FakeSchedulerAdapter(), FakeFileTransferAdapter()
+    with pytest.raises(ConfigError, match="is 'running' in its manifest"):
+        _submit(scheduler, transfer)
+
+    assert scheduler.submit_calls == []
+    assert transfer.ensure_calls == [] and transfer.push_calls == []
+    assert read_manifest(manifest_path).execution.submitted_job_id == job_before
