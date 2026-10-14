@@ -1048,7 +1048,7 @@ def ensure_iteration_calibration(
     manifest = read_manifest(local_paths.manifest)
     record = _record_for_iteration(manifest, iteration)
 
-    if record is None and execute:
+    if (record is None or record.promotion_status != "promoted") and execute:
         transfer_adapter, scheduler_adapter, remote_exec_adapter = _default_adapters_if_missing(
             root,
             manifest,
@@ -1060,7 +1060,8 @@ def ensure_iteration_calibration(
         # The driver's report decides between recording and falling back, so
         # it must be present locally before a fallback could duplicate jobs.
         _pull_decision_if_missing(manifest, local_paths, iteration, transfer_adapter)
-    if record is None and record_driver_submitted_calibration(root, validated_run_id, iteration):
+    # Also with a record: a newer driver attempt replaces a stale one.
+    if record_driver_submitted_calibration(root, validated_run_id, iteration):
         manifest = read_manifest(local_paths.manifest)
         record = _record_for_iteration(manifest, iteration)
 

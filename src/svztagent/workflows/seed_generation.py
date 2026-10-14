@@ -204,6 +204,11 @@ def record_driver_submitted_calibration(workspace_root: Path, run_id: str, itera
     Returns ``True`` when the driver reported both jobs and the manifest now
     holds their records, ``False`` when the driver did not submit them (older
     driver, failed submission, or no decision fetched yet).  Idempotent.
+
+    A record for another calibration job (an earlier attempt of this
+    iteration, e.g. a chain cancelled before a 3D rerun) is replaced: the new
+    postprocess job changes the input identity, so ``record_calibration_submission``
+    marks the old record ``invalidated``.  A promoted record is kept.
     """
 
     from svztagent.workflows.calibrate import (
@@ -217,19 +222,23 @@ def record_driver_submitted_calibration(workspace_root: Path, run_id: str, itera
 
     local_paths = build_local_run_paths(workspace_root, run_id)
     manifest = read_manifest(local_paths.manifest)
-    if _record_for_iteration(manifest, iteration) is not None:
-        return True
+    existing = _record_for_iteration(manifest, iteration)
     block = load_driver_seed_generation(local_paths, iteration)
     if (
         block is None
         or block.get("strategy") != CALIBRATED_FULL_PA_STRATEGY
         or block.get("status") != DRIVER_SUBMITTED_STATUS
     ):
-        return False
+        return existing is not None
     postprocess = block.get("postprocess") or {}
     calibration = block.get("calibration") or {}
     postprocess_job_id = str(postprocess.get("job_id") or "").strip()
     calibration_job_id = str(calibration.get("job_id") or "").strip()
+    if existing is not None and (
+        existing.promotion_status == "promoted"
+        or str(existing.scheduler_job_id or "") == calibration_job_id
+    ):
+        return True
     tuned_remote = str(block.get("tuned_zerod_config") or "").strip()
     if not postprocess_job_id or not calibration_job_id or not tuned_remote:
         raise ConfigError(
@@ -237,7 +246,8 @@ def record_driver_submitted_calibration(workspace_root: Path, run_id: str, itera
             "without postprocess/calibration job IDs and a tuned model path"
         )
 
-    if _postprocess_record_for_iteration(manifest, iteration) is None:
+    known_postprocess = _postprocess_record_for_iteration(manifest, iteration)
+    if known_postprocess is None or str(known_postprocess.scheduler_job_id or "") != postprocess_job_id:
         pp_local = _selected_preop_local_paths(workspace_root, run_id, iteration)
         manifest = record_postprocess_submission(
             manifest,

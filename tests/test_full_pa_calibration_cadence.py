@@ -490,7 +490,9 @@ def test_driver_submits_postprocess_then_dependent_calibration(sample_config_fil
     assert written["paths"]["zerod_config"] == str(tuned.resolve())
 
 
-def _write_driver_decision(paths, *, decision: str, status: str = "submitted") -> None:
+def _write_driver_decision(
+    paths, *, decision: str, status: str = "submitted", job_ids: tuple[str, str] = ("8101", "8102")
+) -> None:
     run_root = f"/scratch/svzt_runs/{paths.run_dir.name}/iterations/iter-01"
     manifest = read_manifest(paths.manifest)
     remote_run = manifest.execution.remote_run_dir or manifest.remote.get("remote_run_dir")
@@ -512,8 +514,7 @@ def _write_driver_decision(paths, *, decision: str, status: str = "submitted") -
         "error": None if status == "submitted" else "RuntimeError: sbatch failed",
     }
     if status == "submitted":
-        seed["postprocess"]["job_id"] = "8101"
-        seed["calibration"]["job_id"] = "8102"
+        seed["postprocess"]["job_id"], seed["calibration"]["job_id"] = job_ids
     decision_path = paths.run_dir / "iterations" / "iter-01" / "results" / "iteration_decision.json"
     decision_path.parent.mkdir(parents=True, exist_ok=True)
     decision_path.write_text(
@@ -552,6 +553,28 @@ def test_advance_records_driver_submitted_calibration_without_resubmitting(
     # The agent never submitted postprocess/calibration itself.
     expected_submits = 1 if decision == "not_close" else 0
     assert len(scheduler.submit_calls) == expected_submits
+
+
+def test_advance_replaces_stale_calibration_record_with_rerun_driver_jobs(sample_config_files):
+    # TST-STAN-3/5 (2026-10-14): an earlier attempt's calibration record made
+    # auto-advance report that attempt's cancelled job as calibration_failed.
+    run_id = "run-driver-rerun"
+    paths = _completed_full_pa_run(sample_config_files, run_id, decision="not_close")
+    transfer, scheduler, remote = CalibrationPublishingTransfer(), FakeSchedulerAdapter(), FakeRemoteExecAdapter()
+    _write_driver_decision(paths, decision="not_close")
+    assert _advance(sample_config_files, run_id, transfer, scheduler, remote, execute=False).submitted_job_id == "8102"
+
+    _write_driver_decision(paths, decision="not_close", job_ids=("8201", "8202"))
+    preview = _advance(sample_config_files, run_id, transfer, scheduler, remote, execute=False)
+
+    assert preview.action == "calibration_pending"
+    assert preview.submitted_job_id == "8202"
+    manifest = read_manifest(paths.manifest)
+    assert [run.scheduler_job_id for run in manifest.calibration_runs] == ["8102", "8202"]
+    assert manifest.calibration_runs[0].status == "invalidated"
+    assert manifest.calibration_runs[1].postprocess_job_id == "8201"
+    assert manifest.preop_postprocess_runs[-1].scheduler_job_id == "8201"
+    assert scheduler.submit_calls == []
 
 
 def test_advance_falls_back_when_driver_submission_failed(sample_config_files):
