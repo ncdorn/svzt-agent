@@ -654,6 +654,14 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
   - `svzerod_3d_coupling_tuned.json`
 - Iteration driver behavior:
   - runs 0D impedance tuning and maps tuned BCs to a 3D-coupled 0D config
+  - full-PA iteration N > 1 with `outlet_mapping_mode` `auto`/`centerline` and
+    no `outlet_mapping`: passes iteration N-1's `results/outlet_cap_mapping.json`
+    pairs as an explicit mapping (logged as `outlet_mapping_carried_forward`),
+    keeping `outlet_mapping_centerline` for proximal-compliance branch lengths.
+    The promoted calibrated seed keeps the outlets (R-only calibration) but not
+    the learned seed's `centerline_node_ids`, so the centerline strategy cannot
+    re-derive the pairing; a missing previous mapping is a warning and the
+    configured mode applies
   - when `prestress_file: generate` is configured, computes wall traction from
     iteration-1 seed-generation `steady/mean` results, submits a single-process
     prestress simulation, and passes the generated VTU to CMM as

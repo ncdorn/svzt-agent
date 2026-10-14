@@ -352,3 +352,58 @@ def test_tuning_checks_with_leaf_resistance_skip_policy_rules(sample_config_file
     config = load_workspace_config(sample_config_files)
     warnings = tuning_model_warnings(config, sample_config_files)
     assert len(warnings) == 1 and "measured wedge pressure" in warnings[0]
+
+
+def _carry_forward(tmp_path, iteration, config, mapping=None):
+    import json
+
+    results = tmp_path / "iterations" / f"iter-{iteration - 1:02d}" / "results"
+    if mapping is not None:
+        results.mkdir(parents=True)
+        (results / "outlet_cap_mapping.json").write_text(json.dumps(mapping), encoding="utf-8")
+    namespace = {
+        "json": json,
+        "Path": Path,
+        "iteration": iteration,
+        "remote_run_dir": tmp_path,
+        "log": {"steps": [], "warnings": []},
+    }
+    exec(_template_function("_carry_forward_outlet_mapping"), namespace)
+    return namespace["_carry_forward_outlet_mapping"](config), namespace["log"]
+
+
+CENTERLINE_CONFIG = {"outlet_mapping_mode": "centerline", "outlet_mapping_centerline": "/p/centerlines.vtp"}
+ITER1_MAPPING = {
+    "strategy": "centerline",
+    "pairs": [
+        {"cap_path": "/oak/p/mesh-surfaces/l_pa_1_x.vtp", "bc_name": "RESISTANCE_0"},
+        {"cap_path": "/oak/p/mesh-surfaces/rpa.vtp", "bc_name": "RESISTANCE_1"},
+    ],
+}
+
+
+def test_job_carries_previous_outlet_mapping_forward_as_explicit(tmp_path):
+    carried, log = _carry_forward(tmp_path, 2, dict(CENTERLINE_CONFIG), ITER1_MAPPING)
+    assert carried["outlet_mapping_mode"] == "explicit"
+    assert carried["outlet_mapping"] == [
+        {"cap_name": "l_pa_1_x", "bc_name": "RESISTANCE_0"},
+        {"cap_name": "rpa", "bc_name": "RESISTANCE_1"},
+    ]
+    # Branch lengths for proximal compliance still come from the centerline.
+    assert carried["outlet_mapping_centerline"] == "/p/centerlines.vtp"
+    assert log["outlet_mapping_carried_forward"]["source_strategy"] == "centerline"
+
+
+@pytest.mark.parametrize(
+    "iteration, config, mapping",
+    [
+        (1, CENTERLINE_CONFIG, ITER1_MAPPING),
+        (2, {"outlet_mapping_mode": "explicit", "outlet_mapping": [["a", "B"]]}, ITER1_MAPPING),
+        (2, {"outlet_mapping_mode": "cap_name"}, ITER1_MAPPING),
+        (2, CENTERLINE_CONFIG, None),
+    ],
+)
+def test_job_keeps_mapping_config_when_not_carrying_forward(tmp_path, iteration, config, mapping):
+    carried, log = _carry_forward(tmp_path, iteration, dict(config), mapping)
+    assert carried == config
+    assert "outlet_mapping_carried_forward" not in log

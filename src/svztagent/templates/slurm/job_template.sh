@@ -1152,6 +1152,46 @@ def _resolve_threed_elasticity_modulus(diagnostics_path_raw) -> None:
     log["steps"].append(f"threed_elasticity_modulus_matched:{record['elasticity_modulus']:.6g}")
 
 
+def _carry_forward_outlet_mapping(config: dict) -> dict:
+    """Reuse the previous iteration's validated cap-to-outlet mapping.
+
+    A later full-PA iteration tunes the promoted calibrated model, which keeps
+    the outlets and BC names (R-only calibration) but not the learned seed's
+    centerline_node_ids, so the centerline strategy cannot re-derive the
+    pairing.  The previous iteration's outlet_cap_mapping.json is that pairing,
+    already validated against these caps; it is passed as an explicit mapping
+    (the centerline stays, for proximal-compliance branch lengths).  An
+    explicitly configured mapping or mode is left alone.
+    """
+    mode = str(config.get("outlet_mapping_mode") or "auto").strip().lower()
+    if iteration <= 1 or config.get("outlet_mapping") is not None or mode not in {"auto", "centerline"}:
+        return config
+    previous = (
+        remote_run_dir / "iterations" / f"iter-{iteration - 1:02d}" / "results" / "outlet_cap_mapping.json"
+    )
+    if not previous.exists():
+        log["warnings"].append(f"outlet_mapping_not_carried_forward: {previous} missing")
+        return config
+    payload = json.loads(previous.read_text(encoding="utf-8"))
+    pairs = [
+        {"cap_name": Path(str(pair["cap_path"])).stem, "bc_name": str(pair["bc_name"])}
+        for pair in payload.get("pairs") or []
+    ]
+    if not pairs:
+        log["warnings"].append(f"outlet_mapping_not_carried_forward: no pairs in {previous}")
+        return config
+    carried = dict(config)
+    carried["outlet_mapping_mode"] = "explicit"
+    carried["outlet_mapping"] = pairs
+    log["outlet_mapping_carried_forward"] = {
+        "source": str(previous),
+        "source_strategy": payload.get("strategy"),
+        "pairs": len(pairs),
+    }
+    log["steps"].append(f"outlet_mapping_carried_forward:iter-{iteration - 1:02d}")
+    return carried
+
+
 def _record_threed_wall_match(diagnostics_path_raw) -> None:
     """Compare the deformable 3D wall with the tuned 0D proximal compliance.
 
@@ -1598,6 +1638,8 @@ try:
             )
         else:
             if tuning_bc_type == "impedance":
+                if tuning_model == "full_pa":
+                    zerod_tuning_config = _carry_forward_outlet_mapping(zerod_tuning_config)
                 tuning = run_impedance_tuning_for_iteration(
                     iteration_dir=remote_iter_dir,
                     seed_config=staged_seed_path,
