@@ -117,8 +117,13 @@ def _require_remote_centerline_path(
         )
 
     if remote_exec_adapter is not None:
+        # A scaled patient's staged centerline is written by the tune driver;
+        # before that, its source must exist.
+        probe_path = raw_centerline
+        if staged_centerline and raw_centerline == staged_centerline:
+            probe_path = str((scaling.get("sources") or {}).get("centerline") or raw_centerline)
         try:
-            probe = remote_exec_adapter.run(["test", "-f", raw_centerline])
+            probe = remote_exec_adapter.run(["test", "-f", probe_path])
         except AdapterExecutionError as exc:
             if exc.returncode == 1:
                 raise ConfigError(

@@ -1061,6 +1061,12 @@ patients:
     permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
     data_policy: "read_only"
     mesh_scale_factor: 2.5
+    tuning:
+      iteration1_seed:
+        source: "learned_zerod"
+      impedance:
+        tuning_model: "full_pa"
+        outlet_mapping_mode: "centerline"
 """.strip()
         + "\n",
         encoding="utf-8",
@@ -1090,6 +1096,31 @@ patients:
     assert f'centerline_path = Path("{staged_root}/centerlines.vtp")' in rendered_script
     assert f'preop_mesh_complete_path = Path("{staged_root}/preop-mesh-complete")' in rendered_script
     assert "stage_scaled_geometry(" in rendered_script
+    # learnedZeroD gets the scaled baseline seed and the scaled centerline.
+    assert scaling["targets"]["zerod_config"].startswith(staged_root)
+    assert f'"outlet_mapping_centerline": "{staged_root}/centerlines.vtp"' in rendered_script
+
+
+def test_run_tune_rejects_path_seed_for_mesh_scaled_patient(sample_config_files):
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        f"""
+patients:
+  - alias: "TST-STAN-x"
+    permanent_remote_path: "{(sample_config_files / 'remote_data' / 'permanent' / 'TST-STAN-x').as_posix()}"
+    data_policy: "read_only"
+    mesh_scale_factor: 2.5
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="source='path' with a mesh_scale_factor"):
+        run_tune_trees(
+            workspace_root=sample_config_files,
+            cluster_name="sherlock",
+            patient_alias="TST-STAN-x",
+            run_id="run-dry-mesh-scale-path-seed",
+            mode=ExecutionMode.DRY_RUN,
+        )
 
 
 def test_generate_prestress_runs_mean_steady_sim_when_seed_has_none(sample_config_files, tmp_path):
@@ -1400,3 +1431,40 @@ def test_preop_mesh_surface_aliases_reject_paths_and_collisions(sample_config_fi
     for bad in ({"a/b.vtp": "inflow.vtp"}, {"a.vtp": "inflow.vtp", "b.vtp": "inflow.vtp"}, {"a.vtp": "b.vtp", "b.vtp": "c.vtp"}):
         with pytest.raises(ValueError):
             PatientConfig(alias="X", preop_mesh_surface_aliases=bad)
+
+
+def test_run_tune_scaled_patient_probes_unscaled_sources_before_submission(sample_config_files):
+    # The staged scaled copies are written by the driver; before submission the
+    # agent checks that their sources exist (TST-STAN-1, 2026-10-14).
+    patient_root = (sample_config_files / "remote_data" / "permanent" / "TST-STAN-x").as_posix()
+    (sample_config_files / "config" / "patients.yaml").write_text(
+        f"""
+patients:
+  - alias: "TST-STAN-x"
+    permanent_remote_path: "{patient_root}"
+    data_policy: "read_only"
+    mesh_scale_factor: 1.5
+    tuning:
+      iteration1_seed:
+        source: "learned_zerod"
+        path: "/absent/locally/baseline_0d.json"
+      impedance:
+        tuning_model: "full_pa"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    remote = FakeRemoteExecAdapter()
+    run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-exec-scaled-probe",
+        mode=ExecutionMode.EXECUTE,
+        remote_exec_adapter=remote,
+        transfer_adapter=FakeFileTransferAdapter(),
+        scheduler_adapter=FakeSchedulerAdapter(),
+    )
+    probes = [command[2] for command, _ in remote.calls if command[:2] == ["test", "-f"]]
+    assert "/absent/locally/baseline_0d.json" in probes
+    assert not any("_staged_geometry" in probe for probe in probes)

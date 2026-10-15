@@ -1370,6 +1370,7 @@ def _stage_tune_inputs(
     seed_config_path: str | None = None,
     seed_input_filename: str = REDUCED_SEED_INPUT_FILENAME,
     patient_assets: dict[str, str] | None = None,
+    staged_geometry_sources: dict[str, str] | None = None,
     transfer_adapter: FileTransferAdapter | None = None,
     remote_exec_adapter: RemoteExecAdapter | None = None,
     mode: ExecutionMode = ExecutionMode.DRY_RUN,
@@ -1445,6 +1446,12 @@ def _stage_tune_inputs(
         iter1_seed_path = (
             patient_assets.get("iteration1_seed_path") if patient_assets else None
         )
+        staged_sources = staged_geometry_sources or {}
+        if iter1_seed_source == "path" and str(iter1_seed_path or "") in staged_sources:
+            raise ConfigError(
+                "iteration1_seed.source='path' with a mesh_scale_factor is not supported; "
+                "use source='learned_zerod' (its seed is regenerated from the scaled centerline)"
+            )
         if iter1_seed_source == "path":
             candidate = Path(str(iter1_seed_path or "")).expanduser()
             if candidate.exists():
@@ -1498,11 +1505,14 @@ def _stage_tune_inputs(
                 and mode == ExecutionMode.EXECUTE
                 and remote_exec_adapter is not None
             ):
-                result = remote_exec_adapter.run(["test", "-f", str(candidate)])
+                # A scaled patient's staged copy is written by the driver; the
+                # source it is scaled from must exist now.
+                probe = staged_sources.get(str(candidate), str(candidate))
+                result = remote_exec_adapter.run(["test", "-f", probe])
                 if not result.dry_run and result.returncode != 0:
                     raise ConfigError(
                         "configured learned source is unavailable on the execution host: "
-                        f"{candidate}"
+                        f"{probe}"
                     )
         elif iter1_seed_source == "generate":
             pass
@@ -1722,6 +1732,15 @@ def run_tune_trees(
         patient_assets=(
             patient.patient_assets.model_dump(mode="json")
             if patient.patient_assets is not None
+            else None
+        ),
+        staged_geometry_sources=(
+            {
+                target: source
+                for name, target in patient.geometry_scaling.targets.items()
+                if target and (source := patient.geometry_scaling.sources.get(name))
+            }
+            if patient.geometry_scaling is not None
             else None
         ),
         transfer_adapter=transfer_adapter,
