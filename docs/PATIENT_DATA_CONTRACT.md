@@ -109,7 +109,7 @@ but copies scaled by s, shared by the patient's runs at
 - `centerlines.vtp`: points, `Path`, radii and section sizes times s, section
   areas times s^2;
 - the iteration-1 seed JSON (`path` and `learned_zerod` sources): lengths
-  times s, areas times s^2, `R_poiseuille` s^-3, `L` s^-1, `C` s^4,
+  times s, areas times s^2, `R_poiseuille` s^-3, `L` s^-1, `C` s^3 (constant Eh/r),
   `stenosis_coefficient` s^-4 (exact for Poiseuille/ROM values; for
   `learned_zerod` it only seeds learnedZeroD, which runs on the scaled
   centerline).
