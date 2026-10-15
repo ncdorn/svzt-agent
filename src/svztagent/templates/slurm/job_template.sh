@@ -1561,10 +1561,16 @@ try:
     if geometry_scaling:
         from svzerodtrees.simulation.geometry_scale import stage_scaled_geometry
 
+        scaling_sources = dict(geometry_scaling["sources"])
+        postop_source = scaling_sources.get("postop_mesh_complete")
+        if postop_source and not Path(postop_source).is_dir():
+            # Optional asset: a patient without a postop mesh has nothing to scale.
+            log["warnings"].append(f"scaled_geometry_postop_mesh_missing: {postop_source}")
+            scaling_sources["postop_mesh_complete"] = None
         staged_geometry = stage_scaled_geometry(
             geometry_scaling["staged_root"],
             geometry_scaling["factor"],
-            sources=geometry_scaling["sources"],
+            sources=scaling_sources,
             targets=geometry_scaling["targets"],
         )
         log["geometry_scaling"] = {
