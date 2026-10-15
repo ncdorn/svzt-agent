@@ -998,6 +998,24 @@ def _completed_preop_job_for_reuse(preop_dir: Path) -> tuple[str | None, str | N
     return str(job_id), None
 
 
+def _older_than_3d_result(path: Path, preop_dir: Path) -> bool:
+    """True when ``path`` predates the preop 3D result it is derived from.
+
+    A rerun of the same iteration (--skip-zerod-tuning, --reuse-preop-3d)
+    keeps results/; the pressure CSV from an earlier 3D run must not stand in
+    for the new one (TST-STAN-3/5/9 kept their 2-cycle CSVs, 2026-10-14).
+    """
+    evidence = preop_dir / "svZeroD_data"
+    if not evidence.exists():
+        evidence = _latest_result_vtu(preop_dir)
+    if evidence is None or not evidence.exists():
+        return False
+    stale = path.stat().st_mtime < evidence.stat().st_mtime
+    if stale:
+        log["steps"].append(f"stale_pressure_csv_regenerated:{path.name}")
+    return stale
+
+
 def _generate_mpa_pressure_csv(preop_dir: Path) -> Path:
     """Use the shared svZeroDTrees helper to write mpa_pressure_vs_time.csv."""
     if centerline_path is None or not centerline_path.exists():
@@ -1792,7 +1810,7 @@ try:
             log["steps"].append("preop_completed")
 
             pressure_csv = remote_results_dir / "mpa_pressure_vs_time.csv"
-            if not pressure_csv.exists():
+            if not pressure_csv.exists() or _older_than_3d_result(pressure_csv, preop_dir):
                 try:
                     _generate_mpa_pressure_csv(preop_dir)
                 except Exception as exc:

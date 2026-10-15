@@ -407,3 +407,22 @@ def test_job_keeps_mapping_config_when_not_carrying_forward(tmp_path, iteration,
     carried, log = _carry_forward(tmp_path, iteration, dict(config), mapping)
     assert carried == config
     assert "outlet_mapping_carried_forward" not in log
+
+
+@pytest.mark.parametrize("csv_newer, expected", [(False, True), (True, False)])
+def test_job_regenerates_pressure_csv_older_than_the_3d_result(tmp_path, csv_newer, expected):
+    import os
+
+    preop = tmp_path / "preop"
+    preop.mkdir()
+    result = preop / "svZeroD_data"
+    pressure_csv = tmp_path / "mpa_pressure_vs_time.csv"
+    result.write_text("", encoding="utf-8")
+    pressure_csv.write_text("", encoding="utf-8")
+    os.utime(result, (1000, 2000 if not csv_newer else 1000))
+    os.utime(pressure_csv, (1000, 1500))
+    namespace = {"log": {"steps": []}, "_latest_result_vtu": lambda d: None}
+    exec(_template_function("_older_than_3d_result"), namespace)
+
+    assert namespace["_older_than_3d_result"](pressure_csv, preop) is expected
+    assert bool(namespace["log"]["steps"]) is expected
