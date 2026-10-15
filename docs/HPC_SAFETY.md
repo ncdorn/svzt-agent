@@ -5,6 +5,9 @@
 - `runs_root` is the only allowed remote write root for agent-generated artifacts.
 - Remote write paths are normalized and validated before command execution.
 - Any write path outside `runs_root` is rejected.
+- Scaled geometry copies for patients with `mesh_scale_factor` != 1 are written
+  under `runs_root/_staged_geometry/` (docs/PATIENT_DATA_CONTRACT.md); stages
+  then read geometry from there instead of from `permanent_data_root`.
 
 ## Command safety
 - Remote commands are validated against an allowlist (`mkdir`, `test`, `sbatch`, `squeue`, `sacct`, `scancel`, `bash`).

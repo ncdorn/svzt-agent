@@ -1467,6 +1467,9 @@ def create_manifest(
             "alias": patient.alias,
             "permanent_remote_path": patient.permanent_remote_path,
             "mesh_scale_factor": patient.mesh_scale_factor,
+            "geometry_scaling": patient.geometry_scaling.model_dump(mode="json")
+            if patient.geometry_scaling is not None
+            else None,
             "patient_assets": patient.patient_assets.model_dump(mode="json")
             if patient.patient_assets is not None
             else None,

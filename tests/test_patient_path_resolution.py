@@ -227,7 +227,28 @@ patients:
 
     config = load_workspace_config(sample_config_files)
     patient = resolve_patient_alias(config, "sherlock", "TST-STAN-x")
-    assert patient.mesh_scale_factor == pytest.approx(2.2)
+    # The true anatomy is the mesh scaled by 2.2: every geometry asset points at
+    # the staged scaled copy and the 3D solver gets no further scaling.
+    scaling = patient.geometry_scaling
+    assert scaling is not None and scaling.factor == pytest.approx(2.2)
+    assert patient.mesh_scale_factor == pytest.approx(1.0)
+    root = f"{patient.runs_root}/_staged_geometry/TST-STAN-x/scale_2.2"
+    assert scaling.staged_root == root
+    assets = patient.patient_assets
+    assert assets.preop_mesh_complete_dir == f"{root}/preop-mesh-complete"
+    assert assets.mesh_surfaces_dir.startswith(f"{root}/preop-mesh-complete/")
+    assert assets.centerlines == f"{root}/centerlines.vtp"
+    assert scaling.source_assets.centerlines.endswith("TST-STAN-x/centerlines.vtp")
+    assert scaling.targets["centerline"] == assets.centerlines
+    assert assets.clinical_targets == scaling.source_assets.clinical_targets
+    assert assets.inflow == scaling.source_assets.inflow
+
+
+def test_unit_mesh_scale_keeps_patient_geometry_paths(sample_config_files):
+    config = load_workspace_config(sample_config_files)
+    patient = resolve_patient_alias(config, "sherlock", "TST-STAN-x")
+    assert patient.geometry_scaling is None
+    assert patient.patient_assets.centerlines.startswith(patient.permanent_remote_path)
 
 
 def test_resolve_patient_alias_supports_optional_postop_mesh_layout(sample_config_files):

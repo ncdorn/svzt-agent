@@ -97,6 +97,33 @@ a copy made of symlinks to the patient's files in which only the aliased caps
 have new link names, and uses it for every preop stage. Names must be bare
 `.vtp` file names, targets must be distinct and must not already exist.
 
+## Mesh Scale Factor
+
+`mesh_scale_factor` s states that the true anatomy is the patient's mesh
+scaled by s.  For s != 1 the resolved geometry assets are not the Oak files
+but copies scaled by s, shared by the patient's runs at
+`<runs_root>/_staged_geometry/<alias>/scale_<s>/`:
+
+- `preop-mesh-complete/` and, if present, `postop-mesh-complete/`: every
+  `.vtu`/`.vtp` point times s (other files copied);
+- `centerlines.vtp`: points, `Path`, radii and section sizes times s, section
+  areas times s^2;
+- the iteration-1 seed JSON (`path` and `learned_zerod` sources): lengths
+  times s, areas times s^2, `R_poiseuille` s^-3, `L` s^-1, `C` s^4,
+  `stenosis_coefficient` s^-4 (exact for Poiseuille/ROM values; for
+  `learned_zerod` it only seeds learnedZeroD, which runs on the scaled
+  centerline).
+
+Clinical targets and inflow are not geometry and keep their Oak paths.  The
+tune driver writes the copies before anything reads geometry (svZeroDTrees
+`stage_scaled_geometry`, with `scaled_geometry.json` recording the scale and
+source digests; a matching record is reused, a different one is refused), and
+`mesh_scale_factor` then resolves to 1.0, so the 3D solver, tuning cap areas,
+proximal compliance, svSlicer and calibration all use the same geometry.
+Before 2026-10-14 only the 3D solver applied s, which made svSlicer flows s^-2
+too small and the 0D models smaller than the 3D domain (TST-STAN-1 s=1.147,
+TST-STAN-9 s=1.425).  The Oak files are never modified.
+
 ## svZeroDTrees Mapping
 
 The resolved Oak assets map directly to svZeroDTrees path keys:

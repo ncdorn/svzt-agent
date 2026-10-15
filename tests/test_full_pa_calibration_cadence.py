@@ -833,6 +833,38 @@ def test_preop_postprocess_job_splits_cpus_between_frame_workers_and_svslicer_th
     assert argv[argv.index("--cpus-per-task") + 1] == "24"
 
 
+@pytest.mark.parametrize("min_points", [None, 5])
+def test_preop_postprocess_job_passes_centerline_densification(sample_config_files, min_points):
+    if min_points is not None:
+        defaults_path = sample_config_files / "config" / "defaults.yaml"
+        defaults_path.write_text(
+            defaults_path.read_text(encoding="utf-8").replace(
+                '      workers: "auto"\n',
+                f'      workers: "auto"\n      min_centerline_points_per_branch: {min_points}\n',
+            ),
+            encoding="utf-8",
+        )
+    _write_patient(sample_config_files, tuning_model="full_pa", seed_policy="calibrated_full_pa")
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias=PATIENT_ALIAS,
+        run_id=f"run-postprocess-densify-{min_points}",
+        mode=ExecutionMode.DRY_RUN,
+        transfer_adapter=FakeFileTransferAdapter(),
+        scheduler_adapter=FakeSchedulerAdapter(),
+        remote_exec_adapter=FakeRemoteExecAdapter(),
+    )
+    script = (
+        result.local_job_script_path.parent / "postprocess" / "run_postprocess.sh"
+    ).read_text(encoding="utf-8")
+    python = _resolve_step(script)
+    compile(python, "run_postprocess.sh", "exec")
+    assert (f'postprocess_kwargs["min_centerline_points_per_branch"] = {min_points}' in python) is (
+        min_points is not None
+    )
+
+
 def _resolve_step(script: str) -> str:
     start = script.index("<<'PY'\n") + len("<<'PY'\n")
     return script[start : script.index("\nPY\n", start)]

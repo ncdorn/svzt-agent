@@ -13,6 +13,7 @@ from svztagent.config.models import (
     AdaptationModelConfig,
     CalibrationPolicyConfig,
     ClusterConfig,
+    GeometryScaling,
     ImpedanceTuningConfig,
     Iteration1SeedConfig,
     PatientAssetPaths,
@@ -24,7 +25,7 @@ from svztagent.config.models import (
     WorkspaceConfig,
 )
 from svztagent.core.errors import ConfigError
-from svztagent.core.paths import validate_remote_patient_read_path
+from svztagent.core.paths import validate_remote_patient_read_path, validate_remote_write_path
 
 
 _REPOSITORY_DISCOVERY_ORDER: dict[str, tuple[str, ...]] = {
@@ -426,6 +427,65 @@ def _resolve_patient_mesh_scale_factor(
     )
 
 
+STAGED_GEOMETRY_DIRNAME = "_staged_geometry"
+
+
+def _scaled_geometry_assets(
+    alias: str,
+    scale: float,
+    assets: PatientAssetPaths,
+    runs_root: str,
+) -> tuple[PatientAssetPaths, GeometryScaling | None]:
+    """Point geometry assets at copies scaled by ``scale`` (docs/PATIENT_DATA_CONTRACT.md).
+
+    The copies live at ``<runs_root>/_staged_geometry/<alias>/scale_<s>/`` and
+    are shared by the patient's runs; the tune driver writes them once.  The
+    clinical targets and inflow are not geometry and keep their patient paths.
+    """
+    if abs(float(scale) - 1.0) < 1e-12:
+        return assets, None
+    root = PurePosixPath(runs_root) / STAGED_GEOMETRY_DIRNAME / alias / f"scale_{float(scale):g}"
+    validate_remote_write_path(str(root), runs_root)
+    preop = root / "preop-mesh-complete"
+    surfaces_subdir = PurePosixPath(assets.mesh_surfaces_dir).relative_to(assets.preop_mesh_complete_dir)
+    postop = root / "postop-mesh-complete" if assets.postop_mesh_complete_dir else None
+    centerline = root / PurePosixPath(assets.centerlines).name
+    scale_seed = assets.iteration1_seed_source in {"path", "learned_zerod"}
+    seed = root / PurePosixPath(assets.iteration1_seed_path).name if scale_seed else None
+    effective = assets.model_copy(
+        update={
+            "centerlines": str(centerline),
+            "preop_mesh_complete_dir": str(preop),
+            "mesh_surfaces_dir": str(preop / surfaces_subdir),
+            "postop_mesh_complete_dir": str(postop) if postop else None,
+            "postop_mesh_surfaces_dir": (
+                str(postop / PurePosixPath(assets.postop_mesh_surfaces_dir).relative_to(assets.postop_mesh_complete_dir))
+                if postop and assets.postop_mesh_surfaces_dir
+                else None
+            ),
+            "iteration1_seed_path": str(seed) if seed else assets.iteration1_seed_path,
+        }
+    )
+    scaling = GeometryScaling(
+        factor=float(scale),
+        staged_root=str(root),
+        source_assets=assets,
+        sources={
+            "preop_mesh_complete": assets.preop_mesh_complete_dir,
+            "postop_mesh_complete": assets.postop_mesh_complete_dir if postop else None,
+            "centerline": assets.centerlines,
+            "zerod_config": assets.iteration1_seed_path if seed else None,
+        },
+        targets={
+            "preop_mesh_complete": str(preop),
+            "postop_mesh_complete": str(postop) if postop else None,
+            "centerline": str(centerline),
+            "zerod_config": str(seed) if seed else None,
+        },
+    )
+    return effective, scaling
+
+
 def resolve_patient_alias(
     config: WorkspaceConfig,
     cluster_name: str,
@@ -502,12 +562,24 @@ def resolve_patient_alias(
     if not patient_assets.iteration1_seed_path.startswith("/"):
         raise ConfigError("resolved iteration-1 seed path must be absolute")
 
+    mesh_scale_factor = _resolve_patient_mesh_scale_factor(config, patient)
+    source_centerline = patient_assets.centerlines
+    patient_assets, geometry_scaling = _scaled_geometry_assets(
+        patient.alias, mesh_scale_factor, patient_assets, cluster.remote_roots.runs_root
+    )
+    if geometry_scaling is not None:
+        mesh_scale_factor = 1.0  # the staged geometry already has the true size
+
     bc_type = _resolve_patient_bc_type(config, patient)
     impedance = _resolve_outlet_mapping_centerline(
         _resolve_patient_impedance_config(config, patient),
         patient_root=patient.permanent_remote_path,
         patient_centerline=patient_assets.centerlines,
     )
+    if geometry_scaling is not None and impedance.outlet_mapping_centerline == source_centerline:
+        payload = impedance.model_dump(mode="json")
+        payload["outlet_mapping_centerline"] = patient_assets.centerlines
+        impedance = ImpedanceTuningConfig.model_validate(payload)
     if patient_assets.iteration1_seed_source == "learned_zerod":
         if bc_type != "impedance" or impedance.tuning_model != "full_pa":
             raise ConfigError(
@@ -526,7 +598,8 @@ def resolve_patient_alias(
         rcr=_resolve_patient_rcr_config(config, patient),
         calibration=_resolve_patient_calibration_policy(config, patient),
         adaptation=_resolve_patient_adaptation_config(config, patient),
-        mesh_scale_factor=_resolve_patient_mesh_scale_factor(config, patient),
+        mesh_scale_factor=mesh_scale_factor,
+        geometry_scaling=geometry_scaling,
         preop_mesh_surface_aliases=dict(patient.preop_mesh_surface_aliases),
         data_policy=patient.data_policy,
         permanent_data_root=cluster.remote_roots.permanent_data_root,

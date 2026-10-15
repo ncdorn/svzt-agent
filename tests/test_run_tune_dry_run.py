@@ -1075,7 +1075,21 @@ patients:
     )
 
     rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
-    assert 'mesh_scale_factor = float("2.5")' in rendered_script
+    # The staged geometry is already scaled, so the 3D solver scales by 1.
+    assert 'mesh_scale_factor = float("1.0")' in rendered_script
+    import json
+
+    marker = "geometry_scaling = json.loads(r" + "'" * 3
+    start = rendered_script.index(marker) + len(marker)
+    scaling = json.loads(rendered_script[start : rendered_script.index("'" * 3, start)])
+    staged_root = scaling["staged_root"]
+    assert scaling["factor"] == 2.5
+    assert staged_root.endswith("/_staged_geometry/TST-STAN-x/scale_2.5")
+    assert scaling["targets"]["centerline"] == f"{staged_root}/centerlines.vtp"
+    assert scaling["sources"]["centerline"].endswith("TST-STAN-x/centerlines.vtp")
+    assert f'centerline_path = Path("{staged_root}/centerlines.vtp")' in rendered_script
+    assert f'preop_mesh_complete_path = Path("{staged_root}/preop-mesh-complete")' in rendered_script
+    assert "stage_scaled_geometry(" in rendered_script
 
 
 def test_generate_prestress_runs_mean_steady_sim_when_seed_has_none(sample_config_files, tmp_path):

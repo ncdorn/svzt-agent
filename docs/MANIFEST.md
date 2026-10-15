@@ -5,6 +5,13 @@ It is written atomically and should be treated as append-only evidence: a retry
 adds a new transition/attempt or updates the matching idempotent submission;
 it must not rewrite a prior scientific result or seed.
 
+## Patient fields
+`patient` records the alias, `permanent_remote_path`, the resolved
+`patient_assets` (geometry paths point at the staged scaled copies when the
+patient has a mesh scale), `mesh_scale_factor` as given to the 3D solver (1.0
+for a scaled patient), and `geometry_scaling` (`factor`, `staged_root`,
+`sources`, `targets`, `source_assets`; null for unit-scale patients).
+
 ## Lifecycle fields
 Lifecycle metadata is stored under `execution`:
 - `lifecycle_state`: current internal lifecycle state

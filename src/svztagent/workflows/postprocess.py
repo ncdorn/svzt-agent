@@ -95,12 +95,16 @@ def _require_remote_centerline_path(
         )
 
     patient_root = str(manifest.patient.get("permanent_remote_path") or "").strip() or "/"
-    try:
-        validate_remote_patient_read_path(raw_centerline, patient_root)
-    except Exception as exc:
-        raise ConfigError(
-            f"{workflow_label} centerline path must be an absolute patient-data path: {raw_centerline}"
-        ) from exc
+    scaling = manifest.patient.get("geometry_scaling") or {}
+    # A scaled patient's centerline is the staged copy under runs_root.
+    staged_centerline = str((scaling.get("targets") or {}).get("centerline") or "")
+    if not (staged_centerline and raw_centerline == staged_centerline):
+        try:
+            validate_remote_patient_read_path(raw_centerline, patient_root)
+        except Exception as exc:
+            raise ConfigError(
+                f"{workflow_label} centerline path must be an absolute patient-data path: {raw_centerline}"
+            ) from exc
 
     centerline_path = PurePosixPath(raw_centerline)
     if centerline_path.suffix.lower() != ".vtp":
@@ -374,6 +378,12 @@ def _render_postprocess_script(
         else ("None" if fallback_clinical_targets_csv is None else json.dumps(fallback_clinical_targets_csv))
     )
     inflow_expr = "None" if inflow_csv is None else json.dumps(inflow_csv)
+    min_centerline_points = config.defaults.postprocess.resistance_map.min_centerline_points_per_branch
+    min_centerline_points_line = (
+        ""
+        if min_centerline_points is None
+        else f'    postprocess_kwargs["min_centerline_points_per_branch"] = {int(min_centerline_points)}\n'
+    )
     camera_offset_expr = "None" if camera_offset_dir is None else repr(list(camera_offset_dir))
     camera_view_up_expr = "None" if camera_view_up is None else repr(list(camera_view_up))
     slurm_header = _render_postprocess_slurm_header(
@@ -420,7 +430,7 @@ try:
         "pressure_field": "Pressure",
         "resistance_map_workers": {json.dumps(resistance_map_workers)},
     }}
-    if {camera_offset_expr} is not None:
+{min_centerline_points_line}    if {camera_offset_expr} is not None:
         postprocess_kwargs["camera_offset_dir"] = {camera_offset_expr}
     if {camera_view_up_expr} is not None:
         postprocess_kwargs["camera_view_up"] = {camera_view_up_expr}

@@ -243,6 +243,10 @@ metrics_path = remote_results_dir / "iteration_metrics.json"
 decision_path = remote_results_dir / "iteration_decision.json"
 # Run-scoped preop cap renames (source file -> staged name); empty for most patients.
 preop_mesh_surface_aliases = json.loads(r'''{{PREOP_MESH_SURFACE_ALIASES_JSON}}''')
+# mesh_scale_factor != 1: the patient's geometry paths above already point at
+# copies scaled to the true anatomy under runs_root; written once, here, before
+# any stage reads them (empty for unit-scale patients).
+geometry_scaling = json.loads(r'''{{GEOMETRY_SCALING_JSON}}''')
 
 log = {
     "run_id": run_id,
@@ -1554,6 +1558,22 @@ def _submit_calibrated_full_pa_seed_jobs(tuned_model: Path) -> dict:
 
 
 try:
+    if geometry_scaling:
+        from svzerodtrees.simulation.geometry_scale import stage_scaled_geometry
+
+        staged_geometry = stage_scaled_geometry(
+            geometry_scaling["staged_root"],
+            geometry_scaling["factor"],
+            sources=geometry_scaling["sources"],
+            targets=geometry_scaling["targets"],
+        )
+        log["geometry_scaling"] = {
+            key: staged_geometry[key] for key in ("scale", "staged_root", "reused")
+        }
+        log["steps"].append(
+            ("scaled_geometry_reused:" if staged_geometry["reused"] else "scaled_geometry_staged:")
+            + staged_geometry["staged_root"]
+        )
     if preop_mesh_surface_aliases and preop_mesh_complete_path is not None:
         preop_mesh_complete_path = _stage_aliased_mesh_complete(
             preop_mesh_complete_path, preop_mesh_surface_aliases

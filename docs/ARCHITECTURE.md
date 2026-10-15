@@ -175,7 +175,10 @@ contract; the agent carries the resolved configuration and provenance but does
 not implement another mapping policy. The one agent-side default is
 `impedance.outlet_mapping_centerline`: for `full_pa` with `outlet_mapping_mode`
 `auto` or `centerline`, `config/load.py` fills it with the patient
-`centerlines.vtp` (relative values resolve against the patient root), and
+`centerlines.vtp` (relative values resolve against the patient root; for a
+patient with `mesh_scale_factor` != 1, `config/load.py` substitutes the scaled
+geometry copies staged under `runs_root/_staged_geometry/`, see
+docs/PATIENT_DATA_CONTRACT.md), and
 `workflows/tune_trees.py` drops mapping keys from RRI iteration configs.
 `impedance.objective_tree_policy` (full-PA only) is carried the same way: the
 agent checks field types, forwards only explicitly set fields, and leaves

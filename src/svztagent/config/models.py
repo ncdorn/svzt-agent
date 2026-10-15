@@ -222,6 +222,18 @@ class ResistanceMapPostprocessConfig(BaseModel):
     # Postprocess jobs request workers x svslicer_threads CPUs.
     svslicer_threads: int = 1
     selected_preop_mem: str = "64G"
+    # Densify centerline branches with fewer points before slicing (svZeroDTrees
+    # densify_short_branches), so calibration gets an interior cross-section on
+    # short branches such as a two-point MPA whose first point is on the inflow
+    # cap.  None keeps the centerline as given.
+    min_centerline_points_per_branch: int | None = None
+
+    @field_validator("min_centerline_points_per_branch")
+    @classmethod
+    def _min_points_at_least_two(cls, value: int | None) -> int | None:
+        if value is not None and value < 2:
+            raise ValueError("min_centerline_points_per_branch must be >= 2")
+        return value
 
     @field_validator("svslicer_threads")
     @classmethod
@@ -1370,6 +1382,24 @@ class PatientAssetPaths(BaseModel):
     iteration1_seed_svzerodsolver_executable: str
 
 
+class GeometryScaling(BaseModel):
+    """Run-independent scaled copies of a patient's geometry inputs.
+
+    With ``mesh_scale_factor`` s != 1 the true anatomy is the mesh scaled by s.
+    The resolved patient's geometry assets then point at copies scaled by s
+    under ``staged_root`` (inside ``runs_root``), written once by the tune
+    driver (svZeroDTrees ``stage_scaled_geometry``), and ``mesh_scale_factor``
+    resolves to 1.0 so the 3D solver and every 0D/postprocess stage read the
+    same geometry.  ``source_assets`` keeps the read-only patient paths.
+    """
+
+    factor: float
+    staged_root: str
+    source_assets: PatientAssetPaths
+    sources: dict[str, str | None]
+    targets: dict[str, str | None]
+
+
 class ResolvedPatient(BaseModel):
     cluster_name: str
     alias: str
@@ -1382,6 +1412,7 @@ class ResolvedPatient(BaseModel):
     calibration: CalibrationPolicyConfig
     adaptation: AdaptationDefaults
     mesh_scale_factor: float
+    geometry_scaling: GeometryScaling | None = None
     preop_mesh_surface_aliases: dict[str, str] = Field(default_factory=dict)
     data_policy: str
     permanent_data_root: str | None = None

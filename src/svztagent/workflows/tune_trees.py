@@ -1253,6 +1253,7 @@ def _render_tune_job_script(
     reuse_preop_3d: bool = False,
     seed_generation: dict | None = None,
     preop_mesh_surface_aliases: dict[str, str] | None = None,
+    geometry_scaling: dict | None = None,
 ) -> str:
     template = _template_text()
     env_block = "\n".join(env_hooks) if env_hooks else "# no environment hooks configured"
@@ -1280,6 +1281,7 @@ def _render_tune_job_script(
         "{{MESH_SCALE_FACTOR}}": str(mesh_scale_factor),
         "{{SKIP_ZEROD_TUNING_JSON}}": json.dumps(bool(skip_zerod_tuning)),
         "{{REUSE_PREOP_3D_JSON}}": json.dumps(bool(reuse_preop_3d)),
+        "{{GEOMETRY_SCALING_JSON}}": json.dumps(geometry_scaling or {}, sort_keys=True),
         "{{PREOP_MESH_SURFACE_ALIASES_JSON}}": json.dumps(
             dict(preop_mesh_surface_aliases or {}), sort_keys=True
         ),
@@ -1825,6 +1827,11 @@ def run_tune_trees(
         reuse_preop_3d=reuse_preop_3d,
         seed_generation=seed_generation.spec,
         preop_mesh_surface_aliases=patient.preop_mesh_surface_aliases,
+        geometry_scaling=(
+            patient.geometry_scaling.model_dump(mode="json", exclude={"source_assets"})
+            if patient.geometry_scaling is not None
+            else None
+        ),
     )
     local_script_path.write_text(script_body, encoding="utf-8")
 
