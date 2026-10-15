@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 import json
+import re
 import shutil
 import time
 from typing import Callable
@@ -1299,6 +1300,12 @@ def _render_tune_job_script(
     rendered = template
     for key, value in replacements.items():
         rendered = rendered.replace(key, value)
+    # A template placeholder this renderer does not fill (e.g. a watcher still
+    # running older code against a newer template) must fail here, not in the
+    # job: TST-STAN-3 iteration 3 died on an unfilled {{GEOMETRY_SCALING_JSON}}.
+    unfilled = sorted(set(re.findall(r"\{\{[A-Z0-9_]+\}\}", rendered)))
+    if unfilled:
+        raise ConfigError(f"tune job template placeholders left unfilled: {', '.join(unfilled)}")
     return rendered
 
 

@@ -1468,3 +1468,20 @@ patients:
     probes = [command[2] for command, _ in remote.calls if command[:2] == ["test", "-f"]]
     assert "/absent/locally/baseline_0d.json" in probes
     assert not any("_staged_geometry" in probe for probe in probes)
+
+
+def test_render_refuses_unfilled_template_placeholders(sample_config_files, monkeypatch):
+    from svztagent.workflows import tune_trees
+
+    template = tune_trees._template_text()
+    monkeypatch.setattr(
+        tune_trees, "_template_text", lambda: template + "\n# {{NEW_PLACEHOLDER_JSON}}\n"
+    )
+    with pytest.raises(ConfigError, match="NEW_PLACEHOLDER_JSON"):
+        run_tune_trees(
+            workspace_root=sample_config_files,
+            cluster_name="sherlock",
+            patient_alias="TST-STAN-x",
+            run_id="run-dry-unfilled-placeholder",
+            mode=ExecutionMode.DRY_RUN,
+        )
