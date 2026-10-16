@@ -203,9 +203,22 @@ the rendered payload so an older cluster svZeroDTrees still accepts it.
 `objective` and `polish` patch the workspace value field by field at patient
 level; `proximal_compliance`, `leaf_resistance`, and `tree_max_nodes` replace
 it; an explicit patient `null` clears any of them.
+`proximal_compliance.tied_k3_ref` together with a `stiffness_scale` tune-space
+parameter selects the tied stiffness multiplier (the svz cohort default since
+2026-10-16; proximal Eh/r = s·`wall_ehr`,
+tree k3 = s·`tied_k3_ref`, applied per objective evaluation inside
+svZeroDTrees `tune_bcs/tied_stiffness.py`). The agent owns no part of that
+mapping: `ImpedanceTuningConfig` only mirrors svZeroDTrees'
+`validate_stiffness_scale` pairing rules so an inconsistent tune space fails
+at config load and dry run rather than on the cluster, and
+`ProximalComplianceConfig` omits an unset `tied_k3_ref` so untied patients
+render the historical `{wall_ehr}` block. `_iteration_impedance_config` refuses
+to render an RRI iteration (e.g. `legacy_rri_after_first`) whose tune space
+has `stiffness_scale`, since RRI iterations drop `proximal_compliance`.
 `config/tuning_checks.py` cross-checks per-patient choices (outlet policy vs
 the `regurgitation` flag and wedge pressure in `config/clinical_targets.yaml`;
-`proximal_compliance.wall_ehr` vs the deformable 3D wall's E*h/r) and reports
+`proximal_compliance.wall_ehr` vs the deformable 3D wall's E*h/r, and a fixed
+3D `elasticity_modulus` under the tied stiffness multiplier) and reports
 warnings through `config validate` and `doctor`. The job script refuses to run
 (exit 8) when the cluster's svZeroDTrees does not support every rendered
 impedance key (`svzerodtrees.tuning.SUPPORTED_IMPEDANCE_KEYS`). Model

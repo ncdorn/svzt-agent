@@ -798,11 +798,19 @@ class TuningObjectiveConfig(BaseModel):
 
 
 class ProximalComplianceConfig(BaseModel):
-    """Thin-wall compliance C = 3 A L / (2 Eh/r) on every full-PA seed vessel."""
+    """Thin-wall compliance C = 3 A L / (2 Eh/r) on every full-PA seed vessel.
+
+    ``tied_k3_ref`` turns on the tied stiffness multiplier: a
+    ``stiffness_scale`` tune-space parameter s then sets Eh/r = s * wall_ehr
+    on every seed vessel and the tree k3 = s * tied_k3_ref on both sides,
+    re-applied on every objective evaluation (svZeroDTrees
+    ``tune_bcs/tied_stiffness.py``; docs/TUNING_MODEL.md).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     wall_ehr: float
+    tied_k3_ref: float | None = None
 
     @field_validator("wall_ehr")
     @classmethod
@@ -810,6 +818,68 @@ class ProximalComplianceConfig(BaseModel):
         if not value > 0.0:
             raise ValueError("wall_ehr must be > 0")
         return value
+
+    @field_validator("tied_k3_ref")
+    @classmethod
+    def _positive_k3_ref(cls, value: float | None) -> float | None:
+        if value is not None and not value > 0.0:
+            raise ValueError("tied_k3_ref must be > 0")
+        return value
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_tie(self, handler: Any) -> dict[str, Any]:
+        # Without the tie the rendered block stays {wall_ehr}, which a cluster
+        # svZeroDTrees that predates tied_k3_ref still accepts.
+        data = handler(self)
+        if data.get("tied_k3_ref") is None:
+            data.pop("tied_k3_ref", None)
+        return data
+
+
+# Tied stiffness multiplier s (svZeroDTrees STIFFNESS_SCALE_PARAM).
+STIFFNESS_SCALE_PARAM = "stiffness_scale"
+_TIED_K3_NAMES = ("comp.lpa.k3", "comp.rpa.k3")
+
+
+def _validate_tied_stiffness(
+    proximal: ProximalComplianceConfig | None,
+    tune_space: TuneSpaceConfig,
+    compliance_model: str,
+) -> None:
+    """Mirror of svZeroDTrees ``validate_stiffness_scale`` so dry runs fail early."""
+    free = {item.name: item for item in tune_space.free}
+    fixed = {item.name: item for item in tune_space.fixed}
+    tied = {item.name for item in tune_space.tied}
+    k3_ref = None if proximal is None else proximal.tied_k3_ref
+    if STIFFNESS_SCALE_PARAM in tied:
+        raise ValueError(f"tune_space: {STIFFNESS_SCALE_PARAM} must be free or fixed, not tied")
+    present = STIFFNESS_SCALE_PARAM in free or STIFFNESS_SCALE_PARAM in fixed
+    if not present and k3_ref is None:
+        return
+    if not present:
+        raise ValueError(
+            f"proximal_compliance.tied_k3_ref requires a '{STIFFNESS_SCALE_PARAM}' "
+            "tune_space parameter (free or fixed)"
+        )
+    if k3_ref is None:
+        raise ValueError(
+            f"tune_space parameter '{STIFFNESS_SCALE_PARAM}' requires proximal_compliance.tied_k3_ref"
+        )
+    derived = sorted((set(free) | set(fixed) | tied) & set(_TIED_K3_NAMES))
+    if derived:
+        raise ValueError(
+            f"tune_space must not set {derived}: with '{STIFFNESS_SCALE_PARAM}' the tree k3 "
+            "is s * proximal_compliance.tied_k3_ref"
+        )
+    if compliance_model != "olufsen":
+        raise ValueError(f"'{STIFFNESS_SCALE_PARAM}' requires compliance_model='olufsen'")
+    lowest = (
+        FreeParamConfig._bound_to_float(free[STIFFNESS_SCALE_PARAM].lb)
+        if STIFFNESS_SCALE_PARAM in free
+        else fixed[STIFFNESS_SCALE_PARAM].value
+    )
+    if not lowest > 0.0:
+        raise ValueError(f"'{STIFFNESS_SCALE_PARAM}' must be > 0 (lower bound or fixed value)")
 
 
 class LeafResistanceConfig(BaseModel):
@@ -1037,6 +1107,7 @@ class ImpedanceTuningConfig(BaseModel):
                 "polish requires objective_tree_policy: without it the optimizer already "
                 "uses the final per-cap trees"
             )
+        _validate_tied_stiffness(self.proximal_compliance, self.tune_space, self.compliance_model)
         return self
 
     @model_validator(mode="before")
