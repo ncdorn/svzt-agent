@@ -20,6 +20,7 @@ from svztagent.config.load import (
     resolve_cluster,
     resolve_patient_alias,
 )
+from svztagent.config.models import STIFFNESS_SCALE_PARAM
 from svztagent.core.errors import AdapterExecutionError, ConfigError
 from svztagent.core.monitor import (
     MonitorObservation,
@@ -142,6 +143,21 @@ def _iteration_impedance_config(
     ):
         if rendered.get(key) is None or rendered["tuning_model"] != "full_pa":
             rendered.pop(key, None)
+    if rendered["tuning_model"] != "full_pa":
+        # The tied stiffness multiplier lives on the full-PA seed vessels;
+        # without proximal_compliance svZeroDTrees would reject it on the cluster.
+        tune_space = rendered.get("tune_space") or {}
+        names = {
+            str(entry.get("name"))
+            for section in ("free", "fixed")
+            for entry in tune_space.get(section) or []
+        }
+        if STIFFNESS_SCALE_PARAM in names:
+            raise ConfigError(
+                f"iteration {iteration} renders tuning_model 'rri' (seed policy {seed_policy!r}), "
+                f"but tune_space has '{STIFFNESS_SCALE_PARAM}', which needs the full-PA seed "
+                "vessels; give the patient a tune_space with a free comp.lpa.k3 instead"
+            )
     return rendered
 
 

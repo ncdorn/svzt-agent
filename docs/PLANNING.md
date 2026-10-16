@@ -30,6 +30,13 @@ Phase 2 is plan-only:
   - `runs/<run_id>/execution_plan.json`
   - `runs/<run_id>/execution_plan.yaml`
 
+The plan records steps, paths and commands, not tuning parameters. The
+resolved impedance configuration of a `run tune --dry-run` (tune space with
+free parameters and bounds, `proximal_compliance`, objective) is rendered into
+`runs/<run_id>/iterations/iter-NN/run_tune_iter.sh` (`zerod_tuning_config`);
+review it there, e.g. to confirm a patient's `stiffness_scale` and xi bounds
+before submission (`docs/TUNING_MODEL.md`).
+
 ## CLI
 Generate a deterministic tune workflow plan:
 

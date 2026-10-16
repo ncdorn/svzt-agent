@@ -11,6 +11,9 @@ patient does not fit.
 - Study that produced the configuration (TST-STAN-5):
   `svZeroDTrees/examples/adaptation/tst5-physiological-tuning-study/`
   (`OPTION1.md`, `FINDINGS.md`).
+- Stiffness identifiability study behind the tied stiffness multiplier and
+  the xi floor of 2.1 (TST-STAN-3):
+  `svZeroDTrees/examples/adaptation/tst3-stiffness-identifiability/FINDINGS.md`.
 
 svzt-agent does not implement any of the model. It validates the
 `tuning.impedance` block, merges per-patient overrides, renders the result
@@ -24,9 +27,10 @@ The 0D seed (learned or calibrated full-PA model of the 3D domain) gets a
 structured-tree impedance boundary condition at every outlet cap. Trees are
 built at each cap's measured diameter with Olufsen stiffness
 Eh/r = k1·exp(k2·r) + k3. Per side, svZeroDTrees tunes the radius exponent
-`xi` and the asymmetry `eta_sym`, plus a shared `k3`; `k1`, `k2`, `lrr` and
-`d_min` are fixed at literature values. The 0D seed vessels get thin-wall
-compliance at Eh/r = 5e4 dyn/cm². The outlet pressure Pd comes from a
+`xi` and the asymmetry `eta_sym`. One shared stiffness multiplier s sets both
+the 0D seed vessels' thin-wall Eh/r = s·5e4 dyn/cm² and the trees'
+k3 = s·1e5 (§8 item 9); `k1`, `k2`, `lrr` and `d_min` are fixed at literature
+values. The outlet pressure Pd comes from a
 per-patient policy. The objective is a Gaussian likelihood in mmHg. The
 optimizer runs on one shared tree per side, then polishes on the per-cap trees
 that are actually exported.
@@ -44,14 +48,14 @@ be overridden per patient in `config/patients.yaml` under
 | `wedge_pressure_policy` | `diastolic_offset` | How Pd is derived (§3). Allowed: `clamp_to_diastolic`, `measured`, `precapillary_fraction`, `diastolic_offset`. |
 | `diastolic_offset_mmhg` | `2.0` | Pd = PA diastolic − offset (`diastolic_offset` only). |
 | `precapillary_fraction` | `0.332` | Pd = PCWP + f·(mPAP − PCWP) (`precapillary_fraction` only). |
-| `proximal_compliance` | `{wall_ehr: 5.0e+4}` | Thin-wall C = 3AL/(2·Eh/r) on rigid seed vessels; `null` disables it. Full-PA only; not allowed with `convert_to_cm`. |
+| `proximal_compliance` | `{wall_ehr: 5.0e+4, tied_k3_ref: 1.0e+5}` | Thin-wall C = 3AL/(2·Eh/r) on seed vessels; `null` disables it. Full-PA only; not allowed with `convert_to_cm`. `tied_k3_ref` turns on the tied stiffness multiplier: with a `stiffness_scale` tune-space parameter s, every objective evaluation uses Eh/r = s·`wall_ehr` on **every** seed vessel (C kept from an earlier iteration is overwritten) and k3 = s·`tied_k3_ref` on both trees. Omitted, the rendered block stays `{wall_ehr}`. |
 | `tree_max_nodes` | `1000000` | Node budget per structured tree; trees that hit it are flagged as truncated. |
 | `leaf_resistance` | unset (evaluated on TST-STAN-5 and not adopted: χ² 50.6 vs 17.2; §8) | `{downstream_fraction: f}`: every tree leaf gets one resistance to the outlet pressure carrying the fraction `f` of the tree's DC resistance (capillary + venous bed). Requires `wedge_pressure_policy: measured` (outlet at PCWP) and `tuning_model: full_pa`. `tuning_diagnostics.json` reports the resulting arterial vs capillary + venous split of PVR (`leaf_resistance`). |
 | `polish` | `{maxfev: 100}` | Per-cap Nelder–Mead polish after the shared-tree fit. Needs `tuning_model: full_pa` and `objective_tree_policy`. Optional `initial_simplex_step`. |
 | `objective_tree_policy` | `{use_mean: true, reference_diameter: conductance_matched}` | Shared surrogate trees used during optimization. |
 | `tuning_model` | `full_pa` | `rri` iterations automatically drop `objective_tree_policy`, `proximal_compliance` and `polish` (`_iteration_impedance_config`). |
 | `diameter_scale`, `use_mean` | `1.0`, `false` | Exported trees sit at the measured cap diameters, one per cap. |
-| `tune_space` | xi ∈ [2.33, 3.0], eta_sym ∈ [0.3, 1.0] per side; `comp.lpa.k3` ∈ [5e4, 4e5] (log), tied to rpa; fixed lrr 10, d_min 0.01, k1 2.6e5, k2 −14 | Free, fixed and tied parameters. svZeroDTrees rejects parameter names it does not recognize. |
+| `tune_space` | xi ∈ [2.1, 3.0], eta_sym ∈ [0.3, 1.0] per side; `stiffness_scale` ∈ [0.5, 20] (log, init 1 = the literature point); fixed lrr 10, d_min 0.01, k1 2.6e5, k2 −14 | Free, fixed and tied parameters. svZeroDTrees rejects parameter names it does not recognize. Until 2026-10-16: xi ∈ [2.33, 3.0] and a free `comp.lpa.k3` ∈ [5e4, 4e5] with proximal Eh/r fixed at 5e4. A patient that must keep the old form needs a patient `tune_space` with the free k3 and `proximal_compliance: {wall_ehr: 5.0e+4}`. |
 
 Pydantic validation (`src/svztagent/config/models.py`) rejects:
 - `precapillary_fraction` outside [0, 1);
@@ -61,7 +65,13 @@ Pydantic validation (`src/svztagent/config/models.py`) rejects:
 - `wall_ehr` ≤ 0;
 - an unknown policy;
 - `polish` without `objective_tree_policy`;
-- `proximal_compliance` or `polish` with `tuning_model: rri`.
+- `proximal_compliance` or `polish` with `tuning_model: rri`;
+- `tied_k3_ref` ≤ 0, `tied_k3_ref` without a free or fixed `stiffness_scale`
+  (and the reverse), `stiffness_scale` in `tied`, a `stiffness_scale` lower
+  bound (or fixed value) ≤ 0, any `comp.{lpa,rpa}.k3` entry next to
+  `stiffness_scale` (k3 is derived from s), or `stiffness_scale` with
+  `compliance_model: constant`. svZeroDTrees enforces the same rules
+  (`validate_stiffness_scale`), so a dry run fails before submission.
 
 **Override semantics.** A patient override changes only the keys it names.
 `objective`, `polish` and `stopping` are patched field by field: for example,
@@ -111,7 +121,10 @@ block a run. Each check reads `config/clinical_targets.yaml` when present:
 - `proximal_compliance.wall_ehr` more than 2× outside the deformable 3D wall's
   E·h/r over r ∈ [0.2, 1.0] cm. The 3D model replaces the same vessels, so a
   mismatched wall means the 3D-coupled model will not reproduce the tuned 0D
-  proximal compliance (§8, decision 1).
+  proximal compliance (§8, decision 1);
+- the tied stiffness multiplier with a fixed numeric `elasticity_modulus` on a
+  deformable 3D wall: s changes the proximal Eh/r every iteration, so only
+  `match_proximal_compliance` keeps the 3D wall matched.
 
 **Job preflight (exit code 8).** Before any work, the Slurm job compares the
 rendered impedance keys with `svzerodtrees.tuning.SUPPORTED_IMPEDANCE_KEYS`.
@@ -119,7 +132,11 @@ If an older svZeroDTrees lacks that symbol, the job instead checks for the new
 features directly. When the cluster's svZeroDTrees is too old for the
 configuration, the job exits with code 8 and names the unsupported keys; it
 does not silently ignore them. Fix: `svzt update` (or install the current
-svZeroDTrees on the cluster), then resubmit.
+svZeroDTrees on the cluster), then resubmit. The preflight checks top-level
+keys only: an svZeroDTrees older than the tied stiffness multiplier fails at
+the start of tuning instead ("Unknown keys in ... proximal_compliance:
+['tied_k3_ref']"), so update the cluster install before submitting
+any patient.
 
 **Iteration gate in sigma mode.** With `objective.type: likelihood` and a
 non-null `target_sigma`, the 3D iteration gate and the 0D pre-mapping gate both
@@ -140,7 +157,7 @@ and `tuning_diagnostics.json` in `iteration_decision.json` under
 |---|---|
 | `optimized_params.csv` | Final parameters, after the polish when it ran. |
 | `optimized_params_shared.csv`, `pa_config_tuning_snapshot_shared.json` | Shared-tree optimum before the polish (only when `polish` is set). Written next to the other results but not listed in `tuning_artifacts`. |
-| `seed_with_proximal_compliance.json` | The seed actually tuned, with proximal C filled in. The original seed is never modified. |
+| `seed_with_proximal_compliance.json` | The seed actually tuned, with proximal C filled in. The original seed is never modified. With the tied stiffness multiplier it holds C at the selected s, and `tuning_diagnostics.json` `proximal_compliance` adds `stiffness_scale`, `wall_ehr_ref`, `tied_k3_ref` and `tree_k3`; its `wall_ehr` and `matched_uniform_wall_eh` are at the selected s, so `match_proximal_compliance` follows it. `optimized_params.csv` gains `stiffness_scale` and `proximal_wall_ehr` columns; `stiffness_scale` seeds the next iteration. |
 | `tuning_diagnostics.json` | Fit and model-plausibility summary (§6). |
 
 ## 6. Reading `tuning_diagnostics.json`
@@ -176,12 +193,14 @@ Full evidence is in `svZeroDTrees/docs/pulmonary_tuning_model.md` §2.
   compliance had to sit in the trees behind a high proximal impedance. 5e4 is
   the Krenz & Dawson pulmonary-artery value. With it, TST-STAN-5 fit with
   literature tree stiffness. Without it, tree stiffness had to go to k3 = 0.
-- **Literature stiffness (k1 2.6e5, k2 −14) with only k3 free.** k2 is not
-  identifiable from the four targets (Paun 2020). k3 ∈ [5e4, 4e5] spans the
-  published values and stays inside the SV/PP compliance bracket.
-- **xi ∈ [2.33, 3], eta_sym ∈ [0.3, 1], per side.** These are measured and
-  theoretical branching ranges (Murray, Uylings, Huang, Miles et al.). They
-  are free per side so the split can be fit.
+- **Literature stiffness (k1 2.6e5, k2 −14), one tied multiplier for k3 and
+  the proximal wall.** k2 is not identifiable from the four targets (Paun
+  2020). The proximal Eh/r and k3 are identifiable only together (§8 item 9),
+  so one s ∈ [0.5, 20] scales both from the literature point (5e4, 1e5).
+- **xi ∈ [2.1, 3], eta_sym ∈ [0.3, 1], per side.** The xi floor is the lowest
+  measured pulmonary value (Miles et al. 2025), not Uylings' theoretical 2.33;
+  eta spans measured asymmetry. Both are free per side so the split can be
+  fit.
 - **lrr 10, d_min 0.01 cm.** Mid-literature length ratio (7–13) and capillary
   cutoff.
 - **Measured cap diameters, 1M nodes.** These are the published geometry. The
@@ -226,7 +245,8 @@ Full evidence is in `svZeroDTrees/docs/pulmonary_tuning_model.md` §2.
      small-strain assumption and beyond MRI-observed pulsatility (about
      20–40% area change, i.e. Eh/r ≈ 1.5–3e5). Patient-measured proximal
      stiffness is the first future change (§9).
-2. **k3 stays free (decided 2026-10-06).** In TST-STAN-5, fixing k3 at 1e5
+2. **k3 stays free (decided 2026-10-06; superseded 2026-10-16 by item 9,
+   which derives k3 from the tied multiplier).** In TST-STAN-5, fixing k3 at 1e5
    cost about 1 χ² (18.3 vs 17.2) and kept total compliance inside the SV/PP
    bracket; free k3 reached 5e4 and left it. Keeping k3 free lets patients with
    stiffer vessels (e.g. higher pressures) move it. Check
@@ -286,6 +306,31 @@ Full evidence is in `svZeroDTrees/docs/pulmonary_tuning_model.md` §2.
    (off) for testing on patients without regurgitation. Details:
    `svZeroDTrees/docs/pulmonary_tuning_model.md` §2.3.
 
+9. **Tied stiffness multiplier and xi ≥ 2.1, cohort default (decided
+   2026-10-16).** Under the full-PA objective the proximal wall Eh/r and the
+   tree k3 act on systolic and diastolic pressure with nearly the same
+   signature (corr −0.99); above k3 ≈ 8e5 only their combination, total
+   compliance ≈ 0.45 mL/mmHg, is identified. Freeing both adds an
+   unresolvable direction; fixing a cohort k3 does not fit both TST-STAN-3
+   (wants k3 ≈ 7.5e5) and TST-STAN-5 (wanted the lower bound). So
+   the cohort tunes one s: Eh/r = s·5e4, k3 = s·1e5, s ∈ [0.5, 20] in log
+   space (below 1 so softer patients can fit too). The remaining mean-pressure and split
+   shortfall came from the rpa xi floor 2.33 (Uylings' theoretical value);
+   measured pulmonary xi go down to 2.1 (Miles et al. 2025). With xi ≥ 2.1 and
+   lrr fixed at 10 the study fit is χ² 0.29 (67.3/9.6/31.2 mmHg, split 0.445;
+   targets 67/9/32, 0.446) at s 6.56, rpa xi 2.17 inside the bound. A free lrr
+   was rejected: it is not identifiable (lrr 14 and 20 both fit). The xi
+   floor does not bind for TST-STAN-5 (xi at the upper bound 3). Neither
+   change was fitted on TST-STAN-1, -2, -5 or -9 before adoption; check their
+   `parameters_at_bounds` and `compliance_in_svpp_bracket`. Study caveats:
+   shared conductance-matched trees, the iter-02 seed, local periodic-cycle
+   solves.
+   - In-flight runs keep working: their next iteration re-resolves this
+     config, earlier xi/eta lie inside the new bounds, the old CSV has no
+     `stiffness_scale` (so s starts at 1), and its k3 column is ignored.
+     Proximal C of a calibrated seed is recomputed from geometry at the
+     tuned s rather than kept.
+
 ## 9. If a patient does not fit
 
 Read `tuning_diagnostics.json` first. Then use the symptom → remedy table in
@@ -295,7 +340,7 @@ remedies are:
 | symptom | first change |
 |---|---|
 | Diastolic far too low (regurgitant) | Known limitation. Check `outlet_pressure`; consider measured proximal stiffness (lower `wall_ehr` only with MRI distensibility data). |
-| Pulse too small / diastolic too high (no PR) | Fix k3 at 1e5 or widen k3 upward (stiffer; up to ~8e6 for pulmonary hypertension, e.g. TST-STAN-3); check `diastolic_offset_mmhg`. |
+| Pulse too small / diastolic too high (no PR) | Check `stiffness_scale` in `parameters_at_bounds`; raise its upper bound if it sits at 20. Check `diastolic_offset_mmhg`. |
 | Mean off with xi or eta at a bound | Check the flow source and the outlet policy; consider lrr within 7–13. |
 | Many truncated trees | Raise `tree_max_nodes` and memory (~5 GB per 1M nodes). |
 | Published far from optimizer fit | Keep `polish`; raise `polish.maxfev`. |

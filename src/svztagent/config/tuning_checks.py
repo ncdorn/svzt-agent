@@ -95,6 +95,16 @@ def tuning_model_warnings(config: WorkspaceConfig, workspace_root: str | Path) -
                     f"{patient.alias}: elasticity_modulus={MATCH_PROXIMAL_COMPLIANCE!r} needs "
                     "tuning.impedance.proximal_compliance; the 3D stage will fail without it"
                 )
+        elif (
+            proximal is not None
+            and proximal.tied_k3_ref is not None
+            and threed.wall_model == "deformable"
+        ):
+            warnings.append(
+                f"{patient.alias}: the tied stiffness multiplier tunes the proximal Eh/r "
+                f"(stiffness_scale x wall_ehr), but the deformable 3D wall has a fixed "
+                f"elasticity_modulus; use {MATCH_PROXIMAL_COMPLIANCE!r} so the 3D wall follows it"
+            )
         elif proximal is not None and threed.wall_model == "deformable":
             eh = float(threed.elasticity_modulus) * float(threed.shell_thickness)
             r_lo, r_hi = PROXIMAL_RADIUS_RANGE_CM
