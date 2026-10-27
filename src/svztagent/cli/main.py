@@ -245,6 +245,11 @@ def build_parser() -> argparse.ArgumentParser:
     preop_finalize.add_argument(
         "--correction-id", required=False, help="Wall-correction record to use (default: the latest)"
     )
+    preop_finalize.add_argument(
+        "--protocol",
+        required=False,
+        help="Declare the frozen protocol the run follows (e.g. preop_v1.1); its stage becomes preop_finalized",
+    )
     preop_finalize.set_defaults(handler=cmd_preop_finalize)
 
     config_cmd = subparsers.add_parser("config", help="Validate workspace configuration")
@@ -799,6 +804,7 @@ def cmd_preop_finalize(args: argparse.Namespace) -> int:
         workspace_root=workspace_root,
         run_id=args.run_id,
         correction_id=args.correction_id,
+        protocol=args.protocol,
     )
     handoff = result.handoff
     print(f"Run ID: {result.run_id}")
@@ -819,6 +825,11 @@ def cmd_preop_finalize(args: argparse.Namespace) -> int:
         if handoff.threed_overrides
         else "Wall: <no overrides>"
     )
+    if result.protocol is not None:
+        print(
+            f"Protocol: {result.protocol.name}, stage {result.protocol.stage}"
+            f"{' (updated)' if result.protocol_changed else ''}"
+        )
     return 0
 
 

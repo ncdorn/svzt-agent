@@ -31,11 +31,13 @@ from svztagent.config.load import detect_workspace_root, load_workspace_config, 
 from svztagent.core.errors import ConfigError
 from svztagent.core.manifest import (
     ConvergedPreopIteration,
+    ProtocolDeclaration,
     WallCorrectionRecord,
     _utc_now_iso,
     latest_wall_correction,
     read_manifest,
     record_converged_preop_iteration,
+    record_protocol_stage,
     record_wall_correction,
     write_manifest,
 )
@@ -142,6 +144,8 @@ class PreopFinalizeResult:
     action: str
     handoff: ConvergedPreopIteration
     previous: ConvergedPreopIteration | None
+    protocol: ProtocolDeclaration | None = None
+    protocol_changed: bool = False
 
 
 def _sha256(path: Path) -> str:
@@ -805,13 +809,17 @@ def finalize_preop_source(
     run_id: str,
     *,
     correction_id: str | None = None,
+    protocol: str | None = None,
 ) -> PreopFinalizeResult:
     """Record a completed wall correction as the run's pre-op source (``svzt preop finalize``).
 
     Local only (no remote calls).  Idempotent: if ``converged_preop_iteration``
-    already names this correction with the same content, nothing is written.
+    already names this correction with the same content, it is not rewritten.
     Refuses an unfinished or unpublished correction, and refuses to replace a
     different pre-op source once post-op has been submitted from it.
+
+    ``protocol`` declares the run's protocol (e.g. ``preop_v1.1``); a run that
+    declares one has its stage set to ``preop_finalized``.
     """
 
     validated_run_id = validate_run_id(run_id)
@@ -831,12 +839,17 @@ def finalize_preop_source(
         )
     current = manifest.converged_preop_iteration
     if _handoff_matches(current, record):
+        updated = _finalized_protocol(manifest, protocol)
+        if updated is not manifest:
+            write_manifest(updated, local_paths.manifest)
         return PreopFinalizeResult(
             run_id=validated_run_id,
             correction_id=record.correction_id,
             action="unchanged",
             handoff=current,
             previous=None,
+            protocol=updated.protocol,
+            protocol_changed=updated is not manifest,
         )
     if current is not None and manifest.postop_run is not None:
         raise ConfigError(
@@ -844,7 +857,8 @@ def finalize_preop_source(
             f"({current.selection_kind}, {current.wall_correction_id or iteration_dir_name(current.iteration)}); "
             "start a new run instead of replacing it"
         )
-    updated = _record_preop_handoff(manifest, record)
+    with_protocol = _finalized_protocol(manifest, protocol)
+    updated = _record_preop_handoff(with_protocol, record)
     write_manifest(updated, local_paths.manifest)
     return PreopFinalizeResult(
         run_id=validated_run_id,
@@ -852,4 +866,14 @@ def finalize_preop_source(
         action="written" if current is None else "replaced",
         handoff=updated.converged_preop_iteration,
         previous=current,
+        protocol=updated.protocol,
+        protocol_changed=with_protocol is not manifest,
     )
+
+
+def _finalized_protocol(manifest, protocol: str | None):
+    """The manifest with its protocol at ``preop_finalized``; unchanged (same object) if nothing to do."""
+
+    if protocol is None and manifest.protocol is None:
+        return manifest
+    return record_protocol_stage(manifest, stage="preop_finalized", name=protocol)

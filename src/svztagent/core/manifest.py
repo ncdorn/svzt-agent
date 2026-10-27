@@ -7,8 +7,9 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 import yaml
 
 from svztagent.config.load import resolve_repository_locations
@@ -346,6 +347,26 @@ class WallCorrectionRecord(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+# Stages of a frozen pre-op protocol (svz/docs/preop_protocol_v1):
+# "tuning" (iterations 1-2), "wall_correction" (steps 7-8 under way) and
+# "preop_finalized" (``svzt preop finalize`` recorded the pre-op source).
+PreopProtocolStage = Literal["tuning", "wall_correction", "preop_finalized"]
+
+
+class ProtocolDeclaration(BaseModel):
+    """The frozen protocol a run follows, e.g. ``preop_v1.1``, and how far it has got.
+
+    Declarative only: workflows do not change behavior on it.  Optional so
+    runs made before 2026-10-26 (and ad hoc runs) load unchanged.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    stage: PreopProtocolStage
+    updated_at: str
+
+
 class RunManifest(BaseModel):
     run_id: str
     created_at: str
@@ -378,6 +399,7 @@ class RunManifest(BaseModel):
     adaptation_runs: list[AdaptationRunRecord] = Field(default_factory=list)
     paraview_viz_runs: list[ParaViewVizRecord] = Field(default_factory=list)
     wall_correction_runs: list[WallCorrectionRecord] = Field(default_factory=list)
+    protocol: ProtocolDeclaration | None = None
 
 
 def _utc_now_iso() -> str:
@@ -1774,6 +1796,32 @@ def copy_config_snapshot(workspace_root: Path, config_snapshot_dir: Path) -> Non
 
 def latest_wall_correction(manifest: RunManifest) -> WallCorrectionRecord | None:
     return manifest.wall_correction_runs[-1] if manifest.wall_correction_runs else None
+
+
+def record_protocol_stage(
+    manifest: RunManifest,
+    *,
+    stage: str,
+    name: str | None = None,
+    at: str | None = None,
+) -> RunManifest:
+    """Declare the run's protocol (``name``) or advance its stage.
+
+    A run's protocol never changes: naming a different one is refused, and a
+    run without a declared protocol needs ``name`` to get one.
+    """
+
+    current = manifest.protocol
+    if current is not None and name is not None and name != current.name:
+        raise ConfigError(f"run '{manifest.run_id}' already follows protocol {current.name!r}, not {name!r}")
+    if current is None and name is None:
+        raise ConfigError(f"run '{manifest.run_id}' declares no protocol; name one to record stage {stage!r}")
+    resolved_name = name or current.name
+    if current is not None and current.name == resolved_name and current.stage == stage:
+        return manifest
+    timestamp = at or _utc_now_iso()
+    declaration = ProtocolDeclaration(name=resolved_name, stage=stage, updated_at=timestamp)
+    return manifest.model_copy(update={"protocol": declaration, "updated_at": timestamp})
 
 
 def record_wall_correction(manifest: RunManifest, record: WallCorrectionRecord) -> RunManifest:

@@ -674,3 +674,38 @@ def test_cli_preop_finalize_is_idempotent(full_pa_run, capsys):
     assert main(["--workspace-root", str(root), "preop", "finalize", "--run-id", RUN_ID]) == 0
     assert "Pre-op source: unchanged" in capsys.readouterr().out
 
+
+def test_finalize_declares_the_protocol_without_touching_an_identical_handoff(full_pa_run):
+    root = _completed_correction(full_pa_run)
+    path = root / "runs" / RUN_ID / "manifest.yaml"
+    first = finalize_preop_source(root, RUN_ID)
+    assert first.protocol is None and read_manifest(path).protocol is None
+    handoff = read_manifest(path).converged_preop_iteration
+
+    declared = finalize_preop_source(root, RUN_ID, protocol="preop_v1.1")
+    assert declared.action == "unchanged" and declared.protocol_changed
+    manifest = read_manifest(path)
+    assert (manifest.protocol.name, manifest.protocol.stage) == ("preop_v1.1", "preop_finalized")
+    assert manifest.converged_preop_iteration == handoff
+
+    before = path.read_bytes()
+    again = finalize_preop_source(root, RUN_ID)
+    assert not again.protocol_changed and again.protocol.name == "preop_v1.1"
+    assert path.read_bytes() == before
+    with pytest.raises(ConfigError, match="already follows protocol 'preop_v1.1'"):
+        finalize_preop_source(root, RUN_ID, protocol="preop_v2")
+
+
+def test_record_protocol_stage_rules(full_pa_run):
+    from svztagent.core.manifest import record_protocol_stage
+
+    root, _remote_run, _files, _tuned_sha = full_pa_run
+    manifest = read_manifest(root / "runs" / RUN_ID / "manifest.yaml")
+    with pytest.raises(ConfigError, match="declares no protocol"):
+        record_protocol_stage(manifest, stage="tuning")
+    declared = record_protocol_stage(manifest, stage="tuning", name="preop_v1.1", at="2026-10-26T00:00:00+00:00")
+    assert declared.protocol.stage == "tuning" and declared.protocol.updated_at == "2026-10-26T00:00:00+00:00"
+    assert record_protocol_stage(declared, stage="tuning") is declared
+    assert record_protocol_stage(declared, stage="wall_correction").protocol.stage == "wall_correction"
+    with pytest.raises(ValueError):
+        record_protocol_stage(declared, stage="postop")
