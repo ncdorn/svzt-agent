@@ -49,7 +49,9 @@ _WORKSPACE_TEMPLATE_FILES: dict[str, str] = {
         diameter_scale: 0.1
       threed:
         wall_model: "deformable"
-        prestress_file: "/oak/stanford/groups/amarsden/ndorn/PPAS-study/tof-stent/TST-STAN-1/prestress/1-procs/result_009.vtu"
+        # The Oak prestress (prestress/1-procs/result_009.vtu) was solved on the unscaled
+        # mesh; with mesh_scale_factor 1.147 the prestress must come from the scaled wall.
+        prestress_file: "generate"
         dt: 0.0004
         execution:
           slurm:
