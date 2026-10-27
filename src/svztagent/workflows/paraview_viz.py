@@ -1017,6 +1017,7 @@ def _prepare_paraview_viz_job(
             job_name=job_name,
             account=config.defaults.scheduler.account,
             partition=config.defaults.scheduler.partition,
+            nodes=config.defaults.scheduler.nodes,
             wall_time=f"{viz_cfg.wall_time_hours}:00:00",
             mem=viz_cfg.mem,
             cpus=str(viz_cfg.cpus),

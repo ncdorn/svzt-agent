@@ -18,6 +18,7 @@ class SlurmSubmitOptions:
     wall_time: str | None = None
     mem: str | None = None
     cpus: str | None = None
+    nodes: str | None = None
 
 
 def build_sbatch_command(script_path: str, options: SlurmSubmitOptions) -> list[str]:
@@ -26,6 +27,8 @@ def build_sbatch_command(script_path: str, options: SlurmSubmitOptions) -> list[
         cmd.extend(["--account", options.account])
     if options.partition:
         cmd.extend(["--partition", options.partition])
+    if options.nodes:
+        cmd.extend(["--nodes", options.nodes])
     if options.wall_time:
         cmd.extend(["--time", options.wall_time])
     if options.mem:
@@ -49,11 +52,13 @@ def build_scancel_command(job_id: str) -> list[str]:
 
 
 def parse_sbatch_job_id(stdout: str) -> str:
-    line = stdout.strip().splitlines()[0] if stdout.strip() else ""
-    job_id = line.split(";")[0].strip()
-    if not job_id:
-        raise SchedulerResponseError(f"unable to parse job id from sbatch output: '{stdout}'")
-    return job_id
+    # TACC's sbatch wrapper prints a login banner and filter checks on stdout
+    # before the --parsable "<id>[;cluster]" line, so take the last such line.
+    for line in reversed(stdout.splitlines()):
+        job_id = line.strip().split(";")[0].strip()
+        if job_id.isdigit():
+            return job_id
+    raise SchedulerResponseError(f"unable to parse job id from sbatch output: '{stdout}'")
 
 
 def _first_non_empty_line(stdout: str) -> str | None:

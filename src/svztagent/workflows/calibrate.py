@@ -491,6 +491,7 @@ def _build_calibration_scheduler(*, cluster, config, remote_exec, run_id: str) -
             job_name=f"{run_id}-calibration",
             account=config.defaults.scheduler.account,
             partition=config.defaults.scheduler.partition,
+            nodes=config.defaults.scheduler.nodes,
             wall_time=config.defaults.scheduler.wall_time,
             mem=config.defaults.scheduler.mem,
             cpus=config.defaults.scheduler.cpus,

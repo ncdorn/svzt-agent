@@ -1041,10 +1041,14 @@ def _submit_job(script_path: Path) -> str:
     )
     if proc.returncode != 0:
         raise RuntimeError(f"sbatch failed rc={{proc.returncode}}: {{proc.stderr.strip()}}")
-    stdout = proc.stdout.strip()
-    if not stdout:
+    if not proc.stdout.strip():
         raise RuntimeError("sbatch returned empty stdout")
-    return stdout.split(";")[0].strip()
+    # TACC's sbatch prints a banner on stdout; the job id is the last "<id>[;cluster]" line.
+    for line in reversed(proc.stdout.splitlines()):
+        job_id = line.strip().split(";")[0].strip()
+        if job_id.isdigit():
+            return job_id
+    raise RuntimeError(f"unable to parse job id from sbatch stdout: {{proc.stdout!r}}")
 
 
 def _query_state(job_id: str) -> tuple:

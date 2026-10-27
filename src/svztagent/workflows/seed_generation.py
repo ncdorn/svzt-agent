@@ -137,6 +137,7 @@ def prepare_calibrated_full_pa_seed_generation(
         job_name=f"{run_id}-calibration",
         account=scheduler.account,
         partition=scheduler.partition,
+        nodes=scheduler.nodes,
         wall_time=scheduler.wall_time,
         mem=scheduler.mem,
         cpus=scheduler.cpus,

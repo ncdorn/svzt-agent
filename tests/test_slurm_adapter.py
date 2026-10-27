@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
+import svztagent
+from svztagent.config.models import SchedulerDefaults
+from svztagent.core.errors import SchedulerResponseError
 from svztagent.hpc.fake import FakeRemoteExecAdapter
 from svztagent.hpc.interfaces import CommandResult
-from svztagent.hpc.slurm import SlurmSchedulerAdapter, SlurmSubmitOptions
+from svztagent.hpc.slurm import (
+    SlurmSchedulerAdapter,
+    SlurmSubmitOptions,
+    build_sbatch_command,
+    parse_sbatch_job_id,
+)
 
 
 def _scheduler(remote: FakeRemoteExecAdapter) -> SlurmSchedulerAdapter:
@@ -67,3 +79,50 @@ def test_slurm_status_and_accounting_command_construction():
     assert accounting.raw_state == "COMPLETED"
     assert remote.calls[0][0][0] == "squeue"
     assert remote.calls[1][0][0] == "sacct"
+
+
+def test_sbatch_command_passes_explicit_node_count():
+    # TACC systems (Stampede3) reject submissions without -N.
+    cmd = build_sbatch_command(
+        "/scratch/run-001/run_tune_iter.sh",
+        SlurmSubmitOptions(job_name="run-001", partition="skx", nodes="1", cpus="4"),
+    )
+    assert cmd[cmd.index("--nodes") + 1] == "1"
+    assert cmd[-1] == "/scratch/run-001/run_tune_iter.sh"
+
+
+def test_sbatch_command_omits_node_count_by_default():
+    cmd = build_sbatch_command(
+        "/scratch/run-001/run_tune_iter.sh",
+        SlurmSubmitOptions(job_name="run-001", partition="normal"),
+    )
+    assert "--nodes" not in cmd
+
+
+def test_scheduler_defaults_nodes_is_optional():
+    assert SchedulerDefaults().nodes is None
+    assert SchedulerDefaults(nodes="1").nodes == "1"
+
+
+# Abridged stdout of `sbatch --parsable` on Stampede3: TACC's wrapper prints a
+# banner and its filter checks before the job id.
+TACC_SBATCH_STDOUT = """
+-----------------------------------------------------------------
+          Welcome to the Stampede3 Supercomputer
+-----------------------------------------------------------------
+
+--> Verifying valid submit host (login3)...OK
+--> Checking available allocation (TG-PHY260317)...OK
+3623254
+"""
+
+
+def test_parse_sbatch_job_id_skips_tacc_banner():
+    assert parse_sbatch_job_id(TACC_SBATCH_STDOUT) == "3623254"
+    assert parse_sbatch_job_id("12345;sherlock\n") == "12345"
+
+
+def test_parse_sbatch_job_id_rejects_output_without_job_id():
+    with pytest.raises(SchedulerResponseError):
+        parse_sbatch_job_id("-----\nWelcome\n")
+

@@ -163,6 +163,7 @@ def _build_postprocess_scheduler_adapter(
             job_name=run_id,
             account=config.defaults.scheduler.account,
             partition=config.defaults.scheduler.partition,
+            nodes=config.defaults.scheduler.nodes,
             wall_time=config.defaults.scheduler.wall_time,
             mem=submit_mem,
             cpus=cpus,

@@ -174,6 +174,8 @@ class SchedulerDefaults(BaseModel):
     wall_time: str = "<HH:MM:SS>"
     mem: str = "<memory>"
     cpus: str = "<count>"
+    # Explicit node count for submitted jobs; TACC systems reject jobs without -N.
+    nodes: str | None = None
 
     @field_validator("account", mode="before")
     @classmethod

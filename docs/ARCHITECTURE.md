@@ -144,7 +144,16 @@ selected stages. `executables.svslicer_path` is required for the postprocess
 stage; `executables.svzerodsolver_build_dir` is passed through when the upstream
 coupler writes its shared-library reference. The effective Python command and
 remote environment are configured with `defaults.execution.python_executable`
-and `defaults.execution.env_activation_hooks`. Patient source paths remain
+and `defaults.execution.env_activation_hooks`. The optional
+`defaults.scheduler.nodes` adds an explicit node count (`--nodes`) to every
+scheduler submission built from the scheduler defaults (tune driver,
+postprocess, calibration, ParaView) and to the tune driver's own `#SBATCH`
+header, which the post-3D driver resubmission reuses; TACC systems such as
+Stampede3 reject jobs without it. Unset, no node count is passed (the Sherlock
+behavior). Every `sbatch --parsable` caller (the adapter and the generated
+driver, adaptation and postop scripts) takes the job ID from the last
+`<id>[;cluster]` line of stdout, because TACC's sbatch wrapper prints a banner
+there first. Patient source paths remain
 read-only; all generated inputs, scripts, logs, reports, and candidate outputs
 must be under the run's `<runs_root>/<run_id>/` directory.
 
