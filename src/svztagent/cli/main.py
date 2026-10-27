@@ -18,7 +18,7 @@ from svztagent.campaigns.adapt_benchmark import (
     run_adapt_benchmark_campaign,
     summarize_adapt_benchmark_campaign,
 )
-from svztagent.core.errors import SvztError
+from svztagent.core.errors import ConfigError, SvztError
 from svztagent.core.manifest import update_run_progress
 from svztagent.core.paths import build_local_run_paths
 from svztagent.core.state import RunLifecycleState
@@ -31,10 +31,7 @@ from svztagent.maintenance.update import (
 )
 from svztagent.postprocess.cfd_results import write_run_cfd_results
 from svztagent.postprocess.tuning_progress import write_tuning_progress
-from svztagent.workflows.postop import (
-    run_postop,
-    select_converged_preop_iteration,
-)
+from svztagent.workflows.postop import run_postop
 from svztagent.workflows.adapt import run_adapt
 from svztagent.workflows.calibrate import (
     query_calibration_status,
@@ -178,11 +175,6 @@ def build_parser() -> argparse.ArgumentParser:
     run_wall_correction_cmd.add_argument(
         "--iteration", required=False, type=int, help="Source tuning iteration (default: current)"
     )
-    run_wall_correction_cmd.add_argument(
-        "--adopt-threed-dir",
-        required=False,
-        help="Verify and adopt an existing wall-corrected 3D directory under runs_root instead of rerunning it",
-    )
     mode_group_wall_correction = run_wall_correction_cmd.add_mutually_exclusive_group()
     mode_group_wall_correction.add_argument(
         "--dry-run", action="store_true", help="Preview commands only (default)"
@@ -224,8 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     preop_subparsers = preop.add_subparsers(dest="preop_command", required=True)
     preop_select = preop_subparsers.add_parser(
         "select",
-        help="DEPRECATED: the wall-correction step now sets the pre-op source "
-        "(svzt wall-correction-status); kept for legacy runs only",
+        help="RETIRED (legacy error): the pre-op source is recorded by svzt preop finalize",
     )
     preop_select.add_argument("--run-id", required=True)
     preop_select.add_argument("--iteration", required=True, type=int)
@@ -676,7 +667,6 @@ def cmd_run_wall_correction(args: argparse.Namespace) -> int:
         workspace_root=workspace_root,
         run_id=args.run_id,
         iteration=args.iteration,
-        adopt_threed_dir=args.adopt_threed_dir,
         mode=_resolve_mode(args.execute),
     )
     rule = result.rule
@@ -774,28 +764,13 @@ def cmd_run_adapt(args: argparse.Namespace) -> int:
 
 
 def cmd_preop_select(args: argparse.Namespace) -> int:
-    print(
-        "WARNING: svzt preop select is deprecated. The wall-correction step records the pre-op "
-        "source (svzt run wall-correction, then svzt wall-correction-status).",
-        file=sys.stderr,
+    # Retired 2026-10-26.  Existing manual handoffs still load and post-op /
+    # adaptation still read them; only recording a new one by hand is gone.
+    raise ConfigError(
+        "svzt preop select is retired: the pre-op source is the wall-corrected 3D run and its matched "
+        f"0D model. Run svzt run wall-correction --run-id {args.run_id}, svzt wall-correction-status "
+        f"{args.run_id} until it completes, then svzt preop finalize --run-id {args.run_id}."
     )
-    workspace_root = detect_workspace_root(args.workspace_root)
-    result = select_converged_preop_iteration(
-        workspace_root=workspace_root,
-        run_id=args.run_id,
-        iteration=args.iteration,
-        reason=args.reason,
-        submit_postprocess=not args.skip_postprocess,
-    )
-    print(f"Run ID: {result.run_id}")
-    print(f"Converged preop iteration: {result.iteration}")
-    print(f"Selection kind: {result.selection_kind}")
-    print(f"Preop dir: {result.remote_preop_dir}")
-    print(f"Tuned 0D config: {result.remote_tuned_zerod_config}")
-    print(f"Canonical coupler: {result.remote_canonical_coupler}")
-    if result.postprocess_job_id:
-        print(f"Selected-preop postprocess job ID: {result.postprocess_job_id}")
-    return 0
 
 
 def cmd_preop_finalize(args: argparse.Namespace) -> int:

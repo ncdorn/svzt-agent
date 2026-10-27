@@ -147,8 +147,3 @@ def wall_only_differences(source_xml: str, candidate_xml: str) -> list[str]:
         if left != right:
             differences.append(f"element {index}: {left[:2]} vs {right[:2]}")
     return differences
-
-
-def relative_mismatch(expected: float, actual: float) -> float:
-    return abs(float(actual) - float(expected)) / max(abs(float(expected)), 1e-300)
-

@@ -322,7 +322,8 @@ class WallCorrectionRecord(BaseModel):
     correction_id: str
     source_iteration: int
     # "rerun": the agent built and submitted the corrected 3D run.
-    # "adopted": an existing 3D directory was verified against the rule.
+    # "adopted" (protocol v1 runs only; the mode was retired 2026-10-26): an
+    # existing 3D directory was verified against the rule.
     mode: str
     status: str = "planned"
     created_at: str

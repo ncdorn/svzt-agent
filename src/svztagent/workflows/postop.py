@@ -351,21 +351,22 @@ def select_converged_preop_iteration(
     scheduler_adapter: SchedulerAdapter | None = None,
     remote_exec_adapter: RemoteExecAdapter | None = None,
 ) -> PreopSelectionResult:
-    """Deprecated: record a tuning iteration as the pre-op source by hand.
+    """Legacy: record a tuning iteration as the pre-op source by hand.
 
-    The wall-correction step now records the pre-op source automatically
-    (``svzt wall-correction-status``).  This remains only for legacy runs
-    without a wall correction and refuses to replace a wall-correction handoff.
+    ``svzt preop select`` is retired (2026-10-26); the pre-op source is the
+    wall-corrected 3D run recorded by ``svzt preop finalize``.  This library
+    function remains so legacy handoffs stay reproducible; it has no CLI
+    entry and refuses to replace a wall-correction handoff.
     """
     root = detect_workspace_root(workspace_root)
     validated_run_id = validate_run_id(run_id)
     local_paths = build_local_run_paths(root, validated_run_id)
     manifest = read_manifest(local_paths.manifest)
     current = manifest.converged_preop_iteration
-    if current is not None and current.selection_kind == "wall_correction":
+    if current is not None and current.selection_kind == WALL_CORRECTION_SELECTION:
         raise ConfigError(
             f"run '{validated_run_id}' already uses the wall-corrected 3D run "
-            f"({current.wall_correction_id}) as its pre-op source; svzt preop select is deprecated"
+            f"({current.wall_correction_id}) as its pre-op source; manual pre-op selection is retired"
         )
 
     record = next(

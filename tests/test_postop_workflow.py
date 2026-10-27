@@ -797,7 +797,7 @@ def test_preop_select_refuses_to_replace_a_wall_correction_handoff(sample_config
     run_id = "run-preop-select-deprecated"
     paths = _prepare_selected_run(sample_config_files, run_id=run_id)
     _use_wall_correction_handoff(paths, run_id)
-    with pytest.raises(ConfigError, match="svzt preop select is deprecated"):
+    with pytest.raises(ConfigError, match="manual pre-op selection is retired"):
         select_converged_preop_iteration(
             workspace_root=sample_config_files,
             run_id=run_id,

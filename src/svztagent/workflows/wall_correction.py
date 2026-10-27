@@ -6,17 +6,16 @@ postprocesses it, and calibrates the iteration's tuned 0D model to it (R, then
 one proximal-compliance multiplier so the 0D reproduces the 3D pulse pressure).
 The result is a tuned 3D run and a matching 0D model.
 
-Two modes:
-
-- ``rerun``: build the corrected 3D input from the iteration's own input
-  (only the elasticity modulus and damping change) and chain solver ->
-  postprocess -> calibration jobs with ``afterok`` dependencies.
-- ``adopted``: verify an existing 3D directory (e.g. one produced before this
-  step existed) against the rule, the iteration's BCs and the postprocess
-  lineage, then submit only the calibration.
+The corrected 3D input is built from the iteration's own input (only the
+elasticity modulus and damping change) and the solver -> postprocess ->
+calibration jobs are chained with ``afterok`` dependencies.  The five
+protocol v1 runs were instead adopted from existing 3D directories with a
+since-retired ``--adopt-threed-dir`` mode; their records keep
+``mode: adopted`` and load unchanged.
 
 Records live in ``manifest.wall_correction_runs`` so the source iteration's
-calibration and postprocess records are never replaced.
+calibration and postprocess records are never replaced.  The step never
+writes the pre-op source: ``svzt preop finalize`` does (finalize_preop_source).
 """
 
 from __future__ import annotations
@@ -53,7 +52,6 @@ from svztagent.core.wall_correction import (
     compute_wall_correction,
     patch_wall_parameters,
     read_wall_parameters,
-    relative_mismatch,
     wall_only_differences,
 )
 from svztagent.hpc.slurm import SlurmSchedulerAdapter, SlurmSubmitOptions
@@ -99,9 +97,6 @@ CALIBRATION_REPORTS = (
     "calibration_compliance_fit.json",
     "calibration_replay.json",
 )
-# Exact floating-point agreement is expected for an adopted run built with the
-# same rule; the tolerance only absorbs text round-tripping of the XML value.
-ADOPT_RELATIVE_TOLERANCE = 1.0e-9
 
 
 @dataclass(frozen=True)
@@ -214,63 +209,11 @@ def _relocate_solver_script(script: str, *, source_dir: str, target_dir: str, jo
     return relocated.replace("--job-name=svFlowSolver", f"--job-name={job_name}")
 
 
-def _verify_adopted(
-    *,
-    rule: WallCorrectionRule,
-    source_xml: str,
-    adopted_xml: str,
-    source_coupler: Path,
-    adopted_coupler: Path,
-    descriptor: Path,
-    remote_descriptor: str,
-    remote_tuned_model: str,
-    tuned_model: Path,
-) -> dict[str, object]:
-    problems: list[str] = []
-    modulus, damping = read_wall_parameters(adopted_xml)
-    modulus_mismatch = relative_mismatch(rule.elasticity_modulus_corrected, modulus)
-    if modulus_mismatch > ADOPT_RELATIVE_TOLERANCE:
-        problems.append(
-            f"elasticity modulus {modulus!r} differs from the rule's {rule.elasticity_modulus_corrected!r}"
-        )
-    if abs(damping - rule.damping_corrected) > 0.05:
-        problems.append(f"damping {damping!r} differs from the rule's {rule.damping_corrected!r}")
-    other = wall_only_differences(source_xml, adopted_xml)
-    if other:
-        problems.append("3D input differs from the source iteration beyond the wall: " + "; ".join(other[:5]))
-    coupler_match = _sha256(source_coupler) == _sha256(adopted_coupler)
-    if not coupler_match:
-        problems.append(f"{COUPLER} differs from the source iteration's BCs")
-    payload = json.loads(descriptor.read_text(encoding="utf-8"))
-    if str(payload.get("status")) != "completed":
-        problems.append(f"postprocess descriptor status is {payload.get('status')!r}")
-    lineage = payload.get("lineage") or {}
-    lineage_path = str(lineage.get("tuned_zerod_config_path") or "")
-    resolved = PurePosixPath(remote_descriptor).parent
-    for part in PurePosixPath(lineage_path).parts:
-        resolved = resolved.parent if part == ".." else resolved / part
-    if not lineage_path or str(resolved) != remote_tuned_model:
-        problems.append(f"postprocess lineage names {lineage_path!r}, not {remote_tuned_model}")
-    if str(lineage.get("tuned_zerod_config_sha256")) != _sha256(tuned_model):
-        problems.append("postprocess lineage sha256 does not match the iteration's tuned 0D model")
-    if problems:
-        raise ConfigError("adopted 3D run failed verification: " + " | ".join(problems))
-    return {
-        "elasticity_modulus": modulus,
-        "elasticity_modulus_relative_mismatch": modulus_mismatch,
-        "damping": damping,
-        "coupler_identical": coupler_match,
-        "wall_only_difference": True,
-        "postprocess_lineage": lineage_path,
-    }
-
-
 def run_wall_correction(
     workspace_root: str | Path,
     run_id: str,
     *,
     iteration: int | None = None,
-    adopt_threed_dir: str | None = None,
     mode: ExecutionMode = ExecutionMode.DRY_RUN,
     transfer_adapter: FileTransferAdapter | None = None,
     scheduler_adapter: SchedulerAdapter | None = None,
@@ -343,33 +286,11 @@ def run_wall_correction(
         lambda_min=policy.lambda_min,
     )
 
-    correction_mode = "adopted" if adopt_threed_dir else "rerun"
-    verification: dict[str, object] = {}
-    if adopt_threed_dir:
-        threed_dir = str(PurePosixPath(adopt_threed_dir))
-        validate_remote_write_path(threed_dir, runs_root)
-        adopt_root = PurePosixPath(threed_dir).parent
-        postprocess_dir = str(adopt_root / "postprocess")
-        descriptor_remote = str(adopt_root / "results" / "postprocess" / DESCRIPTOR)
-        adopted_local = local_root / "inputs" / "adopted"
-        adopted_xml = _fetch(fetch_adapter, f"{threed_dir}/{SOLVER_INPUT}", adopted_local)
-        adopted_coupler = _fetch(fetch_adapter, f"{threed_dir}/{COUPLER}", adopted_local)
-        descriptor_local = _fetch(fetch_adapter, descriptor_remote, adopted_local)
-        verification = _verify_adopted(
-            rule=rule,
-            source_xml=source_xml,
-            adopted_xml=adopted_xml.read_text(encoding="utf-8"),
-            source_coupler=source_coupler,
-            adopted_coupler=adopted_coupler,
-            descriptor=descriptor_local,
-            remote_descriptor=descriptor_remote,
-            remote_tuned_model=layout["tuned_model"],
-            tuned_model=tuned_model,
-        )
-    else:
-        threed_dir = layout["preop"]
-        postprocess_dir = layout["postprocess"]
-        descriptor_remote = f"{layout['postprocess_results']}/{DESCRIPTOR}"
+    # Kept in the identity and the record: earlier records also have "adopted".
+    correction_mode = "rerun"
+    threed_dir = layout["preop"]
+    postprocess_dir = layout["postprocess"]
+    descriptor_remote = f"{layout['postprocess_results']}/{DESCRIPTOR}"
 
     digests = {
         "source_threed_input": _sha256(source_xml_path),
@@ -401,96 +322,96 @@ def run_wall_correction(
     staged = local_root / "staged"
     solver_job_id = postprocess_job_id = None
 
-    if correction_mode == "rerun":
-        inflow = _fetch(fetch_adapter, f"{layout['iteration_preop']}/{INFLOW}", source_local)
-        solver_script = _fetch(fetch_adapter, f"{layout['iteration_preop']}/{SOLVER_SCRIPT}", source_local)
-        staged_preop = staged / "preop"
-        staged_preop.mkdir(parents=True, exist_ok=True)
-        # Mesh and face paths keep pointing at the source iteration's mesh
-        # (read only); BC and inflow files are relative to the 3D directory.
-        (staged_preop / SOLVER_INPUT).write_text(
-            patch_wall_parameters(
-                source_xml,
-                elasticity_modulus=rule.elasticity_modulus_corrected,
-                damping=rule.damping_corrected,
-            ),
-            encoding="utf-8",
-        )
-        (staged_preop / SOLVER_SCRIPT).write_text(
-            _relocate_solver_script(
-                solver_script.read_text(encoding="utf-8"),
-                source_dir=layout["iteration_preop"],
-                target_dir=layout["preop"],
-                job_name=f"wallcorr-{validated_run_id}"[:64],
-            ),
-            encoding="utf-8",
-        )
-        (staged_preop / COUPLER).write_bytes(source_coupler.read_bytes())
-        (staged_preop / INFLOW).write_bytes(inflow.read_bytes())
-        previews.append(transfer_adapter.ensure_remote_dir(layout["preop"]).argv)
-        for name in (SOLVER_INPUT, SOLVER_SCRIPT, COUPLER, INFLOW):
-            previews.append(transfer_adapter.push(str(staged_preop / name), f"{layout['preop']}/{name}").argv)
-        # run_solver.sh carries its own nodes/tasks/time header; submit it with a
-        # job name only so the workspace scheduler defaults cannot override it.
-        solver_scheduler = scheduler_adapter if scheduler_injected else SlurmSchedulerAdapter(
-            remote_exec=remote_exec_adapter,
-            runs_root=runs_root,
-            submit_options=SlurmSubmitOptions(job_name=f"wallcorr-{validated_run_id}"[:64]),
-        )
-        solver_submit = solver_scheduler.submit(f"{layout['preop']}/{SOLVER_SCRIPT}")
-        solver_job_id = solver_submit.job_id
-        previews.append(solver_submit.command.argv)
+    inflow = _fetch(fetch_adapter, f"{layout['iteration_preop']}/{INFLOW}", source_local)
+    solver_script = _fetch(fetch_adapter, f"{layout['iteration_preop']}/{SOLVER_SCRIPT}", source_local)
+    staged_preop = staged / "preop"
+    staged_preop.mkdir(parents=True, exist_ok=True)
+    # Mesh and face paths keep pointing at the source iteration's mesh
+    # (read only); BC and inflow files are relative to the 3D directory.
+    corrected_xml = patch_wall_parameters(
+        source_xml,
+        elasticity_modulus=rule.elasticity_modulus_corrected,
+        damping=rule.damping_corrected,
+    )
+    beyond_wall = wall_only_differences(source_xml, corrected_xml)
+    if beyond_wall:
+        raise ConfigError("corrected 3D input differs from the source beyond the wall: " + "; ".join(beyond_wall[:5]))
+    (staged_preop / SOLVER_INPUT).write_text(corrected_xml, encoding="utf-8")
+    (staged_preop / SOLVER_SCRIPT).write_text(
+        _relocate_solver_script(
+            solver_script.read_text(encoding="utf-8"),
+            source_dir=layout["iteration_preop"],
+            target_dir=layout["preop"],
+            job_name=f"wallcorr-{validated_run_id}"[:64],
+        ),
+        encoding="utf-8",
+    )
+    (staged_preop / COUPLER).write_bytes(source_coupler.read_bytes())
+    (staged_preop / INFLOW).write_bytes(inflow.read_bytes())
+    previews.append(transfer_adapter.ensure_remote_dir(layout["preop"]).argv)
+    for name in (SOLVER_INPUT, SOLVER_SCRIPT, COUPLER, INFLOW):
+        previews.append(transfer_adapter.push(str(staged_preop / name), f"{layout['preop']}/{name}").argv)
+    # run_solver.sh carries its own nodes/tasks/time header; submit it with a
+    # job name only so the workspace scheduler defaults cannot override it.
+    solver_scheduler = scheduler_adapter if scheduler_injected else SlurmSchedulerAdapter(
+        remote_exec=remote_exec_adapter,
+        runs_root=runs_root,
+        submit_options=SlurmSubmitOptions(job_name=f"wallcorr-{validated_run_id}"[:64]),
+    )
+    solver_submit = solver_scheduler.submit(f"{layout['preop']}/{SOLVER_SCRIPT}")
+    solver_job_id = solver_submit.job_id
+    previews.append(solver_submit.command.argv)
 
-        if cluster.executables.svslicer_path is None:
-            raise ConfigError("cluster executables.svslicer_path is required for postprocessing")
-        patient_alias = str(manifest.patient.get("alias"))
-        svzerodtrees_paths = manifest.remote.get("svzerodtrees_paths", {})
-        cpus_per_task, mem = _preop_postprocess_resources(config)
-        camera_offset_dir, camera_view_up = _resolve_resistance_map_camera(config, patient_alias=patient_alias)
-        fallback_csv = svzerodtrees_paths.get("clinical_targets")
-        inflow_csv = svzerodtrees_paths.get("inflow")
-        postprocess_script = _render_postprocess_script(
-            config=config,
-            cluster=cluster,
-            remote_root=layout["postprocess"],
-            remote_logs_dir=layout["postprocess_logs"],
-            simulation_dir=layout["preop"],
-            output_dir=layout["postprocess_results"],
-            centerline=str(
-                _require_remote_centerline_path(
-                    manifest, workflow_label="wall-correction postprocessing", remote_exec_adapter=remote_exec_adapter
-                )
-            ),
-            svslicer_path=cluster.executables.svslicer_path,
-            stage="preop",
-            clinical_targets_payload=_load_stage_target_payload(root, patient_alias=patient_alias, stage="preop"),
-            fallback_clinical_targets_csv=str(fallback_csv) if fallback_csv else None,
-            inflow_csv=str(inflow_csv) if inflow_csv else None,
-            resistance_map_workers=_resolved_postprocess_worker_count(config),
-            camera_offset_dir=camera_offset_dir,
-            camera_view_up=camera_view_up,
-            cpus_per_task=cpus_per_task,
-            mem=mem,
-            svslicer_threads=_svslicer_threads(config),
-            tuned_zerod_config_path=layout["tuned_model"],
-        )
-        staged_postprocess = staged / "postprocess" / "run_postprocess.sh"
-        staged_postprocess.parent.mkdir(parents=True, exist_ok=True)
-        staged_postprocess.write_text(_insert_dependency(postprocess_script, str(solver_job_id)), encoding="utf-8")
-        for path in (layout["postprocess"], layout["postprocess_logs"], layout["postprocess_results"]):
-            previews.append(transfer_adapter.ensure_remote_dir(path).argv)
-        previews.append(transfer_adapter.push(str(staged_postprocess), f"{layout['postprocess']}/run_postprocess.sh").argv)
-        postprocess_scheduler = scheduler_adapter if scheduler_injected else _build_postprocess_scheduler_adapter(
-            cluster=cluster,
-            config=config,
-            remote_exec=remote_exec_adapter,
-            run_id=validated_run_id,
-            cpus_per_task=cpus_per_task,
-            mem=mem,
-        )
-        postprocess_submit = postprocess_scheduler.submit(f"{layout['postprocess']}/run_postprocess.sh")
-        postprocess_job_id = postprocess_submit.job_id
-        previews.append(postprocess_submit.command.argv)
+    if cluster.executables.svslicer_path is None:
+        raise ConfigError("cluster executables.svslicer_path is required for postprocessing")
+    patient_alias = str(manifest.patient.get("alias"))
+    svzerodtrees_paths = manifest.remote.get("svzerodtrees_paths", {})
+    cpus_per_task, mem = _preop_postprocess_resources(config)
+    camera_offset_dir, camera_view_up = _resolve_resistance_map_camera(config, patient_alias=patient_alias)
+    fallback_csv = svzerodtrees_paths.get("clinical_targets")
+    inflow_csv = svzerodtrees_paths.get("inflow")
+    postprocess_script = _render_postprocess_script(
+        config=config,
+        cluster=cluster,
+        remote_root=layout["postprocess"],
+        remote_logs_dir=layout["postprocess_logs"],
+        simulation_dir=layout["preop"],
+        output_dir=layout["postprocess_results"],
+        centerline=str(
+            _require_remote_centerline_path(
+                manifest, workflow_label="wall-correction postprocessing", remote_exec_adapter=remote_exec_adapter
+            )
+        ),
+        svslicer_path=cluster.executables.svslicer_path,
+        stage="preop",
+        clinical_targets_payload=_load_stage_target_payload(root, patient_alias=patient_alias, stage="preop"),
+        fallback_clinical_targets_csv=str(fallback_csv) if fallback_csv else None,
+        inflow_csv=str(inflow_csv) if inflow_csv else None,
+        resistance_map_workers=_resolved_postprocess_worker_count(config),
+        camera_offset_dir=camera_offset_dir,
+        camera_view_up=camera_view_up,
+        cpus_per_task=cpus_per_task,
+        mem=mem,
+        svslicer_threads=_svslicer_threads(config),
+        tuned_zerod_config_path=layout["tuned_model"],
+    )
+    staged_postprocess = staged / "postprocess" / "run_postprocess.sh"
+    staged_postprocess.parent.mkdir(parents=True, exist_ok=True)
+    staged_postprocess.write_text(_insert_dependency(postprocess_script, str(solver_job_id)), encoding="utf-8")
+    for path in (layout["postprocess"], layout["postprocess_logs"], layout["postprocess_results"]):
+        previews.append(transfer_adapter.ensure_remote_dir(path).argv)
+    previews.append(transfer_adapter.push(str(staged_postprocess), f"{layout['postprocess']}/run_postprocess.sh").argv)
+    postprocess_scheduler = scheduler_adapter if scheduler_injected else _build_postprocess_scheduler_adapter(
+        cluster=cluster,
+        config=config,
+        remote_exec=remote_exec_adapter,
+        run_id=validated_run_id,
+        cpus_per_task=cpus_per_task,
+        mem=mem,
+    )
+    postprocess_submit = postprocess_scheduler.submit(f"{layout['postprocess']}/run_postprocess.sh")
+    postprocess_job_id = postprocess_submit.job_id
+    previews.append(postprocess_submit.command.argv)
 
     fit = policy.compliance_fit
     calibration_payload = _build_calibration_config(
@@ -520,8 +441,7 @@ def run_wall_correction(
         wall_time=config.defaults.scheduler.wall_time,
         mem=config.defaults.scheduler.mem,
         cpus=config.defaults.scheduler.cpus,
-        # An adopted run's postprocess has already completed.
-        dependency_via_submit=postprocess_job_id is None,
+        dependency_via_submit=False,
         gate_policy=policy.gate_policy,
     )
     (staged_calibration / "run_calibration.sh").write_text(calibration_script, encoding="utf-8")
@@ -564,7 +484,6 @@ def run_wall_correction(
         calibration_job_id=None if mode == ExecutionMode.DRY_RUN else calibration_submit.job_id,
         calibration_status="not_submitted" if mode == ExecutionMode.DRY_RUN else "submitted",
         input_digests=digests,
-        verification=verification,
         notes=[f"{correction_mode} wall correction {'planned (dry run)' if mode == ExecutionMode.DRY_RUN else 'submitted'}"],
     )
     plan_path = local_root / "wall_correction_plan.json"
@@ -577,7 +496,6 @@ def run_wall_correction(
                 "correction_mode": correction_mode,
                 "source_iteration": source_iteration,
                 "rule": rule.as_dict(),
-                "verification": verification,
                 "remote": {
                     "threed_dir": threed_dir,
                     "descriptor": descriptor_remote,

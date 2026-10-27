@@ -221,106 +221,6 @@ patients:
     return sample_config_files, remote_run, files, hashlib.sha256(tuned).hexdigest()
 
 
-def _adopted_files(remote_run: str, files: dict, tuned_sha: str, *, modulus=810717.3883845098, damping=7694.9, coupler=None):
-    adopt = f"{Path(remote_run).parent}/_checks/elaw/tst-stan-x"
-    iter2 = f"{remote_run}/iterations/iter-02"
-    descriptor_dir = f"{adopt}/results/postprocess"
-    relative = "../../../../../" + Path(remote_run).name + "/iterations/iter-02/results/svzerod_3d_coupling_tuned.json"
-    files = dict(files)
-    files[f"{adopt}/preop/svFSIplus.xml"] = _solver_xml(f"{adopt}/preop", modulus=modulus, damping=damping)
-    files[f"{adopt}/preop/svzerod_3Dcoupling.json"] = coupler or files[f"{iter2}/preop/svzerod_3Dcoupling.json"]
-    files[f"{descriptor_dir}/postprocess_suite_metadata.json"] = json.dumps(
-        {"status": "completed", "lineage": {"tuned_zerod_config_path": relative, "tuned_zerod_config_sha256": tuned_sha}}
-    )
-    return f"{adopt}/preop", files
-
-
-def test_adopt_dry_run_plans_only_the_calibration(full_pa_run):
-    root, remote_run, files, tuned_sha = full_pa_run
-    adopt_dir, files = _adopted_files(remote_run, files, tuned_sha)
-    transfer, scheduler = RemoteFiles(files), CountingScheduler()
-    result = run_wall_correction(
-        root,
-        RUN_ID,
-        iteration=2,
-        adopt_threed_dir=adopt_dir,
-        mode=ExecutionMode.DRY_RUN,
-        transfer_adapter=transfer,
-        scheduler_adapter=scheduler,
-        remote_exec_adapter=FakeRemoteExecAdapter(),
-        fetch_adapter=transfer,
-    )
-    assert result.correction_mode == "adopted"
-    assert result.rule.elasticity_modulus_corrected == pytest.approx(810717.3883845098, rel=1e-12)
-    assert scheduler.submit_calls == [f"{remote_run}/wall_correction/iter-02/calibration/run_calibration.sh"]
-    staged = result.plan_path.parent / "staged" / "calibration"
-    request = yaml.safe_load((staged / "inputs" / "calibrate_0d_from_3d.yaml").read_text())
-    params = request["calibration"]["parameters"]
-    assert params["vessels"]["default"] == ["R_poiseuille"]
-    # The gate policy is a resolver argument, not a key in the upstream request.
-    assert "svzt_target_gate_policy" not in request["calibration"]
-    assert "calibrate_0d_from_3d.resolved.yaml report_only <<'PY'" in (staged / "run_calibration.sh").read_text()
-    assert request["calibration"]["solver"] == {"rho_infty": 0.2}
-    assert params["proximal_compliance_scale"] == {
-        "enabled": True,
-        "bounds": [0.2, 5.0],
-        "tolerance_mmhg": 0.05,
-        "maximum_iterations": 40,
-    }
-    assert request["calibration"]["data_source"]["postprocess_metadata_json"].startswith(str(Path(adopt_dir).parent))
-    assert request["paths"]["zerod_config"] == f"{remote_run}/iterations/iter-02/results/svzerod_3d_coupling_tuned.json"
-    assert "--dependency" not in (staged / "run_calibration.sh").read_text()
-    plan = json.loads(result.plan_path.read_text())
-    assert plan["verification"]["coupler_identical"] is True
-    # A dry run records nothing in the manifest.
-    assert read_manifest(root / "runs" / RUN_ID / "manifest.yaml").wall_correction_runs == []
-
-
-@pytest.mark.parametrize(
-    "overrides, message",
-    [
-        ({"modulus": 9.0e5}, "elasticity modulus"),
-        ({"damping": 8000.0}, "damping"),
-        ({"coupler": b'{"bcs": "other"}\n'}, "differs from the source iteration's BCs"),
-    ],
-)
-def test_adopt_rejects_a_run_that_does_not_match(full_pa_run, overrides, message):
-    root, remote_run, files, tuned_sha = full_pa_run
-    adopt_dir, files = _adopted_files(remote_run, files, tuned_sha, **overrides)
-    transfer, scheduler = RemoteFiles(files), CountingScheduler()
-    with pytest.raises(ConfigError, match=message):
-        run_wall_correction(
-            root,
-            RUN_ID,
-            iteration=2,
-            adopt_threed_dir=adopt_dir,
-            mode=ExecutionMode.EXECUTE,
-            transfer_adapter=transfer,
-            scheduler_adapter=scheduler,
-            remote_exec_adapter=FakeRemoteExecAdapter(),
-            fetch_adapter=transfer,
-        )
-    assert scheduler.submit_calls == []
-
-
-def test_adopt_rejects_postprocess_lineage_from_another_model(full_pa_run):
-    root, remote_run, files, _tuned_sha = full_pa_run
-    adopt_dir, files = _adopted_files(remote_run, files, "0" * 64)
-    transfer = RemoteFiles(files)
-    with pytest.raises(ConfigError, match="lineage sha256"):
-        run_wall_correction(
-            root,
-            RUN_ID,
-            iteration=2,
-            adopt_threed_dir=adopt_dir,
-            mode=ExecutionMode.EXECUTE,
-            transfer_adapter=transfer,
-            scheduler_adapter=CountingScheduler(),
-            remote_exec_adapter=FakeRemoteExecAdapter(),
-            fetch_adapter=transfer,
-        )
-
-
 def test_rerun_execute_chains_solver_postprocess_and_calibration(full_pa_run):
     root, remote_run, files, _tuned_sha = full_pa_run
     transfer, scheduler = RemoteFiles(files), CountingScheduler()
@@ -351,7 +251,26 @@ def test_rerun_execute_chains_solver_postprocess_and_calibration(full_pa_run):
     postprocess = (staged / "postprocess" / "run_postprocess.sh").read_text()
     assert postprocess.splitlines()[1] == "#SBATCH --dependency=afterok:1001"
     assert f'"simulation_dir": "{wall}/preop"' in postprocess
-    assert "#SBATCH --dependency=afterok:1002" in (staged / "calibration" / "run_calibration.sh").read_text()
+    calibration_script = (staged / "calibration" / "run_calibration.sh").read_text()
+    assert "#SBATCH --dependency=afterok:1002" in calibration_script
+    # The matched-0D calibration request: R first, then one proximal-compliance multiplier.
+    request = yaml.safe_load((staged / "calibration" / "inputs" / "calibrate_0d_from_3d.yaml").read_text())
+    params = request["calibration"]["parameters"]
+    assert params["vessels"]["default"] == ["R_poiseuille"]
+    assert params["proximal_compliance_scale"] == {
+        "enabled": True,
+        "bounds": [0.2, 5.0],
+        "tolerance_mmhg": 0.05,
+        "maximum_iterations": 40,
+    }
+    assert request["calibration"]["solver"] == {"rho_infty": 0.2}
+    assert request["calibration"]["data_source"]["postprocess_metadata_json"] == (
+        f"{wall}/results/postprocess/postprocess_suite_metadata.json"
+    )
+    assert request["paths"]["zerod_config"] == f"{remote_run}/iterations/iter-02/results/svzerod_3d_coupling_tuned.json"
+    # The gate policy is a resolver argument, not a key in the upstream request.
+    assert "svzt_target_gate_policy" not in request["calibration"]
+    assert "calibrate_0d_from_3d.resolved.yaml report_only <<'PY'" in calibration_script
     pushed = {remote for _local, remote in transfer.push_calls}
     assert f"{wall}/preop/svzerod_3Dcoupling.json" in pushed and f"{wall}/preop/inflow.flow" in pushed
     record = read_manifest(root / "runs" / RUN_ID / "manifest.yaml").wall_correction_runs[-1]
@@ -560,7 +479,6 @@ def test_an_unpublished_calibration_has_no_matched_model(full_pa_run):
         root,
         RUN_ID,
         iteration=2,
-        adopt_threed_dir=None,
         mode=ExecutionMode.EXECUTE,
         transfer_adapter=transfer,
         scheduler_adapter=scheduler,
@@ -709,3 +627,101 @@ def test_record_protocol_stage_rules(full_pa_run):
     assert record_protocol_stage(declared, stage="wall_correction").protocol.stage == "wall_correction"
     with pytest.raises(ValueError):
         record_protocol_stage(declared, stage="postop")
+
+
+# Trimmed from tst-stan-3-20261021 (protocol v1): an adopted record and the
+# handoff that ``wall-correction-status`` wrote before ``preop finalize`` existed.
+_PROTOCOL_V1_RUN = "/scratch/users/ndorn/svzt_runs/tst-stan-3-20261021"
+_PROTOCOL_V1_CHECKS = "/scratch/users/ndorn/svzt_runs/_checks/elaw_iter3_20261023/tst-stan-3"
+_PROTOCOL_V1_RECORD = {
+    "correction_id": "wallcorr-tst-stan-3-20261021-iter-02-4c349ece0a",
+    "source_iteration": 2,
+    "mode": "adopted",
+    "status": "completed",
+    "created_at": "2026-10-26T05:08:18+00:00",
+    "updated_at": "2026-10-26T05:27:01+00:00",
+    "rule": {
+        "alpha": 0.55,
+        "damping_corrected": 7694.9,
+        "damping_reference": 10000.0,
+        "damping_source": 10000.0,
+        "elasticity_modulus_corrected": 810717.3883845098,
+        "elasticity_modulus_reference": 1369189.0691717705,
+        "elasticity_modulus_source": 1020337.9086810068,
+        "floored": False,
+        "lambda_applied": 0.7945577455144504,
+        "lambda_min": 0.5,
+        "lambda_raw": 0.7945577455144504,
+        "pulse_pressure_3d_mmhg": 65.8201681550722,
+        "pulse_pressure_target_mmhg": 58.0,
+    },
+    "remote_dir": f"{_PROTOCOL_V1_RUN}/wall_correction/iter-02",
+    "remote_threed_dir": f"{_PROTOCOL_V1_CHECKS}/preop",
+    "remote_postprocess_dir": f"{_PROTOCOL_V1_CHECKS}/postprocess",
+    "remote_descriptor_path": f"{_PROTOCOL_V1_CHECKS}/results/postprocess/postprocess_suite_metadata.json",
+    "remote_tuned_zerod_config": f"{_PROTOCOL_V1_RUN}/iterations/iter-02/results/svzerod_3d_coupling_tuned.json",
+    "remote_calibration_dir": f"{_PROTOCOL_V1_RUN}/wall_correction/iter-02/calibration",
+    "remote_calibrated_zerod_config": f"{_PROTOCOL_V1_RUN}/wall_correction/iter-02/calibration/results/calibrated_full_pa_zerod.json",
+    "local_dir": "/local/tst-stan-3-20261021/wall_correction/iter-02",
+    "calibration_job_id": "49585417",
+    "calibration_status": "completed",
+    "terminal_state": "completed",
+    "verification": {"coupler_identical": True, "wall_only_difference": True},
+    "results": {"matched_zerod_model": f"{_PROTOCOL_V1_RUN}/wall_correction/iter-02/calibration/results/calibrated_full_pa_zerod.json"},
+    "notes": ["adopted wall correction submitted"],
+}
+_PROTOCOL_V1_HANDOFF = {
+    "iteration": 2,
+    "source_decision": None,
+    "selection_kind": "wall_correction",
+    "reason": "wall-corrected 3D run (adopted) with its matched 0D model",
+    "selected_at": "2026-10-26T05:27:01+00:00",
+    "selected_by_command": "svzt wall-correction-status",
+    "metrics": None,
+    "deltas": None,
+    "remote_iteration_dir": f"{_PROTOCOL_V1_RUN}/iterations/iter-02",
+    "remote_preop_dir": f"{_PROTOCOL_V1_CHECKS}/preop",
+    "remote_tuned_zerod_config": f"{_PROTOCOL_V1_RUN}/wall_correction/iter-02/calibration/results/calibrated_full_pa_zerod.json",
+    "remote_canonical_coupler": f"{_PROTOCOL_V1_CHECKS}/preop/svzerod_3Dcoupling.json",
+    "preop_job_id": None,
+    "wall_correction_id": "wallcorr-tst-stan-3-20261021-iter-02-4c349ece0a",
+    "remote_tuning_results_dir": f"{_PROTOCOL_V1_RUN}/iterations/iter-02/results",
+    "threed_overrides": {"damping": 7694.9, "elasticity_modulus": 810717.3883845098},
+}
+
+
+def test_protocol_v1_adopted_records_and_handoffs_still_load_and_finalize_as_no_ops(full_pa_run):
+    from svztagent.core.preop_source import resolve_preop_source
+
+    root, _remote_run, _files, _tuned_sha = full_pa_run
+    path = root / "runs" / RUN_ID / "manifest.yaml"
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload["wall_correction_runs"] = [_PROTOCOL_V1_RECORD]
+    payload["converged_preop_iteration"] = _PROTOCOL_V1_HANDOFF
+    path.write_text(yaml.safe_dump(payload, sort_keys=True), encoding="utf-8")
+    before = path.read_bytes()
+
+    manifest = read_manifest(path)
+    assert manifest.wall_correction_runs[-1].mode == "adopted" and manifest.protocol is None
+    assert manifest.converged_preop_iteration.model_dump(mode="json") == _PROTOCOL_V1_HANDOFF
+    # The handoff written by the earlier status command is exactly what finalize builds.
+    result = finalize_preop_source(root, RUN_ID)
+    assert result.action == "unchanged" and path.read_bytes() == before
+    source = resolve_preop_source(manifest)
+    assert source.remote_threed_dir == f"{_PROTOCOL_V1_CHECKS}/preop"
+    assert source.remote_tuning_results_dir == f"{_PROTOCOL_V1_RUN}/iterations/iter-02/results"
+    assert source.threed_config["elasticity_modulus"] == 810717.3883845098
+    assert source.threed_config["tissue_support"]["damping"] == 7694.9
+
+
+def test_cli_retires_adopt_and_preop_select(full_pa_run, capsys):
+    from svztagent.cli.main import main
+
+    root, _remote_run, _files, _tuned_sha = full_pa_run
+    with pytest.raises(SystemExit) as exc:
+        main(["--workspace-root", str(root), "run", "wall-correction", "--run-id", RUN_ID, "--adopt-threed-dir", "/x"])
+    assert exc.value.code == 2
+    capsys.readouterr()
+    assert main(["--workspace-root", str(root), "preop", "select", "--run-id", RUN_ID, "--iteration", "2"]) == 2
+    assert "svzt preop select is retired" in capsys.readouterr().err
+    assert read_manifest(root / "runs" / RUN_ID / "manifest.yaml").converged_preop_iteration is None
