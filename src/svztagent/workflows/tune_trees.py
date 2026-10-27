@@ -1242,6 +1242,51 @@ def _resolve_effective_tune_cpus(
     return str(tuning_n_procs)
 
 
+def _tune_allocation_directives(
+    *,
+    nested_submission: str,
+    scheduler_defaults: dict,
+    threed_config: dict,
+    effective_tune_cpus: str,
+) -> dict[str, str]:
+    """The tune driver's own allocation shape, as rendered into its #SBATCH header.
+
+    ``sbatch``: one task with the tuning CPUs; the solver stages are separate
+    jobs.  The post-3D driver resubmits this script with its own header only,
+    so the node count TACC requires must live here as well as on the CLI.
+
+    ``in_allocation``: the solver stages run with srun inside this job, so it
+    requests the preop 3D shape (threed nodes x procs_per_node tasks, one CPU
+    each).  The batch step (0D tuning) runs on the first node and can use all
+    of that node's CPUs.  The header is the only source of this shape; the
+    submit command carries no --nodes or --cpus-per-task to override it.
+    """
+
+    if nested_submission == "in_allocation":
+        nodes = int(threed_config.get("nodes", 3))
+        procs_per_node = int(threed_config.get("procs_per_node", 24))
+        if nodes < 1 or procs_per_node < 1:
+            raise ConfigError(
+                "nested_submission=in_allocation needs threed nodes and procs_per_node >= 1"
+            )
+        return {
+            "cpus": "1",
+            "nodes_directive": f"#SBATCH --nodes={nodes}",
+            "tasks_directive": f"#SBATCH --ntasks-per-node={procs_per_node}",
+        }
+    if nested_submission != "sbatch":
+        raise ConfigError(f"unknown nested_submission {nested_submission!r}")
+    return {
+        "cpus": effective_tune_cpus,
+        "nodes_directive": (
+            f"#SBATCH --nodes={scheduler_defaults['nodes']}"
+            if scheduler_defaults.get("nodes")
+            else "# (no explicit node count)"
+        ),
+        "tasks_directive": "# (one task; solver stages are separate Slurm jobs)",
+    }
+
+
 def _render_tune_job_script(
     *,
     run_id: str,
@@ -1271,9 +1316,16 @@ def _render_tune_job_script(
     seed_generation: dict | None = None,
     preop_mesh_surface_aliases: dict[str, str] | None = None,
     geometry_scaling: dict | None = None,
+    nested_submission: str = "sbatch",
 ) -> str:
     template = _template_text()
     env_block = "\n".join(env_hooks) if env_hooks else "# no environment hooks configured"
+    allocation = _tune_allocation_directives(
+        nested_submission=nested_submission,
+        scheduler_defaults=scheduler_defaults,
+        threed_config=threed_config,
+        effective_tune_cpus=effective_tune_cpus,
+    )
 
     replacements = {
         "{{RUN_ID}}": run_id,
@@ -1309,7 +1361,10 @@ def _render_tune_job_script(
         "{{SBATCH_PARTITION}}": str(scheduler_defaults.get("partition", "<partition>")),
         "{{SBATCH_TIME}}": str(scheduler_defaults.get("wall_time", "<HH:MM:SS>")),
         "{{SBATCH_MEM}}": str(scheduler_defaults.get("mem", "<memory>")),
-        "{{SBATCH_CPUS}}": effective_tune_cpus,
+        "{{SBATCH_CPUS}}": allocation["cpus"],
+        "{{SBATCH_NODES_DIRECTIVE}}": allocation["nodes_directive"],
+        "{{SBATCH_TASKS_DIRECTIVE}}": allocation["tasks_directive"],
+        "{{NESTED_SUBMISSION}}": nested_submission,
         "{{ENV_HOOKS}}": env_block,
         "{{PYTHON_EXECUTABLE}}": python_executable.strip() or "python3",
     }
@@ -1559,6 +1614,7 @@ def _build_default_adapters(
     effective_tune_cpus: str | None = None,
 ) -> tuple[FileTransferAdapter, SchedulerAdapter, RemoteExecAdapter]:
     executor = CommandExecutor(mode=mode)
+    in_allocation = config.defaults.execution.nested_submission == "in_allocation"
     remote = SshRemoteExecAdapter(
         user=cluster.user,
         host=cluster.host,
@@ -1581,10 +1637,15 @@ def _build_default_adapters(
             job_name=run_id,
             account=config.defaults.scheduler.account,
             partition=config.defaults.scheduler.partition,
+            # In-allocation drivers take their node/task shape from the
+            # rendered #SBATCH header (_tune_allocation_directives) only.
+            nodes=None if in_allocation else config.defaults.scheduler.nodes,
             wall_time=config.defaults.scheduler.wall_time,
             mem=config.defaults.scheduler.mem,
             cpus=(
-                effective_tune_cpus
+                None
+                if in_allocation
+                else effective_tune_cpus
                 if effective_tune_cpus is not None
                 else config.defaults.scheduler.cpus
             ),
@@ -1865,6 +1926,7 @@ def run_tune_trees(
         effective_tune_cpus=effective_tune_cpus,
         env_hooks=config.defaults.execution.env_activation_hooks,
         python_executable=config.defaults.execution.python_executable,
+        nested_submission=config.defaults.execution.nested_submission,
         skip_zerod_tuning=skip_zerod_tuning,
         reuse_preop_3d=reuse_preop_3d,
         seed_generation=seed_generation.spec,

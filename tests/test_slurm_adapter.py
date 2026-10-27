@@ -126,3 +126,15 @@ def test_parse_sbatch_job_id_rejects_output_without_job_id():
     with pytest.raises(SchedulerResponseError):
         parse_sbatch_job_id("-----\nWelcome\n")
 
+
+def test_driver_template_parses_job_id_after_tacc_banner():
+    template = (
+        Path(svztagent.__file__).parent / "templates" / "slurm" / "job_template.sh"
+    ).read_text(encoding="utf-8")
+    start = template.index("def _parse_sbatch_job_id")
+    end = template.index("\ndef ", start + 1)
+    namespace: dict = {}
+    exec(template[start:end], namespace)
+    assert namespace["_parse_sbatch_job_id"](TACC_SBATCH_STDOUT) == "3623254"
+    with pytest.raises(RuntimeError):
+        namespace["_parse_sbatch_job_id"]("Welcome\n")

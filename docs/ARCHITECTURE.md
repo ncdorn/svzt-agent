@@ -87,6 +87,18 @@ mutation is `core/manifest.py::record_driver_handoff`. Note that Sherlock
 counts memory as CPUs (32 GB is about 5 cores), so the driver's `mem` sets its
 footprint too.
 
+`defaults.execution.nested_submission` selects how the driver runs its solver
+stages. `sbatch` (default, Sherlock) is the split driver above. `in_allocation`
+is for clusters that forbid `sbatch` from compute nodes (TACC Stampede3): the
+renderer (`tune_trees.py::_tune_allocation_directives`) gives the driver the
+preop 3D shape in its `#SBATCH` header (`--nodes=<threed.nodes>`,
+`--ntasks-per-node=<threed.procs_per_node>`, `--cpus-per-task=1`), the default
+tune `SlurmSubmitOptions` then omit `--nodes`/`--cpus-per-task` so the header
+is not overridden, and the driver runs each stage's `run_solver.sh` with bash
+and an explicit `srun --nodes --ntasks` inside its own allocation. There is no
+post-3D handoff, and the calibrated full-PA postprocess/calibration jobs are
+left to the agent's login-node fallback (docs/EXECUTION.md).
+
 ## Explicit postop/adaptation workflows
 - `svzt preop finalize` (`workflows/wall_correction.py::finalize_preop_source`)
   records a completed wall correction (wall-corrected 3D run and its matched 0D

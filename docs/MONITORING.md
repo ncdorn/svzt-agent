@@ -70,6 +70,10 @@ Defaults:
   Fetch, decision pull, and auto-advance act on the post-3D job's end.
 - A missing or stale handoff (another job or iteration) leaves the ended job
   as the terminal state, as before the split.
+- In-allocation drivers (`defaults.execution.nested_submission:
+  in_allocation`) write no handoff: the tune job's end is the iteration's end,
+  and its `preop_job_id` is the tune job itself, so the preop job state in
+  `status` follows the tune job.
 
 ## Post-terminal behavior
 - `--fetch-on-complete` triggers deterministic artifact fetch after `completed`.

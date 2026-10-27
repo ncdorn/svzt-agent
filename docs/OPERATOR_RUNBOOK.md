@@ -314,6 +314,17 @@ the pre-3D job (tuning, 3D setup and submission) and the post-3D job (queued
 `svzt watch`/`status` follow the handoff via `results/iteration_handoff.json`.
 To stop an iteration while its 3D run is queued, cancel both the 3D job and
 the post-3D job (same job name as the tune job).
+If `sacct -D -X -j <job>` shows a `NODE_FAIL` row before the final row,
+Slurm requeued the driver and the first attempt may still be running on the
+failed node. Only the attempt named in
+`logs/iteration_driver_attempt_<job>.json` (the latest start) submits jobs or
+writes the driver log, handoff and decision. The stale attempt prints
+`no longer owns ... exiting before ...` to the job's `.error` log at its next
+check and exits with code 9 (see `docs/EXECUTION.md`). Read that iteration's
+results as the requeued attempt's. Drivers rendered before 2026-10-19 lack
+this guard: there a stale attempt can later write a `needs_review` timeout
+decision over the requeued attempt's driver log and remove its handoff
+(TST-STAN-2, job 48156809).
 To replace a job that is still queued or running, `scancel` it and run
 `svzt status <run-id>` first: `--execute` refuses, before touching the cluster,
 while the manifest still records the run's job as pending or running.
@@ -323,8 +334,11 @@ metrics, gate, postprocess/calibration submission): it implies
 `--skip-zerod-tuning`, verifies that the previous driver log records the preop
 job as `COMPLETED` and that `preop/` holds result VTUs, keeps that log as
 `logs/iteration_driver_log.preop_<job>.json`, and reruns only the post-3D
-steps. Without that evidence the iteration enters `needs_review`; it never
-resubmits the 3D run.
+steps. If `preop/`'s own solver log (`svFlowSolver.o<job>`) names a different
+job than the driver log (a later 3D run whose driver was cancelled while it
+waited), that job is reused instead once the scheduler reports it `COMPLETED`,
+with a warning in the new driver log. Without that evidence the iteration
+enters `needs_review`; it never resubmits the 3D run.
 Either way the re-submission is a new attempt: the iteration's earlier decision
 and metrics are cleared in the manifest and the earlier local progress files
 are kept as `*.tune_<previous-job>.json` (see `docs/MANIFEST.md`).

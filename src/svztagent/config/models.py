@@ -191,6 +191,12 @@ class SchedulerDefaults(BaseModel):
 class ExecutionDefaults(BaseModel):
     env_activation_hooks: list[str] = Field(default_factory=list)
     python_executable: str = "python3"
+    # How the tune driver runs its solver stages (mean steady, prestress, preop
+    # 3D).  "sbatch": each is its own Slurm job and the driver requeues itself
+    # after the 3D submission.  "in_allocation": the driver requests the 3D
+    # node/task shape up front and runs each stage with srun inside its own
+    # allocation, for clusters that forbid sbatch from compute nodes (TACC).
+    nested_submission: Literal["sbatch", "in_allocation"] = "sbatch"
 
     @field_validator("python_executable")
     @classmethod

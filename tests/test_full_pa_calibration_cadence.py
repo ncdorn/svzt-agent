@@ -464,7 +464,11 @@ def test_driver_submits_postprocess_then_dependent_calibration(sample_config_fil
             return real_subprocess.CompletedProcess(argv, 0, stdout=f"{7000 + len(calls)}\n", stderr="")
 
     tree = ast.parse(_driver_python(rendered))
-    wanted = {"_submit_prepared_sbatch", "_submit_calibrated_full_pa_seed_jobs"}
+    wanted = {
+        "_parse_sbatch_job_id",
+        "_submit_prepared_sbatch",
+        "_submit_calibrated_full_pa_seed_jobs",
+    }
     module = ast.Module(
         body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted],
         type_ignores=[],
@@ -476,6 +480,7 @@ def test_driver_submits_postprocess_then_dependent_calibration(sample_config_fil
         "seed_generation": spec,
         "log": {"warnings": []},
         "_nested_sbatch_env": lambda: {},
+        "_exit_if_superseded": lambda action: None,
     }
     exec(compile(module, "driver", "exec"), namespace)
 

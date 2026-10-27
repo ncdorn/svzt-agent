@@ -163,6 +163,68 @@ def test_post3d_driver_reuses_3d_only_after_it_completed(tmp_path, state, reused
         assert error == f"preop simulation did not complete successfully: {state}"
 
 
+@pytest.mark.parametrize(
+    "dir_job, state, expected_job, expected_error",
+    [
+        (None, None, PREOP, None),
+        (PREOP, None, PREOP, None),
+        ("700009", "COMPLETED", "700009", None),
+        ("700009", "CANCELLED", None, "preop 3D job 700009 in {preop} did not complete successfully: CANCELLED"),
+    ],
+)
+def test_manual_reuse_follows_the_3d_job_that_wrote_preop_dir(
+    tmp_path, dir_job, state, expected_job, expected_error
+):
+    """A later 3D run whose driver was cancelled is reused under its own job ID."""
+    import shutil
+
+    logs = tmp_path / "logs"
+    preop = tmp_path / "preop"
+    logs.mkdir()
+    (preop / "72-procs").mkdir(parents=True)
+    (preop / "72-procs" / "result_06000.vtu").write_text("", encoding="utf-8")
+    if dir_job is not None:
+        (preop / f"svFlowSolver.o{dir_job}").write_text("", encoding="utf-8")
+    (logs / "iteration_driver_log.json").write_text(
+        json.dumps(
+            {
+                "preop_job_id": PREOP,
+                "preop_terminal_state": "COMPLETED",
+                "steps": ["preop_submitted", "preop_completed"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    queried: list[str] = []
+    log: dict = {"warnings": []}
+    namespace = {
+        "json": json,
+        "shutil": shutil,
+        "Path": Path,
+        "remote_logs_dir": logs,
+        "driver_phase": "pre3d",
+        "log": log,
+        "_query_state": lambda job_id: (queried.append(job_id), (state, "sacct"))[1],
+        "_latest_result_vtu": lambda sim_dir: next(iter(sorted(sim_dir.rglob("result_*.vtu"))), None),
+    }
+    exec(_driver_function("_preop_dir_job_id"), namespace)
+    exec(_driver_function("_completed_preop_job_for_reuse"), namespace)
+
+    job_id, error = namespace["_completed_preop_job_for_reuse"](preop)
+
+    assert job_id == expected_job
+    assert error == (expected_error.format(preop=preop) if expected_error else None)
+    assert queried == ([dir_job] if state is not None else [])
+    if expected_job == "700009":
+        assert log["warnings"] == [
+            f"reuse_preop_3d: previous driver log names preop job {PREOP}; "
+            f"reusing job 700009 from its solver log in {preop}"
+        ]
+    if expected_job is not None:
+        # The kept copy is named for the job the previous log records.
+        assert (logs / f"iteration_driver_log.preop_{PREOP}.json").exists()
+
+
 def test_post3d_driver_is_queued_afterany_on_the_3d_job(tmp_path, monkeypatch):
     import os
     import subprocess
@@ -180,7 +242,9 @@ def test_post3d_driver_is_queued_afterany_on_the_3d_job(tmp_path, monkeypatch):
         "remote_iter_dir": tmp_path,
         "run_id": "run-x",
         "_nested_sbatch_env": lambda: {},
+        "_exit_if_superseded": lambda action: None,
     }
+    exec(_driver_function("_parse_sbatch_job_id"), namespace)
     exec(_driver_function("_submit_post3d_driver"), namespace)
 
     assert namespace["_submit_post3d_driver"](PREOP) == POST3D

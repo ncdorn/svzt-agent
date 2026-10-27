@@ -19,6 +19,13 @@
   writes the calibration YAML under the run's `calibration/inputs/`. It reports
   every child job ID in `iteration_decision.json`, and the agent records them
   in the manifest before polling or promotion.
+- With `defaults.execution.nested_submission: in_allocation` the driver
+  submits nothing: it runs each stage's agent-normalized `run_solver.sh` (under
+  the run's iteration directory) with `bash` and an explicit
+  `srun --nodes --ntasks` inside its own allocation, checks attempt ownership
+  before each run and at every poll, and stops the solver's process group on
+  timeout or when superseded. Postprocess and calibration jobs are then
+  submitted by the agent through the adapter (`sbatch` from the login node).
 - Forbidden shell-control tokens are rejected.
 - Adapters accept argv arrays, not arbitrary shell strings from workflow code.
 

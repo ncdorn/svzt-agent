@@ -168,6 +168,7 @@ and `tuning_diagnostics.json` in `iteration_decision.json` under
 | `inflow_consistency` | Mean flow of the exported model vs `inflow.csv`. The optimizer runs at the `inflow.csv` mean; the exported model keeps the seed's inflow. `consistent: false` (more than 1% apart) means the published fit and the optimizer fit were computed at different flows. |
 | `optimizer_fit` | The optimizer's own estimate. A gap of more than ~1 mmHg from `published_fit` means the surrogate is biased (normally removed by `polish`). |
 | `polish` | `used` is `per_cap` or `shared` (fallback after a polish failure), `maxfev`, and `shared_fit` / `polished_fit`, whose `loss` equals χ² under the likelihood objective. |
+| `periodicity` | Cardiac cycles simulated (`cycles_used`, `attempts`) and the final cycle-to-cycle MPA drift (`final_drift_mmhg`) of the optimizer's selected evaluation and of the published model. `converged: false` means the fit was scored on a transient cycle. Absent in diagnostics from svZeroDTrees installs before 2026-10-15. Those scored the seed's 2 cold-start cycles and are biased (below). |
 | `parameters_at_bounds` | Parameters within 1% of a bound: the data want values outside the literature ranges (§7). |
 | `model_total_compliance_ml_per_mmhg`, `svpp_bracket`, `compliance_in_svpp_bracket` | Total compliance (trees + proximal) vs [regurgitant volume/PP, forward SV/PP]. Outside the bracket means compliance is implausible even if pressures fit. |
 | `trees.n_truncated` | Trees that hit `tree_max_nodes`. These have truncated resistance and compliance, so raise the budget. |
@@ -176,6 +177,22 @@ and `tuning_diagnostics.json` in `iteration_decision.json` under
 
 Published-model scoring retries the solver at a looser absolute tolerance
 (1e-7 → 1e-5) when Newton iterations fail, and records the tolerance used.
+
+**Periodic evaluation.** svZeroDTrees runs every full-PA objective
+evaluation, the polish, and the published-fit scoring until the MPA pressure
+is periodic: at least 6 cycles, doubling up to 24, until the mean MPA pressure
+changes by less than 0.1 mmHg between the last two cycles. The seed and every
+written config keep their own cycle count. Before 2026-10-15 the tuner scored
+the learnedZeroD seed's 2 cold-start cycles. On TST-STAN-3 iter-2 that gave a
+0D of 42.8/7.6/25.3 mmHg, against 46.3/15.4/28.7 periodic and 48/15.5/28 in
+3D. The 0D–3D diastolic gap in runs tuned before this date is this artifact,
+not a model mismatch. The cycle settings are svZeroDTrees'
+`periodic_evaluation` defaults; svzt-agent does not expose the key yet.
+
+The driver's `zerod_pre_mapping_metrics.json` comes from
+`summarize_pulmonary_zerod_config`. It also runs the snapshot until periodic
+and records `periodicity`. The driver log warns when an older svZeroDTrees
+install reports no periodicity, or when the pressure did not converge.
 
 ## 7. Why each choice (summary)
 

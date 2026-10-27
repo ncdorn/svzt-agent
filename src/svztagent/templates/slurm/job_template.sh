@@ -4,6 +4,8 @@
 #SBATCH --time={{SBATCH_TIME}}
 #SBATCH --mem={{SBATCH_MEM}}
 #SBATCH --cpus-per-task={{SBATCH_CPUS}}
+{{SBATCH_NODES_DIRECTIVE}}
+{{SBATCH_TASKS_DIRECTIVE}}
 #SBATCH --output={{REMOTE_LOGS_DIR}}/slurm-%j.out
 #SBATCH --error={{REMOTE_LOGS_DIR}}/%x_%j.error
 
@@ -132,6 +134,7 @@ mkdir -p "{{REMOTE_INPUTS_DIR}}" "{{REMOTE_RESULTS_DIR}}" "{{REMOTE_LOGS_DIR}}"
 "${PYTHON_BIN}" - <<'PY'
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 import csv
 import heapq
@@ -140,10 +143,12 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
 import traceback
+import uuid
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -222,6 +227,20 @@ if driver_phase == "post3d":
     reuse_preop_3d = True
     skip_zerod_tuning = True
 handed_off_to_post3d = False
+# How solver stages run (defaults.execution.nested_submission):
+# - "sbatch": each stage is its own Slurm job, and the pre-3D driver hands off
+#   to a post-3D driver job (above).
+# - "in_allocation": this job holds the preop 3D node/task shape and runs each
+#   stage with srun inside it (TACC forbids sbatch from compute nodes).  There
+#   is no post-3D handoff, the stage "job ID" is this job's ID, and the
+#   postprocess/calibration jobs are left to the agent, which submits them from
+#   the login node.
+nested_submission = "{{NESTED_SUBMISSION}}".strip().lower()
+if nested_submission not in {"sbatch", "in_allocation"}:
+    raise SystemExit(f"[svzt] unknown nested_submission={nested_submission!r}")
+in_allocation = nested_submission == "in_allocation"
+if in_allocation and driver_phase != "pre3d":
+    raise SystemExit("[svzt] in_allocation drivers have no post-3D phase")
 # Next-seed generation strategy chosen by the agent's seed policy:
 # - "reduced_rri": regenerate simplified_zerod_tuned_RRI.json inline on not_close.
 # - "calibrated_full_pa": after not_close or converged, submit the pre-rendered
@@ -262,6 +281,102 @@ log = {
     "prestress_traction_source": None,
     "preop_terminal_state": None,
 }
+
+# After a NODE_FAIL, Slurm requeues this job: a new attempt starts under the
+# same SLURM_JOB_ID (SLURM_RESTART_COUNT + 1) while the first attempt can keep
+# running on the failed node, cut off from the controller.  Each attempt claims
+# the job's attempt file at start.  An attempt that no longer owns it exits
+# before any sbatch and before writing the driver log, handoff, metrics or
+# decision, so a stale attempt cannot overwrite the requeued one's results.
+DRIVER_SUPERSEDED_EXIT_CODE = 9
+driver_attempt = {
+    "job_id": os.environ.get("SLURM_JOB_ID") or "local",
+    "restart_count": int(os.environ.get("SLURM_RESTART_COUNT") or 0),
+    "phase": driver_phase,
+    "node": os.environ.get("SLURMD_NODENAME") or os.uname().nodename,
+    "pid": os.getpid(),
+    "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    "nonce": uuid.uuid4().hex,
+}
+driver_attempt_path = remote_logs_dir / f"iteration_driver_attempt_{driver_attempt['job_id']}.json"
+log["driver_attempt"] = driver_attempt
+
+
+def _claim_driver_attempt() -> None:
+    """Record this attempt as the owner of its job's driver writes (atomic replace)."""
+    driver_attempt_path.parent.mkdir(parents=True, exist_ok=True)
+    staging = driver_attempt_path.with_name(f"{driver_attempt_path.name}.{driver_attempt['nonce']}.tmp")
+    staging.write_text(json.dumps(driver_attempt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(staging, driver_attempt_path)
+
+
+def _exit_if_superseded(action: str) -> None:
+    """Exit without writing when the attempt file no longer names this attempt."""
+    try:
+        owner = json.loads(driver_attempt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        owner = {"error": f"{type(exc).__name__}: {exc}"}
+    if isinstance(owner, dict) and owner.get("nonce") == driver_attempt["nonce"]:
+        return
+    print(
+        f"[svzt] driver attempt {driver_attempt['restart_count']} of job {driver_attempt['job_id']} "
+        f"(started {driver_attempt['started_at']} on {driver_attempt['node']}) no longer owns "
+        f"{driver_attempt_path}: {json.dumps(owner, sort_keys=True)}; "
+        f"exiting before {action} without writing driver results",
+        file=sys.stderr,
+        flush=True,
+    )
+    raise SystemExit(DRIVER_SUPERSEDED_EXIT_CODE)
+
+
+def _handoff_from_earlier_job(handoff_path: Path) -> bool:
+    """True when handoff_path was left by an earlier tune job, not an attempt of this one."""
+    try:
+        handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, json.JSONDecodeError):
+        return True
+    return str(handoff.get("pre3d_job_id")) != driver_attempt["job_id"]
+
+
+def _write_driver_results(metrics_payload: dict) -> None:
+    """Write the driver log, then the post-3D handoff or the metrics and decision."""
+    _exit_if_superseded("writing the driver log, handoff, metrics and decision")
+    handoff_path = remote_results_dir / DRIVER_HANDOFF_FILENAME
+    handing_off = handed_off_to_post3d and decision_payload["decision"] != "needs_review"
+    # A pre-3D decision clears a handoff left by an earlier tune job.  It keeps
+    # one naming this job: another attempt of it queued that post-3D driver.
+    remove_handoff = False
+    if not handing_off and driver_phase == "pre3d" and handoff_path.exists():
+        remove_handoff = _handoff_from_earlier_job(handoff_path)
+        if not remove_handoff:
+            log["warnings"].append(
+                f"kept {handoff_path}: another attempt of job {driver_attempt['job_id']} "
+                "handed off to a post-3D driver"
+            )
+
+    with (remote_logs_dir / "iteration_driver_log.json").open("w", encoding="utf-8") as stream:
+        json.dump(log, stream, indent=2, sort_keys=True)
+
+    if handing_off:
+        # The post-3D job writes the decision; the agent follows this handoff.
+        handoff = {
+            "run_id": run_id,
+            "iteration": iteration,
+            "pre3d_job_id": os.environ.get("SLURM_JOB_ID"),
+            "preop_job_id": log.get("preop_job_id"),
+            "post3d_job_id": log.get("post3d_job_id"),
+        }
+        handoff_path.write_text(json.dumps(handoff, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"[svzt] 3D run {handoff['preop_job_id']} handed off to post-3D driver {handoff['post3d_job_id']}")
+        return
+    if remove_handoff:
+        handoff_path.unlink()
+    write_iteration_metrics(metrics_path, metrics_payload)
+    write_iteration_decision(decision_path, decision_payload)
+    print(f"[svzt] iteration metrics written: {metrics_path}")
+    print(f"[svzt] iteration decision written: {decision_path}")
 
 
 def _stage_aliased_mesh_complete(source: Path, aliases: dict) -> Path:
@@ -648,6 +763,7 @@ def _normalize_solver_runscript(
     mail_user: str | None,
     mail_types: list[str] | None,
     svfsiplus_path: str,
+    explicit_task_count: bool = False,
 ) -> None:
     stage_dir = script_path.parent.resolve()
     output_path = stage_dir / "svFlowSolver.o%j"
@@ -702,7 +818,15 @@ def _normalize_solver_runscript(
     rendered += '      ;;\n'
     rendered += '  esac\n'
     rendered += 'fi\n'
-    rendered += f"srun {svfsiplus_path} svFSIplus.xml\n"
+    if explicit_task_count:
+        # Run inside the driver's allocation: srun would otherwise launch one
+        # task per allocated slot (e.g. 48 for a 1-process prestress solve).
+        rendered += (
+            f"srun --nodes={nodes} --ntasks={nodes * procs_per_node} "
+            f"{svfsiplus_path} svFSIplus.xml\n"
+        )
+    else:
+        rendered += f"srun {svfsiplus_path} svFSIplus.xml\n"
     script_path.write_text(rendered, encoding="utf-8")
     script_path.chmod(0o755)
 
@@ -815,12 +939,14 @@ def _run_seed_generation_mean_steady_sim(seed_mean_dir: Path) -> None:
         mail_user=_resolve_slurm_mail_user(threed_config),
         mail_types=_resolve_slurm_mail_types(threed_config),
         svfsiplus_path=cluster_svfsiplus_path,
+        explicit_task_count=in_allocation,
     )
-    steady_job_id = _submit_job(run_solver_path)
+    steady_job_id = _start_solver_job(run_solver_path)
     log["prestress_mean_steady_job_id"] = steady_job_id
     log["steps"].append("prestress_mean_steady_sim_submitted")
-    ok, terminal = _wait_for_completion(
+    ok, terminal = _wait_for_solver_job(
         steady_job_id,
+        run_solver_path,
         poll_seconds=int(threed_config.get("wait_poll_seconds", 30)),
         timeout_seconds=int(threed_config.get("wait_timeout_seconds", 43200)),
     )
@@ -969,11 +1095,22 @@ def _write_mean_wall_traction_and_pressure(
     _write_wall_field(mean_p, out_path=pressure_path, wall_path=wall_path, name="Pressure")
 
 
+def _preop_dir_job_id(preop_dir: Path) -> str | None:
+    """Job ID of the 3D run whose solver log (svFlowSolver.o<id>) is in preop_dir, newest first."""
+    prefix = "svFlowSolver.o"
+    solver_logs = [path for path in preop_dir.glob(f"{prefix}*") if path.name[len(prefix):].isdigit()]
+    if not solver_logs:
+        return None
+    return max(solver_logs, key=lambda path: path.stat().st_mtime).name[len(prefix):]
+
+
 def _completed_preop_job_for_reuse(preop_dir: Path) -> tuple[str | None, str | None]:
     """Job ID of this iteration's completed preop 3D run, or the reason it is unusable.
 
     Evidence: the previous driver log records the preop job as COMPLETED with
-    a preop_completed step, and preop_dir holds result VTUs.
+    a preop_completed step, and preop_dir holds result VTUs.  When preop_dir's
+    own solver log names a different job (a later 3D run whose driver ended
+    before recording it), that job's scheduler state is the evidence instead.
     """
     previous_log_path = remote_logs_dir / "iteration_driver_log.json"
     try:
@@ -981,7 +1118,9 @@ def _completed_preop_job_for_reuse(preop_dir: Path) -> tuple[str | None, str | N
     except (OSError, json.JSONDecodeError) as exc:
         return None, f"previous driver log unreadable: {previous_log_path} ({exc})"
     job_id = previous_log.get("preop_job_id")
+    log_job_id = job_id
     terminal = str(previous_log.get("preop_terminal_state") or "")
+    dir_job_id = _preop_dir_job_id(preop_dir) if driver_phase != "post3d" else None
     if driver_phase == "post3d":
         if not job_id or "post3d_driver_submitted" not in " ".join(previous_log.get("steps") or []):
             return None, f"pre-3D driver log does not record a 3D handoff (job={job_id})"
@@ -989,6 +1128,18 @@ def _completed_preop_job_for_reuse(preop_dir: Path) -> tuple[str | None, str | N
         log["preop_terminal_state"] = state
         if state != "COMPLETED":
             return None, f"preop simulation did not complete successfully: {state or 'unknown'}"
+    elif dir_job_id is not None and dir_job_id != str(job_id or ""):
+        state, _source = _query_state(dir_job_id)
+        if state != "COMPLETED":
+            return None, (
+                f"preop 3D job {dir_job_id} in {preop_dir} did not complete successfully: "
+                f"{state or 'unknown'}"
+            )
+        log["warnings"].append(
+            f"reuse_preop_3d: previous driver log names preop job {job_id}; "
+            f"reusing job {dir_job_id} from its solver log in {preop_dir}"
+        )
+        job_id = dir_job_id
     elif not job_id or terminal.upper() != "COMPLETED" or "preop_completed" not in (previous_log.get("steps") or []):
         return None, (
             f"previous driver log does not record a completed preop job "
@@ -996,9 +1147,9 @@ def _completed_preop_job_for_reuse(preop_dir: Path) -> tuple[str | None, str | N
         )
     if _latest_result_vtu(preop_dir) is None:
         return None, f"no preop result VTUs under {preop_dir}"
-    # This run overwrites the driver log; keep the one that produced the 3D result.
+    # This run overwrites the driver log; keep it under the job it records.
     kept_name = "pre3d" if driver_phase == "post3d" else "preop"
-    shutil.copy2(previous_log_path, remote_logs_dir / f"iteration_driver_log.{kept_name}_{job_id}.json")
+    shutil.copy2(previous_log_path, remote_logs_dir / f"iteration_driver_log.{kept_name}_{log_job_id}.json")
     return str(job_id), None
 
 
@@ -1123,14 +1274,16 @@ def _ensure_generated_prestress_file() -> Path:
         mail_user=_resolve_slurm_mail_user(prestress_config),
         mail_types=_resolve_slurm_mail_types(prestress_config),
         svfsiplus_path=cluster_svfsiplus_path,
+        explicit_task_count=in_allocation,
     )
 
-    prestress_job_id = _submit_job(run_solver_path)
+    prestress_job_id = _start_solver_job(run_solver_path)
     log["prestress_job_id"] = prestress_job_id
     log["steps"].append("prestress_submitted")
 
-    ok, terminal = _wait_for_completion(
+    ok, terminal = _wait_for_solver_job(
         prestress_job_id,
+        run_solver_path,
         poll_seconds=int(threed_config.get("wait_poll_seconds", 30)),
         timeout_seconds=int(threed_config.get("wait_timeout_seconds", 43200)),
     )
@@ -1212,6 +1365,27 @@ def _carry_forward_outlet_mapping(config: dict) -> dict:
     }
     log["steps"].append(f"outlet_mapping_carried_forward:iter-{iteration - 1:02d}")
     return carried
+
+
+def _zerod_periodicity_warnings(periodicity) -> list[str]:
+    """Warnings when the 0D pre-mapping metrics may come from a transient cycle.
+
+    svZeroDTrees reports ``periodicity`` (cycles simulated, final
+    cycle-to-cycle MPA drift) when it ran the snapshot until periodic; older
+    installs score the snapshot's own cycle count and report none.
+    """
+    if periodicity is None:
+        return [
+            "zerod_pre_mapping_metrics: svZeroDTrees did not report periodicity; "
+            "metrics come from the snapshot's own cycle count and may be transient"
+        ]
+    if not periodicity.get("converged"):
+        return [
+            "zerod_pre_mapping_metrics: MPA pressure not periodic after "
+            f"{periodicity.get('cycles_used')} cycles "
+            f"(drift {periodicity.get('final_drift_mmhg')} mmHg)"
+        ]
+    return []
 
 
 def _record_threed_wall_match(diagnostics_path_raw) -> None:
@@ -1315,7 +1489,18 @@ def _resolve_slurm_mail_types(sim_cfg: dict) -> list[str]:
     return normalized or ["begin", "end"]
 
 
+def _parse_sbatch_job_id(stdout: str) -> str:
+    # TACC's sbatch wrapper prints a login banner and filter checks on stdout
+    # before the --parsable "<id>[;cluster]" line, so take the last such line.
+    for line in reversed(stdout.splitlines()):
+        job_id = line.strip().split(";")[0].strip()
+        if job_id.isdigit():
+            return job_id
+    raise RuntimeError(f"unable to parse job id from sbatch stdout: {stdout!r}")
+
+
 def _submit_job(script_path: Path) -> str:
+    _exit_if_superseded(f"sbatch {script_path}")
     proc = subprocess.run(
         ["sbatch", "--parsable", "--chdir", str(script_path.parent), script_path.name],
         cwd=script_path.parent,
@@ -1326,10 +1511,9 @@ def _submit_job(script_path: Path) -> str:
     )
     if proc.returncode != 0:
         raise RuntimeError(f"sbatch failed rc={proc.returncode}: {proc.stderr.strip()}")
-    stdout = proc.stdout.strip()
-    if not stdout:
+    if not proc.stdout.strip():
         raise RuntimeError("sbatch returned empty stdout")
-    return stdout.split(";")[0].strip()
+    return _parse_sbatch_job_id(proc.stdout)
 
 
 def _query_state(job_id: str) -> tuple[str | None, str]:
@@ -1360,6 +1544,73 @@ def _query_state(job_id: str) -> tuple[str | None, str]:
                 return state, "sacct"
 
     return None, "unknown"
+
+
+def _job_attempt_history(job_id: str) -> list[dict] | None:
+    """One record per scheduler attempt of job_id (sacct -D), oldest first; None if sacct fails."""
+    sacct = subprocess.run(
+        [
+            "sacct", "-D", "-X", "-j", job_id, "--noheader", "--parsable2",
+            "--format", "JobID,State,Start,End,NodeList",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if sacct.returncode != 0:
+        return None
+    attempts = []
+    for line in sacct.stdout.splitlines():
+        fields = line.strip().split("|")
+        if len(fields) < 5 or fields[0].strip() != job_id:
+            continue
+        state = fields[1].split()
+        attempts.append(
+            {
+                "state": state[0].upper() if state else "",
+                "start": fields[2],
+                "end": fields[3],
+                "nodes": fields[4],
+            }
+        )
+    return attempts
+
+
+def _warn_if_job_was_requeued(job_id: str, label: str) -> None:
+    """Record a warning when job_id ran more than once (e.g. NODE_FAIL, then a Slurm requeue).
+
+    svMultiPhysics appends to svZeroD_data, so a requeued 3D run started before
+    run_solver.sh moved stale data aside has one header block per attempt
+    (tst-stan-1-20261016, job 48158596).
+    """
+    attempts = _job_attempt_history(job_id)
+    if attempts is None:
+        log["warnings"].append(f"{label}_attempt_history_unavailable: sacct -D failed for job {job_id}")
+        return
+    if len(attempts) <= 1:
+        return
+    log[f"{label}_attempt_history"] = attempts
+    summary = ", ".join(f"{a['state'] or '?'}@{a['start']} on {a['nodes']}" for a in attempts)
+    log["warnings"].append(
+        f"{label}_requeued: job {job_id} ran {len(attempts)} attempts ({summary}); "
+        "metrics come from the last attempt"
+    )
+
+
+def _flow_split_metrics_recording_warnings(preop_dir: Path) -> dict:
+    """compute_flow_split_metrics, with svZeroDTrees RuntimeWarnings (e.g. a
+    relaunched solver's extra svZeroD_data header blocks) copied to the log."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        result = compute_flow_split_metrics(simulation_dir=preop_dir)
+    for warning in caught:
+        if issubclass(warning.category, RuntimeWarning):
+            log["warnings"].append(f"flow_split_input: {warning.message}")
+        else:
+            warnings.showwarning(warning.message, warning.category, warning.filename, warning.lineno)
+    return result
 
 
 def _wait_for_completion(job_id: str, poll_seconds: int, timeout_seconds: int) -> tuple[bool, str | None]:
@@ -1407,7 +1658,92 @@ def _wait_for_completion(job_id: str, poll_seconds: int, timeout_seconds: int) -
             if state not in active_states:
                 return False, f"unexpected terminal scheduler state: {state}"
 
+        # A stale attempt stops here rather than at its timeout.
+        _exit_if_superseded(f"waiting on job {job_id}")
         time.sleep(max(poll_seconds, 5))
+
+
+def _start_solver_job(script_path: Path) -> str:
+    """Submit a solver stage's run_solver.sh, or, in-allocation, name it for _wait_for_solver_job.
+
+    In-allocation the stage runs under this driver job, so its ID is the stage's
+    job ID: scheduler queries and solver-log names (svFlowSolver.o<id>) keep
+    working as evidence for fetch and --reuse-preop-3d.
+    """
+    if in_allocation:
+        return str(driver_attempt["job_id"])
+    return _submit_job(script_path)
+
+
+def _wait_for_solver_job(
+    job_id: str, script_path: Path, *, poll_seconds: int, timeout_seconds: int
+) -> tuple[bool, str | None]:
+    """Wait for a submitted stage, or, in-allocation, run it here and wait for its exit."""
+    if in_allocation:
+        return _run_in_allocation(
+            script_path, job_id=job_id, poll_seconds=poll_seconds, timeout_seconds=timeout_seconds
+        )
+    return _wait_for_completion(job_id, poll_seconds=poll_seconds, timeout_seconds=timeout_seconds)
+
+
+def _stop_process_group(proc: subprocess.Popen) -> None:
+    for sig, grace in ((signal.SIGTERM, 30), (signal.SIGKILL, 10)):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _run_in_allocation(
+    script_path: Path, *, job_id: str, poll_seconds: int, timeout_seconds: int
+) -> tuple[bool, str | None]:
+    """Run a normalized run_solver.sh with bash inside this job's allocation.
+
+    Its srun line carries the stage's own --nodes/--ntasks; its #SBATCH lines
+    are comments to bash.  stdout/stderr go where the batch job's would
+    (svFlowSolver.o/e<job_id> in the stage dir).  Returns (ok, terminal) like
+    _wait_for_completion: COMPLETED on exit code 0.
+    """
+    _exit_if_superseded(f"running {script_path} in the driver allocation")
+    stage_dir = script_path.parent
+    label = stage_dir.name
+    log["steps"].append(f"in_allocation_run_started:{job_id}:{label}")
+    with (stage_dir / f"svFlowSolver.o{job_id}").open("w") as out, (
+        stage_dir / f"svFlowSolver.e{job_id}"
+    ).open("w") as err:
+        proc = subprocess.Popen(
+            ["bash", script_path.name],
+            cwd=stage_dir,
+            stdout=out,
+            stderr=err,
+            start_new_session=True,
+        )
+        start = time.monotonic()
+        while True:
+            try:
+                returncode = proc.wait(timeout=max(poll_seconds, 5))
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if time.monotonic() - start > timeout_seconds:
+                _stop_process_group(proc)
+                terminal = f"timeout after {timeout_seconds}s (in_allocation {label})"
+                log["steps"].append(f"in_allocation_run:{job_id}:{label}:TIMEOUT")
+                return False, terminal
+            try:
+                # A stale attempt stops its solver instead of running on.
+                _exit_if_superseded(f"waiting on {script_path}")
+            except SystemExit:
+                _stop_process_group(proc)
+                raise
+    state = "COMPLETED" if returncode == 0 else "FAILED"
+    log["steps"].append(f"in_allocation_run:{job_id}:{label}:{state}:rc={returncode}")
+    return returncode == 0, state if returncode == 0 else f"FAILED (exit code {returncode})"
 
 
 def _submit_post3d_driver(preop_job_id: str) -> str:
@@ -1415,6 +1751,7 @@ def _submit_post3d_driver(preop_job_id: str) -> str:
     script_path = remote_iter_dir / "run_tune_iter.sh"
     if not script_path.exists():
         raise RuntimeError(f"driver script missing: {script_path}")
+    _exit_if_superseded("sbatch of the post-3D driver")
     argv = [
         "sbatch",
         "--parsable",
@@ -1432,7 +1769,7 @@ def _submit_post3d_driver(preop_job_id: str) -> str:
     )
     if proc.returncode != 0 or not proc.stdout.strip():
         raise RuntimeError(f"sbatch failed rc={proc.returncode}: {proc.stderr.strip()}")
-    return proc.stdout.strip().split(";")[0].strip()
+    return _parse_sbatch_job_id(proc.stdout)
 
 
 def _prepare_and_submit_stage(
@@ -1496,14 +1833,16 @@ def _prepare_and_submit_stage(
         mail_user=_resolve_slurm_mail_user(sim_cfg),
         mail_types=_resolve_slurm_mail_types(sim_cfg),
         svfsiplus_path=cluster_svfsiplus_path,
+        explicit_task_count=in_allocation,
     )
 
-    job_id = _submit_job(run_solver_path)
+    job_id = _start_solver_job(run_solver_path)
     return job_id, stage_dir
 
 
 def _submit_prepared_sbatch(argv: list[str]) -> str:
     script_path = Path(argv[-1])
+    _exit_if_superseded(f"sbatch {script_path}")
     proc = subprocess.run(
         argv,
         cwd=script_path.parent,
@@ -1514,13 +1853,12 @@ def _submit_prepared_sbatch(argv: list[str]) -> str:
     )
     if proc.returncode != 0:
         raise RuntimeError(f"sbatch failed rc={proc.returncode}: {proc.stderr.strip()}")
-    stdout = proc.stdout.strip()
-    if not stdout:
+    if not proc.stdout.strip():
         raise RuntimeError("sbatch returned empty stdout")
-    return stdout.split(";")[0].strip()
+    return _parse_sbatch_job_id(proc.stdout)
 
 
-def _submit_calibrated_full_pa_seed_jobs(tuned_model: Path) -> dict:
+def _submit_calibrated_full_pa_seed_jobs(tuned_model: Path, *, defer: bool = False) -> dict:
     postprocess_spec = dict(seed_generation.get("postprocess") or {})
     calibration_spec = dict(seed_generation.get("calibration") or {})
     report = {
@@ -1534,6 +1872,11 @@ def _submit_calibrated_full_pa_seed_jobs(tuned_model: Path) -> dict:
         },
         "error": None,
     }
+    if defer:
+        # In-allocation drivers cannot sbatch; on advance the agent submits both
+        # jobs from the login node (its fallback for any status but "submitted").
+        report["status"] = "deferred_to_agent"
+        return report
     try:
         request = json.loads(Path(calibration_spec["remote_request_path"]).read_text(encoding="utf-8"))
         request["paths"]["zerod_config"] = str(tuned_model.resolve())
@@ -1556,6 +1899,9 @@ def _submit_calibrated_full_pa_seed_jobs(tuned_model: Path) -> dict:
         log["warnings"].append(f"calibrated_full_pa_seed_submission_failed: {exc}")
     return report
 
+
+# Claimed before any work; see driver_attempt above.
+_claim_driver_attempt()
 
 try:
     if geometry_scaling:
@@ -1722,7 +2068,13 @@ try:
             snapshot_path = Path(snapshot_path_raw) if snapshot_path_raw else None
             if snapshot_path is not None and snapshot_path.exists() and clinical_targets_path is not None:
                 try:
+                    # svZeroDTrees runs the snapshot until its MPA pressure is
+                    # periodic (the snapshot keeps the seed's 2 cold-start
+                    # cycles, whose cycle 2 is still transient).  Older
+                    # installs score the seed's cycles and report no periodicity.
                     zerod_metrics = summarize_pulmonary_zerod_config(snapshot_path)
+                    zerod_periodicity = zerod_metrics.get("periodicity")
+                    log["warnings"].extend(_zerod_periodicity_warnings(zerod_periodicity))
                     zerod_gate = evaluate_iteration_gate(
                         metrics={key: float(zerod_metrics[key]) for key in ("mpa_sys", "mpa_dia", "mpa_mean", "rpa_split")},
                         clinical_targets=clinical_targets_path,
@@ -1734,6 +2086,8 @@ try:
                         "status": "ok",
                         "source_kind": "pa_config_tuning_snapshot",
                         "source_config_path": str(snapshot_path),
+                        # Cycles simulated and final cycle-to-cycle MPA drift.
+                        "periodicity": zerod_periodicity,
                         "metrics": {
                             key: zerod_metrics.get(key)
                             for key in (
@@ -1763,6 +2117,7 @@ try:
                             "decision": zerod_gate.get("decision"),
                         },
                     }
+                    _exit_if_superseded("writing zerod_pre_mapping_metrics.json")
                     write_iteration_metrics(remote_results_dir / "zerod_pre_mapping_metrics.json", zerod_payload)
                     log["steps"].append("zerod_pre_mapping_metrics_written")
                 except Exception as exc:
@@ -1810,20 +2165,22 @@ try:
             log["steps"].append("preop_submitted")
 
             post3d_job_id = None
-            try:
-                post3d_job_id = _submit_post3d_driver(preop_job_id)
-            except Exception as exc:
-                log["warnings"].append(
-                    f"post3d_driver_submission_failed: {exc}; waiting for the 3D run in this job"
-                )
+            if not in_allocation:
+                try:
+                    post3d_job_id = _submit_post3d_driver(preop_job_id)
+                except Exception as exc:
+                    log["warnings"].append(
+                        f"post3d_driver_submission_failed: {exc}; waiting for the 3D run in this job"
+                    )
             if post3d_job_id:
                 log["post3d_job_id"] = post3d_job_id
                 log["steps"].append(f"post3d_driver_submitted:{post3d_job_id}")
                 handed_off_to_post3d = True
                 ok, terminal = True, None
             else:
-                ok, terminal = _wait_for_completion(
+                ok, terminal = _wait_for_solver_job(
                     preop_job_id,
+                    preop_dir / "run_solver.sh",
                     poll_seconds=poll_seconds,
                     timeout_seconds=timeout_seconds,
                 )
@@ -1834,6 +2191,8 @@ try:
             _mark_needs_review(f"preop simulation did not complete successfully: {terminal}")
         else:
             log["steps"].append("preop_completed")
+            if log.get("preop_job_id"):
+                _warn_if_job_was_requeued(str(log["preop_job_id"]), "preop_3d")
 
             pressure_csv = remote_results_dir / "mpa_pressure_vs_time.csv"
             if not pressure_csv.exists() or _older_than_3d_result(pressure_csv, preop_dir):
@@ -1862,7 +2221,7 @@ try:
                 _mark_needs_review(f"centerline pressure CSV missing: {pressure_csv}")
 
             try:
-                metrics.update(compute_flow_split_metrics(simulation_dir=preop_dir))
+                metrics.update(_flow_split_metrics_recording_warnings(preop_dir))
                 log["steps"].append("flow_split_metrics_loaded")
             except Exception as exc:
                 _mark_needs_review(f"flow-split extraction failed: {exc}")
@@ -1918,7 +2277,9 @@ try:
                 seed_strategy == "calibrated_full_pa"
                 and decision_payload["decision"] in {"not_close", "converged"}
             ):
-                seed_report = _submit_calibrated_full_pa_seed_jobs(tuned_config_path)
+                seed_report = _submit_calibrated_full_pa_seed_jobs(
+                    tuned_config_path, defer=in_allocation
+                )
                 decision_payload["seed_generation"] = seed_report
                 log["steps"].append(f"calibrated_full_pa_seed_jobs_{seed_report['status']}")
             elif (
@@ -1954,26 +2315,5 @@ decision_payload.update(
     }
 )
 
-with (remote_logs_dir / "iteration_driver_log.json").open("w", encoding="utf-8") as stream:
-    json.dump(log, stream, indent=2, sort_keys=True)
-
-handoff_path = remote_results_dir / DRIVER_HANDOFF_FILENAME
-if handed_off_to_post3d and decision_payload["decision"] != "needs_review":
-    # The post-3D job writes the decision; the agent follows this handoff.
-    handoff = {
-        "run_id": run_id,
-        "iteration": iteration,
-        "pre3d_job_id": os.environ.get("SLURM_JOB_ID"),
-        "preop_job_id": log.get("preop_job_id"),
-        "post3d_job_id": log.get("post3d_job_id"),
-    }
-    handoff_path.write_text(json.dumps(handoff, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"[svzt] 3D run {handoff['preop_job_id']} handed off to post-3D driver {handoff['post3d_job_id']}")
-else:
-    if handoff_path.exists() and driver_phase == "pre3d":
-        handoff_path.unlink()
-    write_iteration_metrics(metrics_path, metrics_payload)
-    write_iteration_decision(decision_path, decision_payload)
-    print(f"[svzt] iteration metrics written: {metrics_path}")
-    print(f"[svzt] iteration decision written: {decision_path}")
+_write_driver_results(metrics_payload)
 PY

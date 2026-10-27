@@ -562,6 +562,7 @@ run—do not “repair” a failed stage by replacing its manifest evidence.
   - `tuning_progress.json`
   - `tuning_progress.png`
 - For future runs, the iteration driver also writes `iterations/iter-XX/results/zerod_pre_mapping_metrics.json`.
+  svZeroDTrees runs the snapshot until its MPA pressure is periodic, and the payload records `periodicity` (cycles simulated, final cycle-to-cycle drift, `converged`). It is `null` for svZeroDTrees installs before 2026-10-15. Those scored the snapshot's 2 cold-start cycles, so their 0D diastolic pressure is too low. The backfill uses the local svZeroDTrees, so it is periodic once that install is updated.
 - When the per-iteration 0D summary is missing, the command backfills it locally from `pa_config_tuning_snapshot.json` when that artifact is available under either:
   - `iterations/iter-XX/results/`
   - `pulled_outputs/iterations/iter-XX/results/`
@@ -700,7 +701,61 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
     is `needs_review` (`preop simulation did not complete successfully: <state>`).
     If queueing the post-3D job fails, the pre-3D job falls back to waiting for
     the 3D run itself, up to `wait_timeout_seconds` (queue time included)
+  - with `defaults.execution.nested_submission: in_allocation` (TACC
+    Stampede3, where compute nodes cannot `sbatch`), the driver job itself
+    holds the preop 3D shape (`--nodes=<threed.nodes>`,
+    `--ntasks-per-node=<threed.procs_per_node>`, one CPU per task; 0D tuning
+    runs in the batch step on the first node). The mean steady, prestress and
+    preop 3D stages keep their stage directories and normalized
+    `run_solver.sh`, whose launch line becomes
+    `srun --nodes=<n> --ntasks=<n x procs_per_node>`; the driver runs it with
+    `bash` in the stage directory, writing `svFlowSolver.o<job>` /
+    `svFlowSolver.e<job>` there as the batch job would. The stage job IDs
+    (`prestress_mean_steady_job_id`, `prestress_job_id`, `preop_job_id`) are
+    the driver's own job ID, so fetch, `status` and `--reuse-preop-3d` keep
+    their evidence; the `*_submitted` steps are still logged, and each run adds
+    `in_allocation_run_started:<job>:<stage>` and
+    `in_allocation_run:<job>:<stage>:COMPLETED|FAILED:rc=<code>` (or
+    `:TIMEOUT`). Exit code 0 is `COMPLETED`; `wait_timeout_seconds` bounds the
+    run (no queue time) and stops the solver's process group. No post-3D
+    driver is queued: the driver continues to the post-3D steps in the same
+    job, so `defaults.scheduler.wall_time` must cover 0D tuning, prestress,
+    the 3D run and the post-3D steps (Stampede3 `skx`: 48 h at most), and
+    `defaults.scheduler.mem` is per node. Under `calibrated_full_pa` the
+    driver reports `seed_generation.status: deferred_to_agent` instead of
+    submitting the postprocess and calibration jobs; the agent's existing
+    fallback submits them from the login node on advance
+  - one attempt per driver job writes results. After a `NODE_FAIL`, Slurm
+    requeues the job: a new attempt starts under the same job ID
+    (`SLURM_RESTART_COUNT` + 1) while the first can keep running on the failed
+    node, cut off from the controller. Each attempt (pre-3D or post-3D) claims
+    `logs/iteration_driver_attempt_<job>.json` at start (job ID, restart
+    count, phase, node, PID, start time, nonce; also in the driver log as
+    `driver_attempt`). Before every `sbatch`, at every scheduler poll, and
+    before writing `zerod_pre_mapping_metrics.json`, the driver log, the
+    handoff, metrics or decision, the driver checks that the file still names
+    its nonce. If not, it prints the owner to its `.error` log and exits with
+    code 9, writing nothing more. A stale attempt therefore stops at its next
+    poll instead of reaching its wait timeout. Artifacts that 0D tuning itself
+    writes are not guarded: a stale attempt still mid-tuning can rewrite them
+    until it reaches the next check.
+  - a pre-3D decision removes `results/iteration_handoff.json` only when it
+    names an earlier tune job. A handoff naming this job was written by
+    another attempt of it, so it is kept (warning `kept <path>: another
+    attempt of job <job> handed off to a post-3D driver`)
   - requires `results/mpa_pressure_vs_time.csv` plus preop flow split for gating
+  - once the preop 3D job is `COMPLETED`, the driver reads its attempt history
+    (`sacct -D -X -j <3D job>`). If Slurm ran it more than once (e.g.
+    `NODE_FAIL`, then a requeue under the same job ID), the driver log gets
+    `preop_3d_attempt_history` (state, start, end, nodes per attempt) and the
+    warning `preop_3d_requeued: job <job> ran <n> attempts (...)`; if `sacct`
+    fails, the warning is `preop_3d_attempt_history_unavailable`. Neither changes
+    the decision. svMultiPhysics appends to `preop/svZeroD_data`: svZeroDTrees'
+    `run_solver.sh` moves an existing file to `svZeroD_data.stale.*` before
+    `srun`, and its reader uses only the last header block. A file with several
+    blocks (written before that guard) adds the warning
+    `flow_split_input: <path> has <n> header blocks (...)`
+    (tst-stan-1-20261016, job 48158596, 2026-10-19)
   - `not_close` regenerates a reduced PA config for reduced-RRI or explicitly
     selected legacy-policy continuation; `advance-iter --execute` automatically
     submits the postprocess → calibration → promotion chain for default-policy

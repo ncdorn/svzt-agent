@@ -191,6 +191,57 @@ def test_run_tune_default_submission_matches_rendered_tune_cpus(sample_config_fi
     assert "#SBATCH --cpus-per-task=24" in rendered_script
 
 
+def test_run_tune_scheduler_nodes_reach_submission_and_driver_header(sample_config_files):
+    # TACC (Stampede3) rejects jobs without -N; the post-3D driver resubmits the
+    # script with only its header, so the header must carry the count too.
+    defaults_path = sample_config_files / "config" / "defaults.yaml"
+    defaults_path.write_text(
+        defaults_path.read_text(encoding="utf-8").replace(
+            'cpus: "<count>"', 'cpus: "4"\n    nodes: "1"', 1
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-dry-nodes",
+        mode=ExecutionMode.DRY_RUN,
+    )
+
+    rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
+    submit_preview = next(
+        command
+        for command in result.command_previews
+        if command[0] == "ssh" and "sbatch" in command[-1]
+    )
+    submit_command = shlex.split(submit_preview[-1])
+    assert submit_command[submit_command.index("--nodes") + 1] == "1"
+    header = rendered_script.split('echo "[svzt] run_id', 1)[0]
+    assert "#SBATCH --nodes=1" in header
+
+
+def test_run_tune_without_scheduler_nodes_omits_node_count(sample_config_files):
+    result = run_tune_trees(
+        workspace_root=sample_config_files,
+        cluster_name="sherlock",
+        patient_alias="TST-STAN-x",
+        run_id="run-dry-no-nodes",
+        mode=ExecutionMode.DRY_RUN,
+    )
+
+    rendered_script = result.local_job_script_path.read_text(encoding="utf-8")
+    submit_preview = next(
+        command
+        for command in result.command_previews
+        if command[0] == "ssh" and "sbatch" in command[-1]
+    )
+    assert "--nodes" not in shlex.split(submit_preview[-1])
+    header = rendered_script.split('echo "[svzt] run_id', 1)[0]
+    assert "#SBATCH --nodes" not in header
+
+
 def test_run_tune_dry_run_supports_sibling_repo_layout_without_changing_run_contract(
     sample_config_files,
 ):
@@ -1160,6 +1211,8 @@ patients:
         "_seed_generation_mean_result_dirs",
         "_run_seed_generation_mean_steady_sim",
         "_seed_generation_mean_result_dir",
+        "_start_solver_job",
+        "_wait_for_solver_job",
     }
     module = ast.Module(
         body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted],
@@ -1224,6 +1277,7 @@ patients:
         "_resolve_slurm_mail_types": lambda cfg: [],
         "_submit_job": fake_submit,
         "_wait_for_completion": fake_wait,
+        "in_allocation": False,
     }
     exec(compile(module, "driver", "exec"), namespace)
 
@@ -1278,7 +1332,7 @@ def test_run_tune_iter_reuse_preop_3d_uses_only_completed_evidence(sample_config
 
     body = re.split(r"<<'PY'[^\n]*\n", rendered)[2]
     tree = ast.parse(body[: body.index("\nPY\n")])
-    wanted = {"_extract_result_step", "_latest_result_vtu", "_completed_preop_job_for_reuse"}
+    wanted = {"_extract_result_step", "_latest_result_vtu", "_preop_dir_job_id", "_completed_preop_job_for_reuse"}
     module = ast.Module(
         body=[node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted],
         type_ignores=[],
