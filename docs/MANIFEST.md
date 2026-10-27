@@ -5,6 +5,12 @@ It is written atomically and should be treated as append-only evidence: a retry
 adds a new transition/attempt or updates the matching idempotent submission;
 it must not rewrite a prior scientific result or seed.
 
+Every manifest write also rewrites `progress_tracker.yaml` in the same
+directory as the manifest being written. `local_paths` holds the absolute
+paths recorded when the run was initialized and is informational only: a
+copied or moved run directory (for example a shadow workspace for golden dry
+runs) writes its own tracker and never the original run's.
+
 ## Patient fields
 `patient` records the alias, `permanent_remote_path`, the resolved
 `patient_assets` (geometry paths point at the staged scaled copies when the

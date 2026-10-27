@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import shutil
+
+import yaml
+
 from svztagent.config.load import load_workspace_config, resolve_cluster, resolve_patient_alias
 from svztagent.core.manifest import (
     copy_config_snapshot,
@@ -65,6 +69,52 @@ def test_manifest_roundtrip(sample_config_files):
     assert loaded.progress_tracker.iterations is not None
     assert loaded.progress_tracker.iterations["current"] == 1
     assert (local_paths.run_dir / "progress_tracker.yaml").exists()
+
+
+def test_write_manifest_of_copied_run_leaves_original_tracker_untouched(
+    sample_config_files, tmp_path
+):
+    config = load_workspace_config(sample_config_files)
+    cluster = resolve_cluster(config, "sherlock")
+    patient = resolve_patient_alias(config, "sherlock", "TST-STAN-x")
+    local_paths = build_local_run_paths(sample_config_files, "run-001")
+    ensure_local_run_dirs(local_paths)
+    manifest = create_manifest(
+        run_id="run-001",
+        cluster=cluster,
+        patient=patient,
+        local_paths=local_paths,
+        workspace_root=sample_config_files,
+        config=config,
+    )
+    write_manifest(manifest, local_paths.manifest)
+    original_tracker = local_paths.run_dir / "progress_tracker.yaml"
+    original_bytes = original_tracker.read_bytes()
+    original_mtime = original_tracker.stat().st_mtime_ns
+
+    shadow_run_dir = tmp_path / "shadow" / "runs" / "run-001"
+    shutil.copytree(local_paths.run_dir, shadow_run_dir)
+    shadow_manifest_path = shadow_run_dir / "manifest.yaml"
+    shadow_tracker = shadow_run_dir / "progress_tracker.yaml"
+    shadow_tracker.unlink()
+
+    copied = read_manifest(shadow_manifest_path)
+    # The copy still records absolute paths into the original run directory.
+    assert copied.local_paths.progress_tracker == str(original_tracker)
+    copied = update_run_progress(
+        shadow_manifest_path,
+        model_id="preop_model",
+        milestone_id="bcs_tuned",
+        status="in_progress",
+        note="shadow write",
+    )
+
+    assert original_tracker.read_bytes() == original_bytes
+    assert original_tracker.stat().st_mtime_ns == original_mtime
+    assert shadow_tracker.exists()
+    shadow_payload = yaml.safe_load(shadow_tracker.read_text(encoding="utf-8"))
+    assert shadow_payload == copied.progress_tracker.model_dump(mode="json")
+    assert "shadow write" not in original_bytes.decode("utf-8")
 
 
 def test_init_run_creates_expected_structure(sample_config_files):

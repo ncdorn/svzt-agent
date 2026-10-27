@@ -1623,11 +1623,19 @@ def record_fetch(
 
 
 def write_manifest(manifest: RunManifest, path: Path) -> None:
+    """Write the manifest to ``path`` and its progress tracker beside it.
+
+    The tracker always lands at ``path.parent / progress_tracker.yaml``, never at
+    the absolute ``manifest.local_paths.progress_tracker`` recorded at init.  For
+    a run written in place the two are the same file; for a copied or moved run
+    directory (a shadow workspace, a relocated run) the recorded path still
+    points at the original run, which must not be rewritten from the copy.
+    """
     payload = yaml.safe_dump(manifest.model_dump(mode="json"), sort_keys=True)
     _atomic_write_text(path, payload)
 
     if manifest.progress_tracker is not None:
-        write_progress_tracker(manifest.progress_tracker, Path(manifest.local_paths.progress_tracker))
+        write_progress_tracker(manifest.progress_tracker, Path(path).parent / "progress_tracker.yaml")
 
 
 def read_manifest(path: Path) -> RunManifest:
