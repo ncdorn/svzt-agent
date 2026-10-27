@@ -145,17 +145,18 @@ If the run hit the default 5-iteration cap but you want to keep going, raise it 
 svzt advance-iter --run-id <run-id> --max-iterations 8 --execute
 ```
 
-**After the last tuning iteration**, run the wall-correction step. Its status
-command records the pre-op source, and then post-op can be submitted:
+**After the last tuning iteration**, run the wall-correction step, poll it,
+record the pre-op source explicitly, and then submit post-op:
 ```bash
 svzt run wall-correction --run-id <run-id> --execute
-svzt wall-correction-status <run-id>       # once the calibration finishes
+svzt wall-correction-status <run-id>       # until the calibration finishes
+svzt preop finalize --run-id <run-id>      # idempotent; records the pre-op source
 svzt run postop --run-id <run-id>          # dry-run preview
 svzt run postop --run-id <run-id> --execute
 ```
 
-`svzt preop select` is deprecated and is kept for legacy runs without a wall
-correction. The text below describes that legacy path.
+`svzt preop select` is retired (it exits with an error). The text below
+describes the legacy path that runs made before 2026-10-26 used.
 
 `svzt preop select` now also submits a selected-preop postprocess job that
 generates `mpa_pressure_vs_time.csv/png`, flow-split comparison artifacts, and
@@ -445,8 +446,9 @@ last iteration, select that iteration with `svzt preop select`.
 | `svzt fetch R` | Pull artifacts locally |
 | `svzt advance-iter --run-id R --execute` | Advance after `not_close` |
 | `svzt run wall-correction --run-id R --execute` | Wall-corrected 3D + matched 0D after the last iteration |
-| `svzt wall-correction-status R` | Fetch results; record the pre-op source for post-op |
-| `svzt preop select --run-id R --iteration N` | Deprecated: legacy manual pre-op selection |
+| `svzt wall-correction-status R` | Poll the step; fetch its calibration reports |
+| `svzt preop finalize --run-id R` | Record the pre-op source for post-op (idempotent) |
+| `svzt preop select ...` | Retired: legacy error |
 | `svzt run postop --run-id R` | Preview explicit postop submission |
 | `svzt run postop --run-id R --execute` | Submit explicit postop simulation |
 | `svzt postprocess tuning-progress --run-id R` | Build run-scoped 0D vs 3D tuning diagnostics |

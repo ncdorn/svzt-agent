@@ -23,7 +23,11 @@ Already extracted: split-driver handoff following lives in
 The wall-correction step was added outside `tune_trees.py` from the start:
 - `src/svztagent/core/wall_correction.py` holds the pure rule and the svMultiPhysics
   input checks.
-- `src/svztagent/workflows/wall_correction.py` holds staging, submission and status.
+- `src/svztagent/workflows/wall_correction.py` holds staging, submission, status
+  and the explicit `svzt preop finalize` transition.
+- `src/svztagent/core/preop_source.py` resolves `converged_preop_iteration` for
+  post-op and adaptation (`resolve_preop_source`), replacing the per-workflow
+  wall-correction branches.
 
 It imports only the default-adapter builder from `tune_trees.py`.
 

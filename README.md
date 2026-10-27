@@ -42,7 +42,8 @@ svzt watch demo-run --fetch-on-complete --auto-advance
 svzt advance-iter --run-id demo-run --execute
 svzt run tune-iter --cluster sherlock --patient TST-STAN-x --run-id demo-run --iteration 1 --reuse-preop-3d --execute
 svzt run wall-correction --run-id demo-run --execute   # after the last tuning iteration
-svzt wall-correction-status demo-run                    # records the pre-op source for post-op
+svzt wall-correction-status demo-run                    # poll; fetches the calibration reports
+svzt preop finalize --run-id demo-run                   # record the pre-op source for post-op
 svzt run postop --run-id demo-run --execute
 svzt postprocess cfd-results --run-id demo-run
 svzt campaign seed-sweep plan --cluster sherlock --campaign-id tst-stan-5-learned
@@ -127,8 +128,11 @@ matching 0D model (protocol v1, steps 7–8). The step works as follows:
 - **Wall rule:** λ = (PP_target / PP_3D)^(1/α), with λ ≥ λ_min. Then
   E = λ·E_source, and Rule A damping is c = c₁·√(E / E₁), using the
   iteration-1 wall.
-- **Settings:** `defaults.tuning.wall_correction` (`alpha` 0.55, `lambda_min` 0.5,
-  `compliance_fit`) applies to the whole cohort, with no patient override.
+- **Settings:** `defaults.tuning.wall_correction` (`alpha`, `lambda_min`,
+  `damping_rule`, `gate_policy`, `compliance_fit`, `rho_infty`) applies to the
+  whole cohort, with no patient override. The workspace `defaults.yaml` sets
+  every value explicitly (protocol v1.1: 0.55, 0.5, Rule A, `report_only`,
+  ρ bounds [0.2, 5.0] / 0.05 mmHg / 40 iterations, 0.2).
 - **Jobs:** the 3D run, the standard postprocess and an R + proximal-compliance
   calibration are chained with `afterok` dependencies. The calibration fits one
   multiplier on proximal C so the 0D model reproduces the 3D pulse pressure.
@@ -136,28 +140,31 @@ matching 0D model (protocol v1, steps 7–8). The step works as follows:
 ```bash
 svzt run wall-correction --run-id <run> [--iteration N] --dry-run
 svzt run wall-correction --run-id <run> --execute
-svzt run wall-correction --run-id <run> --adopt-threed-dir <runs_root>/.../preop --execute
-svzt wall-correction-status <run>
+svzt wall-correction-status <run> [--correction-id ID]
+svzt preop finalize --run-id <run> [--correction-id ID] [--protocol preop_v1.1]
 ```
 
-When the matched 0D model is published, `wall-correction-status` records the
-wall-corrected 3D run as the run's pre-op source (`converged_preop_iteration`,
-`selection_kind: wall_correction`):
+`wall-correction-status` only polls the jobs, fetches the calibration reports
+and updates the wall-correction record. Once the matched 0D model is
+published, it prints the finalize command. `svzt preop finalize` is the
+explicit, idempotent transition that records the wall-corrected 3D run as the
+run's pre-op source (`converged_preop_iteration`, `selection_kind:
+wall_correction`); rerunning it changes nothing, and it refuses to replace a
+different source once post-op has been submitted:
 - **Post-op and adaptation reuse:**
   - its 3D directory and BCs;
   - its corrected E and damping;
   - its matched 0D model.
 - **Tree parameters and outlet mapping** still come from the source iteration's
   `results/`.
-- **`svzt preop select` is deprecated.** It now only serves legacy runs without
-  a wall correction, and it refuses to replace a wall-correction handoff.
+- **`svzt preop select` is retired.** It exits with an error pointing to the
+  steps above; existing manual handoffs still load and are still used.
+- **`--protocol`** declares the frozen protocol the run follows
+  (`manifest.protocol`, see docs/MANIFEST.md).
 
-`--adopt-threed-dir` registers an existing wall-corrected 3D run instead of
-rerunning it, then submits only the calibration. The run must pass these checks:
-- its elasticity modulus and damping equal the rule's;
-- its 3D input matches the source iteration's apart from mesh paths and the wall;
-- its BCs are byte-identical to the source iteration's;
-- its postprocess descriptor names the iteration's tuned 0D model, by path and sha256.
+The five protocol v1 runs were registered with a since-removed
+`--adopt-threed-dir` mode, which verified existing 3D runs against the rule
+instead of rerunning them. Their `mode: adopted` records still load.
 
 Inputs are fetched read-only even on `--dry-run`, so the plan
 (`runs/<run>/wall_correction/iter-XX/wall_correction_plan.json`) shows the
@@ -170,7 +177,8 @@ adaptation, so it must reproduce this 3D run vessel by vessel.
 - **Calibration:** R is calibrated to every vessel's 3D pressure drop and flow,
   then ρ matches the pulse.
 - **Gate:** the step runs it with the `report_only` gate policy
-  (`wall_correction.gate_policy`). Any replay-stable calibrated model is
+  (`wall_correction.gate_policy`, passed to the job's target resolver as an
+  argument; tuning-iteration calibrations pass `improvement_only`). Any replay-stable calibrated model is
   published, and the MPA and split scores are recorded rather than enforced. An
   improvement-over-tuned gate is the wrong test here, because the tuned model
   never saw this 3D run.

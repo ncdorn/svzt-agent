@@ -88,8 +88,15 @@ metrics are kept as `*.tune_<previous-job>.json` beside the new ones.
 `converged_preop_iteration` records the pre-op source for explicit postop
 generation and adaptation.
 
-Since 2026-10-26 it is written by `svzt wall-correction-status`:
-- **When:** as soon as the wall-correction step publishes its matched 0D model.
+Since 2026-10-26 it is written by `svzt preop finalize --run-id R
+[--correction-id ID] [--protocol NAME]`:
+- **When:** explicitly, after `svzt wall-correction-status` has recorded the
+  correction as `completed` with a published matched 0D model. The status
+  command never writes this field; it prints the finalize command instead.
+- **Idempotent:** if the field already holds this correction's handoff (same
+  content apart from `selected_at` / `selected_by_command`), nothing is
+  rewritten. A different source is replaced only while no `postop_run`
+  exists; after post-op it is refused.
 - **What it records** (`selection_kind: wall_correction`):
   - `remote_preop_dir`: the wall-corrected 3D directory;
   - `remote_canonical_coupler`: its BCs;
@@ -98,17 +105,25 @@ Since 2026-10-26 it is written by `svzt wall-correction-status`:
   - `remote_tuning_results_dir`: the source iteration's `results/`, for the
     tuned trees and outlet mapping;
   - `threed_overrides`: `{elasticity_modulus, damping}`.
-- **How post-op and adaptation use it:** they apply `threed_overrides` instead
-  of re-deriving E from `match_proximal_compliance` or using the run's iteration-1
-  damping. Post-op never refreshes this handoff's 0D model.
+- **How post-op and adaptation use it:** both read it only through
+  `core/preop_source.py::resolve_preop_source`, which returns the 3D directory,
+  coupler, 0D model, tuning-results directory and `threed_defaults` with
+  `threed_overrides` applied (so E is not re-derived from
+  `match_proximal_compliance` and damping is not the iteration-1 value).
+  Post-op never refreshes this handoff's 0D model.
+- **Protocol v1 runs:** the five TST-STAN handoffs were written on 2026-10-26
+  by the since-removed status-side write (`selected_by_command: svzt
+  wall-correction-status`). They load unchanged, and `svzt preop finalize`
+  on them is a no-op.
 
-The deprecated legacy writer, kept only for runs without a wall correction, is:
+Legacy handoffs were written by the retired command below (now a legacy
+error; the records still load and post-op/adaptation still read them):
 
 ```bash
 svzt preop select --run-id <run-id> --iteration <n> [--reason <text>]
 ```
 
-It refuses to replace a wall-correction handoff.
+The library function behind it refuses to replace a wall-correction handoff.
 
 The selected iteration may be formally `converged` or an operator-promoted best
 completed iteration. The record includes the original decision, selection kind,
@@ -239,7 +254,8 @@ Each record carries:
 - **Identity and lifecycle:**
   - `correction_id` (a digest of the inputs, rule, mode and 3D directory)
   - `source_iteration`
-  - `mode`: `rerun`, or `adopted` for an existing 3D run that was verified
+  - `mode`: `rerun`; `adopted` marks the five protocol v1 records, made by the
+    retired `--adopt-threed-dir` mode from existing verified 3D runs
   - `status`: `submitted`, `running`, `completed`, `calibration_failed` or `failed`
   - `created_at` and `updated_at`
 - **The rule:** `rule`, with λ, E_source → E, damping, both pulse pressures,
@@ -251,11 +267,11 @@ Each record carries:
   - `remote_calibration_dir` and `remote_calibrated_zerod_config`
   - `local_dir`
 - **Jobs:**
-  - `solver_job_id` and `postprocess_job_id`, which are null when adopted
+  - `solver_job_id` and `postprocess_job_id` (null in `adopted` records)
   - `calibration_job_id` and `calibration_status`
 - **Evidence:**
   - `input_digests`
-  - `verification`, for an adopted run
+  - `verification` (filled only in `adopted` records)
   - `results`, filled by `svzt wall-correction-status` from the fetched
     calibration reports: compliance multiplier, target/unscaled/fitted pulse
     pressure, baseline and candidate composite, and gate status
@@ -269,8 +285,27 @@ remote: <runs_root>/<run_id>/wall_correction/iter-XX/{preop,postprocess,results/
 local:  runs/<run_id>/wall_correction/iter-XX/{inputs,staged,calibration/results,wall_correction_plan.json}
 ```
 
-An adopted run keeps its 3D and postprocess outputs where they are; only
-`calibration/` is written under the run's `wall_correction/` directory.
+An adopted record's 3D and postprocess outputs stay where they were made
+(`_checks/elaw_iter3_20261023/...`); only its `calibration/` is under the
+run's `wall_correction/` directory.
+
+## Protocol declaration
+
+`protocol` (optional, null for runs that declare none) names the frozen
+protocol a run follows and how far it has got:
+
+```yaml
+protocol:
+  name: preop_v1.1          # svz/docs/preop_protocol_v1/README.md
+  stage: preop_finalized    # tuning | wall_correction | preop_finalized
+  updated_at: <timestamp>
+```
+
+It is declarative: no workflow branches on it. `svzt preop finalize
+--protocol NAME` declares it, and finalize sets `stage: preop_finalized` on
+any run that declares one. A run's protocol name never changes (naming a
+different one is refused). The five protocol v1 runs were backfilled with
+`preop_v1.1` / `preop_finalized` on 2026-10-26.
 
 ## Transition records
 Each `execution.lifecycle_history[]` entry records:

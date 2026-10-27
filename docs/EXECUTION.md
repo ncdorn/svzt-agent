@@ -11,9 +11,10 @@
 - `svzt plan calibrate --run-id <id> [--iteration <n>]`
 - `svzt run calibrate --run-id <id> [--iteration <n>] [--dry-run|--execute]`
 - `svzt calibration-status <run-id> [--iteration <n>]`
-- `svzt run wall-correction --run-id <id> [--iteration <n>] [--adopt-threed-dir <dir>] [--dry-run|--execute]`
-- `svzt wall-correction-status <run-id> [--correction-id <id>]` (records the pre-op source for post-op)
-- `svzt preop select --run-id <id> --iteration <n> [--reason <text>]` (deprecated; legacy runs only)
+- `svzt run wall-correction --run-id <id> [--iteration <n>] [--dry-run|--execute]`
+- `svzt wall-correction-status <run-id> [--correction-id <id>]` (read-only apart from the wall-correction record)
+- `svzt preop finalize --run-id <id> [--correction-id <id>] [--protocol <name>]` (records the pre-op source for post-op; idempotent)
+- `svzt preop select ...` (retired 2026-10-26: exits with an error; legacy handoffs still load)
 - `svzt run postop --run-id <id> [--dry-run|--execute]`
 - `svzt run adapt --run-id <id> --model M1|M2|M3 [--parameter-set <name>] [--dry-run|--execute]`
 - `svzt postprocess cfd-results --run-id <id> [--source-json <path>] [--template <path>] [--output <path>] [--overwrite]`
@@ -110,8 +111,9 @@ policies are `calibrated_full_pa` (the default) and the explicitly selected,
 one-release compatibility policy `legacy_rri_after_first`. Under the default
 policy, a full-PA iteration after iteration one fails closed unless its
 predecessor has a terminal, lineage-valid calibration promotion, and
-`svzt preop select` / `svzt run postop` fail closed unless the selected
-iteration has one; postop then consumes the remote
+`svzt run postop` (and the legacy manual selection) fail closed unless a
+legacy selected iteration has one (a wall-correction source carries its own
+matched model); postop then consumes the remote
 `iterations/iter-XX/calibration/results/calibrated_full_pa_zerod.json` as its
 0D model. An RRI run is not a calibration run, and the seed policy has no
 effect on it. Unknown keys, contradictory mapping settings, and
@@ -297,10 +299,11 @@ un-dependent calibration job or guesses a descriptor filename. A postprocess
 failure consequently prevents the dependent calibration job from running and
 must be diagnosed from the postprocess record/logs.
 
-The explicit recovery/inspection sequence is:
+The explicit recovery/inspection sequence is (runs made before 2026-10-26
+also ran the now-retired `preop select --run-id <run-id> --iteration <n>`
+first):
 
 ```bash
-svzt --workspace-root /path/to/workspace preop select --run-id <run-id> --iteration <n>
 svzt --workspace-root /path/to/workspace run calibrate --run-id <run-id> --iteration <n> --execute
 svzt --workspace-root /path/to/workspace calibration-status <run-id> --iteration <n>
 ```
@@ -703,7 +706,8 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
     submits the postprocess → calibration → promotion chain for default-policy
     full-PA continuation before it stages the next iteration
   - `converged` stops after writing decision/metrics/artifact metadata; postop
-    submission is explicit via `svzt preop select` and `svzt run postop`
+    submission is explicit via `svzt run wall-correction`, `svzt preop
+    finalize` and `svzt run postop`
 - Iteration success evidence for preop BC tuning:
   - 0D impedance tuning completed the configured `nm_iter` Nelder-Mead tuning/convergence budget and produced the expected tuning artifacts
   - `svzerod_3d_coupling_tuned.json` and canonical `svzerod_3Dcoupling.json` were generated from the tuned result
@@ -714,10 +718,15 @@ In dry-run mode each adapter returns deterministic command argv previews. These 
 - `svzt advance-iter` advances run state after a `not_close` decision and can submit the next iteration (`--execute`).
 - `svzt advance-iter --max-iterations <n>` raises the manifest's iteration cap before advancing. This is the supported way to continue past the default cap of 5 on an existing run.
 - `svzt advance-iter` returns a pause action for `needs_review` and does not submit a new iteration job.
-- `svzt preop select` records `converged_preop_iteration` in the manifest. The
-  selected iteration can be a formally converged iteration or an operator-promoted
-  best completed iteration.
-- `svzt preop select` now also stages and submits a selected-preop postprocess
+- `svzt preop finalize` records `converged_preop_iteration` in the manifest from
+  a completed wall correction (wall-corrected 3D run, its BCs and wall values,
+  and its matched 0D model). It is the only writer since 2026-10-26;
+  `wall-correction-status` never writes it. Post-op and adaptation read it
+  through `core/preop_source.py::resolve_preop_source`.
+- Legacy (retired): `svzt preop select` recorded `converged_preop_iteration`
+  by hand. The selected iteration could be a formally converged iteration or
+  an operator-promoted best completed iteration.
+- Legacy `svzt preop select` also staged and submitted a selected-preop postprocess
   job that writes normalized artifacts under
   `runs/<run_id>/iterations/iter-XX/results/postprocess/` on the cluster and
   records `selected_preop_postprocess` in the manifest. Its Slurm stdout/stderr

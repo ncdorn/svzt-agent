@@ -88,13 +88,20 @@ counts memory as CPUs (32 GB is about 5 cores), so the driver's `mem` sets its
 footprint too.
 
 ## Explicit postop/adaptation workflows
-- `svzt wall-correction-status` records the wall-corrected 3D run and its
-  matched 0D model as `converged_preop_iteration` once the matched model is
-  published. It carries the wall values (`threed_overrides`) and the source
-  iteration's tuning results, so no manual selection is needed.
-- `svzt preop select` is deprecated. It remains for legacy runs without a wall
-  correction: it records a tuning iteration by hand and stages the
-  selected-preop postprocess.
+- `svzt preop finalize` (`workflows/wall_correction.py::finalize_preop_source`)
+  records a completed wall correction (wall-corrected 3D run and its matched 0D
+  model) as `converged_preop_iteration`: an explicit, idempotent, local-only
+  transition. It carries the wall values (`threed_overrides`) and the source
+  iteration's tuning results. `svzt wall-correction-status` only polls,
+  fetches reports and updates the wall-correction record.
+- `core/preop_source.py::resolve_preop_source` is the single interpreter of
+  `converged_preop_iteration`. Post-op and adaptation take the pre-op 3D
+  directory, coupler, 0D model, tuning-results directory and the
+  override-applied `threed_config` from its typed `PreopSource`; neither
+  branches on how the handoff was made.
+- `svzt preop select` is retired (legacy error). Its library function
+  (`workflows/postop.py::select_converged_preop_iteration`) remains so legacy
+  manual handoffs stay reproducible.
 - `svzt run postop` is a sibling explicit workflow that consumes the selected
   preop iteration and records `postop_run`.
 - `svzt run adapt` is another sibling explicit workflow that consumes
@@ -277,14 +284,16 @@ for the scientific artifact schema and acceptance gates.
 source iteration (3D completed)
   -> fetch inputs read-only (decision, 3D inputs of iterations N and 1, BCs, tuned 0D)
   -> rule (core/wall_correction.py): lambda, E, Rule A damping
-  -> rerun:   3D solver -> postprocess (afterok) -> calibration (afterok)
-     adopted: verify existing 3D + descriptor lineage -> calibration
+  -> 3D solver -> postprocess (afterok) -> calibration (afterok)
   -> calibration: R_poiseuille, then proximal_compliance_scale (svZeroDTrees)
   -> wall_correction_runs[] record; wall-correction-status fetches reports
+  -> svzt preop finalize: converged_preop_iteration (explicit transition)
 ```
 
 - **Configuration:** `defaults.tuning.wall_correction` (`WallCorrectionPolicyConfig`)
-  is cohort-wide and has no patient override.
+  is cohort-wide and has no patient override. The workspace `defaults.yaml`
+  sets every field explicitly, so protocol behavior does not depend on code
+  defaults.
 - **Inputs it reads:** the source iteration's own 3D input. Its mesh paths are
   kept as read-only references, and only the elasticity modulus and damping
   change.
@@ -295,8 +304,14 @@ source iteration (3D completed)
 - **Scientific checks:** the svZeroDTrees calibrator owns compliance fitting,
   replay and gates. This step only passes
   `calibration.parameters.proximal_compliance_scale` and the `report_only`
-  target gate policy (through the agent-only `svzt_target_gate_policy` request
-  key, which the job's target resolver strips before calling svZeroDTrees).
+  target gate policy. The gate is a typed `gate_policy` argument
+  (`config/models.py::TargetGatePolicy`) of
+  `workflows/calibrate.py::render_calibration_script`, passed to the job's
+  target resolver on its command line; tuning-iteration calibrations pass
+  `improvement_only`. The staged upstream request carries no agent-only keys.
+- **Retired:** the `--adopt-threed-dir` mode that registered the five
+  protocol v1 runs from existing 3D directories (their `mode: adopted`
+  records still load).
 
 ### Current TASK-016 integration status
 
