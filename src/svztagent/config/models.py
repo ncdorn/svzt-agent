@@ -1258,6 +1258,57 @@ class PatientImpedanceOverrides(BaseModel):
     tune_space: TuneSpaceConfig | None = None
 
 
+class WallCorrectionComplianceFitConfig(BaseModel):
+    """Proximal-compliance multiplier fit for the wall-correction 0D calibration.
+
+    Passed to svZeroDTrees as ``calibration.parameters.proximal_compliance_scale``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bounds: tuple[float, float] = (0.2, 5.0)
+    tolerance_mmhg: float = Field(default=0.05, gt=0)
+    maximum_iterations: int = Field(default=40, ge=1)
+
+    @model_validator(mode="after")
+    def _ordered_bounds(self) -> "WallCorrectionComplianceFitConfig":
+        lower, upper = self.bounds
+        if not (0 < lower <= 1 <= upper and lower < upper):
+            # svZeroDTrees brackets outward from the calibrated model (multiplier 1).
+            raise ValueError("wall_correction.compliance_fit.bounds must satisfy 0 < lower <= 1 <= upper")
+        return self
+
+
+class WallCorrectionPolicyConfig(BaseModel):
+    """Wall-correction step after the last tuning iteration.
+
+    The 3D run is repeated with the same 0D BCs and a corrected wall:
+    lambda = (PP_target / PP_3D) ** (1 / alpha), floored at ``lambda_min``,
+    E = lambda * E_source, and Rule A damping c = c_1 * sqrt(E / E_1) from the
+    iteration-1 wall.  Its 0D model is then calibrated to that 3D run (R, then
+    one proximal-compliance multiplier).  Cohort-wide by design: no patient
+    override, so every patient follows the same rule.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    alpha: float = Field(default=0.55, gt=0)
+    lambda_min: float = Field(default=0.5, gt=0, le=1)
+    damping_rule: Literal["rule_a_sqrt_modulus"] = "rule_a_sqrt_modulus"
+    # The matched 0D model must reproduce the corrected 3D run (it is later
+    # compared with the post-op 0D model), not beat the tuned 0D model, so its
+    # target gates are reported but do not block publication.
+    gate_policy: Literal["report_only", "improvement_only"] = "report_only"
+    compliance_fit: WallCorrectionComplianceFitConfig = Field(
+        default_factory=WallCorrectionComplianceFitConfig
+    )
+    # Generalized-alpha spectral radius for the calibration's replays and the
+    # published matched 0D model (svZeroDSolver default 0.5).  0.2 damps the
+    # spurious high-frequency mode that made TST-STAN-5's calibrated model
+    # diverge; it moves the tuned model's MPA pressures by <= 0.02 mmHg.
+    rho_infty: float = Field(default=0.2, ge=0, le=1)
+
+
 class TuningDefaults(BaseModel):
     bc_type: Literal["impedance", "rcr"] = "impedance"
     iteration1_seed: Iteration1SeedConfig = Field(default_factory=Iteration1SeedConfig)
@@ -1265,6 +1316,7 @@ class TuningDefaults(BaseModel):
     impedance: ImpedanceTuningConfig = Field(default_factory=ImpedanceTuningConfig)
     rcr: RCRTuningConfig = Field(default_factory=RCRTuningConfig)
     calibration: CalibrationPolicyConfig = Field(default_factory=CalibrationPolicyConfig)
+    wall_correction: WallCorrectionPolicyConfig = Field(default_factory=WallCorrectionPolicyConfig)
 
 
 class PatientTuningOverrides(BaseModel):

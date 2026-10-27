@@ -11,7 +11,9 @@
 - `svzt plan calibrate --run-id <id> [--iteration <n>]`
 - `svzt run calibrate --run-id <id> [--iteration <n>] [--dry-run|--execute]`
 - `svzt calibration-status <run-id> [--iteration <n>]`
-- `svzt preop select --run-id <id> --iteration <n> [--reason <text>]`
+- `svzt run wall-correction --run-id <id> [--iteration <n>] [--adopt-threed-dir <dir>] [--dry-run|--execute]`
+- `svzt wall-correction-status <run-id> [--correction-id <id>]` (records the pre-op source for post-op)
+- `svzt preop select --run-id <id> --iteration <n> [--reason <text>]` (deprecated; legacy runs only)
 - `svzt run postop --run-id <id> [--dry-run|--execute]`
 - `svzt run adapt --run-id <id> --model M1|M2|M3 [--parameter-set <name>] [--dry-run|--execute]`
 - `svzt postprocess cfd-results --run-id <id> [--source-json <path>] [--template <path>] [--output <path>] [--overwrite]`

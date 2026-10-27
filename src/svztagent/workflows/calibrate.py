@@ -358,13 +358,16 @@ import yaml
 config_path, resolved_path = Path(sys.argv[1]), Path(sys.argv[2])
 config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 calibration = config.setdefault("calibration", {})
+# Agent-only key (never passed upstream): the wall-correction step asks for
+# report_only; tuning-iteration calibrations keep improvement_only.
+gate_policy = calibration.pop("svzt_target_gate_policy", "improvement_only")
 enforcement = str((calibration.get("observation_qc") or {}).get("enforcement", "")).lower()
 if enforcement == "target_focused" and not calibration.get("targets"):
     from svzerodtrees.calibration.target_roles import full_pa_calibration_targets
 
     model = Path(config["paths"]["zerod_config"])
     calibration["targets"] = full_pa_calibration_targets(
-        model, model.parent / "outlet_cap_mapping.json", gate_policy="improvement_only"
+        model, model.parent / "outlet_cap_mapping.json", gate_policy=gate_policy
     )
 resolved_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
 print(f"[svzt] calibration config resolved: {resolved_path}")"""

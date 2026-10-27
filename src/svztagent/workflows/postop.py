@@ -10,6 +10,7 @@ import yaml
 
 from svztagent.config.load import detect_workspace_root, load_workspace_config, resolve_cluster
 from svztagent.core.errors import ConfigError
+from svztagent.core.wall_correction import PREOP_SOURCE_HINT, apply_preop_threed_overrides
 from svztagent.core.manifest import (
     read_manifest,
     record_paraview_viz_submission,
@@ -297,6 +298,10 @@ def _refresh_selected_reduced_config_from_local_iteration(
     selected = manifest.converged_preop_iteration
     if selected is None:
         return manifest, None
+    if selected.selection_kind == "wall_correction":
+        # The matched 0D model of the wall-corrected 3D run is final; never
+        # replace it with the source iteration's promoted seed.
+        return manifest, selected
 
     if manifest_uses_calibrated_full_pa(manifest):
         calibrated_config = _require_calibrated_full_pa_config(manifest, int(selected.iteration))
@@ -346,10 +351,22 @@ def select_converged_preop_iteration(
     scheduler_adapter: SchedulerAdapter | None = None,
     remote_exec_adapter: RemoteExecAdapter | None = None,
 ) -> PreopSelectionResult:
+    """Deprecated: record a tuning iteration as the pre-op source by hand.
+
+    The wall-correction step now records the pre-op source automatically
+    (``svzt wall-correction-status``).  This remains only for legacy runs
+    without a wall correction and refuses to replace a wall-correction handoff.
+    """
     root = detect_workspace_root(workspace_root)
     validated_run_id = validate_run_id(run_id)
     local_paths = build_local_run_paths(root, validated_run_id)
     manifest = read_manifest(local_paths.manifest)
+    current = manifest.converged_preop_iteration
+    if current is not None and current.selection_kind == "wall_correction":
+        raise ConfigError(
+            f"run '{validated_run_id}' already uses the wall-corrected 3D run "
+            f"({current.wall_correction_id}) as its pre-op source; svzt preop select is deprecated"
+        )
 
     record = next(
         (item for item in manifest.tuning_iteration_tracker.iterations if item.iteration == iteration),
@@ -464,7 +481,7 @@ def _build_postop_plan(
     selected = manifest.converged_preop_iteration
     if selected is None:
         raise ConfigError(
-            f"run '{manifest.run_id}' has no converged_preop_iteration; run svzt preop select first"
+            f"run '{manifest.run_id}' has no pre-op source; {PREOP_SOURCE_HINT}"
         )
     postop_mesh = manifest.remote.get("svzerodtrees_paths", {}).get("postop_mesh_complete")
     if not postop_mesh:
@@ -599,7 +616,7 @@ def _render_postop_job_script(
     svzerodtrees_paths = manifest.remote.get("svzerodtrees_paths", {})
     postop_mesh = svzerodtrees_paths.get("postop_mesh_complete")
     clinical_targets = svzerodtrees_paths.get("clinical_targets")
-    threed_config = manifest.remote.get("threed_defaults", {})
+    threed_config = apply_preop_threed_overrides(manifest.remote.get("threed_defaults", {}), selected)
     mesh_scale_factor = manifest.patient.get("mesh_scale_factor") or 1.0
     patient_alias = str(manifest.patient.get("alias"))
     cluster_name = str(manifest.cluster.get("name"))
@@ -1330,7 +1347,7 @@ def run_postop(
     manifest = read_manifest(local_paths.manifest)
     if manifest.converged_preop_iteration is None:
         raise ConfigError(
-            f"run '{validated_run_id}' has no converged_preop_iteration; run svzt preop select first"
+            f"run '{validated_run_id}' has no pre-op source; {PREOP_SOURCE_HINT}"
         )
     manifest, selected = _refresh_selected_reduced_config_from_local_iteration(
         manifest=manifest,
@@ -1338,7 +1355,7 @@ def run_postop(
     )
     if selected is None:
         raise ConfigError(
-            f"run '{validated_run_id}' has no converged_preop_iteration; run svzt preop select first"
+            f"run '{validated_run_id}' has no pre-op source; {PREOP_SOURCE_HINT}"
         )
     config, cluster = _resolve_cluster_for_manifest(root, manifest)
     remote_run_dir = manifest.execution.remote_run_dir or manifest.remote.get("remote_run_dir")

@@ -85,12 +85,30 @@ driver artifacts decide the iteration. The earlier attempt stays in
 metrics are kept as `*.tune_<previous-job>.json` beside the new ones.
 
 ## Converged preop handoff
-`converged_preop_iteration` records the preop iteration to use for explicit
-postop generation. It is written by:
+`converged_preop_iteration` records the pre-op source for explicit postop
+generation and adaptation.
+
+Since 2026-10-26 it is written by `svzt wall-correction-status`:
+- **When:** as soon as the wall-correction step publishes its matched 0D model.
+- **What it records** (`selection_kind: wall_correction`):
+  - `remote_preop_dir`: the wall-corrected 3D directory;
+  - `remote_canonical_coupler`: its BCs;
+  - `remote_tuned_zerod_config`: the matched 0D model;
+  - `wall_correction_id`;
+  - `remote_tuning_results_dir`: the source iteration's `results/`, for the
+    tuned trees and outlet mapping;
+  - `threed_overrides`: `{elasticity_modulus, damping}`.
+- **How post-op and adaptation use it:** they apply `threed_overrides` instead
+  of re-deriving E from `match_proximal_compliance` or using the run's iteration-1
+  damping. Post-op never refreshes this handoff's 0D model.
+
+The deprecated legacy writer, kept only for runs without a wall correction, is:
 
 ```bash
 svzt preop select --run-id <run-id> --iteration <n> [--reason <text>]
 ```
+
+It refuses to replace a wall-correction handoff.
 
 The selected iteration may be formally `converged` or an operator-promoted best
 completed iteration. The record includes the original decision, selection kind,
@@ -207,6 +225,52 @@ artifacts used to build it.
 - `clinical_targets`
 
 `remote.threed_defaults` stores the effective merged 3D tuning config used for iteration script rendering.
+
+## Wall-correction records
+
+`wall_correction_runs[]` records the wall-correction step (`svzt run
+wall-correction`). Each entry covers one 3D run with a corrected wall and the 0D
+calibration matched to it. These records are separate from `calibration_runs[]`
+and `preop_postprocess_runs[]`, which are looked up by iteration number alone, so
+the step can never replace the source iteration's promoted seed or postprocess
+record.
+
+Each record carries:
+- **Identity and lifecycle:**
+  - `correction_id` (a digest of the inputs, rule, mode and 3D directory)
+  - `source_iteration`
+  - `mode`: `rerun`, or `adopted` for an existing 3D run that was verified
+  - `status`: `submitted`, `running`, `completed`, `calibration_failed` or `failed`
+  - `created_at` and `updated_at`
+- **The rule:** `rule`, with λ, E_source → E, damping, both pulse pressures,
+  α and λ_min.
+- **Paths:**
+  - `remote_dir`
+  - `remote_threed_dir`, `remote_postprocess_dir` and `remote_descriptor_path`
+  - `remote_tuned_zerod_config`
+  - `remote_calibration_dir` and `remote_calibrated_zerod_config`
+  - `local_dir`
+- **Jobs:**
+  - `solver_job_id` and `postprocess_job_id`, which are null when adopted
+  - `calibration_job_id` and `calibration_status`
+- **Evidence:**
+  - `input_digests`
+  - `verification`, for an adopted run
+  - `results`, filled by `svzt wall-correction-status` from the fetched
+    calibration reports: compliance multiplier, target/unscaled/fitted pulse
+    pressure, baseline and candidate composite, and gate status
+  - `results.matched_zerod_model` / `matched_zerod_composite`: the published
+    calibrated model paired with the corrected 3D run (calibrated with the
+    `report_only` gate policy). It is `null`, with `matched_zerod_reason`, when
+    calibration published nothing; the tuned model is never substituted.
+
+```text
+remote: <runs_root>/<run_id>/wall_correction/iter-XX/{preop,postprocess,results/postprocess,calibration}
+local:  runs/<run_id>/wall_correction/iter-XX/{inputs,staged,calibration/results,wall_correction_plan.json}
+```
+
+An adopted run keeps its 3D and postprocess outputs where they are; only
+`calibration/` is written under the run's `wall_correction/` directory.
 
 ## Transition records
 Each `execution.lifecycle_history[]` entry records:

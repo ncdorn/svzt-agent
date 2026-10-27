@@ -11,6 +11,7 @@ import yaml
 
 from svztagent.config.load import detect_workspace_root, load_workspace_config, resolve_cluster
 from svztagent.core.errors import ConfigError
+from svztagent.core.wall_correction import PREOP_SOURCE_HINT, apply_preop_threed_overrides
 from svztagent.core.manifest import (
     read_manifest,
     record_adaptation_submission,
@@ -143,7 +144,13 @@ def _selected_tuning_artifacts(manifest) -> dict[str, str | bool]:
     ``outlet_cap_mapping.json``; adaptation must use that file.
     """
     selected = manifest.converged_preop_iteration
-    results_dir = PurePosixPath(selected.remote_preop_dir).parent / "results"
+    # A wall-correction handoff names the source iteration's results directly
+    # (an adopted 3D directory has no sibling results/ with the tuned trees).
+    results_dir = (
+        PurePosixPath(selected.remote_tuning_results_dir)
+        if selected.remote_tuning_results_dir
+        else PurePosixPath(selected.remote_preop_dir).parent / "results"
+    )
     tuning_model = manifest_effective_tuning_model(manifest, selected.iteration)
     return {
         "tuning_model": tuning_model,
@@ -408,7 +415,7 @@ def _render_adapt_job_script(
         raise ConfigError("adaptation job script requires selected preop and postop run")
 
     svzerodtrees_paths = manifest.remote.get("svzerodtrees_paths", {})
-    threed_config = dict(manifest.remote.get("threed_defaults", {}))
+    threed_config = apply_preop_threed_overrides(dict(manifest.remote.get("threed_defaults", {})), selected)
     adaptation_defaults = _resolve_adaptation_defaults(manifest)
     territory_scheme = str(adaptation_defaults.get("territory_scheme") or "lpa_rpa")
     target_stage = str(adaptation_defaults.get("target_stage") or "postop")
@@ -524,7 +531,7 @@ centerline = Path({json.dumps(str(centerline))})
 svslicer_path = Path({json.dumps(str(svslicer_path))})
 postop_mesh_complete = Path({json.dumps(str(postop_mesh))})
 reduced_order_pa = Path({json.dumps(selected.remote_tuned_zerod_config)})
-tree_params_csv = preop_dir.parent / "results" / "optimized_params.csv"
+tree_params_csv = Path({json.dumps(str(tuning_artifacts["optimized_params_csv"]))})
 tuned_config_path = Path({json.dumps(str(tuning_artifacts["tuned_config"]))})
 outlet_cap_mapping_path = Path({json.dumps(str(tuning_artifacts["outlet_cap_mapping"]))})
 require_outlet_cap_mapping = {repr(bool(tuning_artifacts["require_outlet_cap_mapping"]))}
@@ -1264,7 +1271,7 @@ def run_adapt(
     selected = manifest.converged_preop_iteration
     if selected is None:
         raise ConfigError(
-            f"run '{validated_run_id}' has no converged_preop_iteration; run svzt preop select first"
+            f"run '{validated_run_id}' has no pre-op source; {PREOP_SOURCE_HINT}"
         )
     if manifest.postop_run is None or not manifest.postop_run.postop_job_id:
         raise ConfigError(

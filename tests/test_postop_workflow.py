@@ -496,7 +496,7 @@ def test_run_postop_fails_without_converged_preop_iteration(sample_config_files)
         run_id="run-postop-no-selection",
     )
 
-    with pytest.raises(ConfigError, match="no converged_preop_iteration"):
+    with pytest.raises(ConfigError, match="no pre-op source"):
         run_postop(
             workspace_root=sample_config_files,
             run_id="run-postop-no-selection",
@@ -737,3 +737,83 @@ def test_postop_script_resolves_matched_elasticity_modulus_from_selected_iterati
     assert 'if threed_config.get("elasticity_modulus") == "match_proximal_compliance":' in script_text
     assert 'tuned_zerod.parent / "tuning_diagnostics.json"' in script_text
     assert script_text.index("matched_wall_elasticity_modulus(") < script_text.index("def _sync_postop_inflow")
+
+
+def _use_wall_correction_handoff(paths, run_id: str):
+    from svztagent.core.manifest import record_converged_preop_iteration
+
+    root = f"/scratch/users/ndorn/svzt_runs/{run_id}"
+    manifest = read_manifest(paths.manifest)
+    manifest.remote["threed_defaults"]["elasticity_modulus"] = "match_proximal_compliance"
+    manifest = record_converged_preop_iteration(
+        manifest,
+        iteration=3,
+        source_decision=None,
+        selection_kind="wall_correction",
+        reason="wall-corrected 3D run",
+        metrics=None,
+        deltas=None,
+        remote_iteration_dir=f"{root}/iterations/iter-03",
+        remote_preop_dir="/scratch/users/ndorn/svzt_runs/_checks/elaw/x/preop",
+        remote_tuned_zerod_config=f"{root}/wall_correction/iter-03/calibration/results/calibrated_full_pa_zerod.json",
+        remote_canonical_coupler="/scratch/users/ndorn/svzt_runs/_checks/elaw/x/preop/svzerod_3Dcoupling.json",
+        preop_job_id=None,
+        selected_by_command="svzt wall-correction-status",
+        wall_correction_id="wallcorr-x",
+        remote_tuning_results_dir=f"{root}/iterations/iter-03/results",
+        threed_overrides={"elasticity_modulus": 810717.3883845098, "damping": 7694.9},
+    )
+    write_manifest(manifest, paths.manifest)
+    return root
+
+
+def test_postop_uses_the_wall_correction_handoff_without_preop_select(sample_config_files):
+    run_id = "run-postop-wallcorr"
+    paths = _prepare_selected_run(sample_config_files, run_id=run_id)
+    root = _use_wall_correction_handoff(paths, run_id)
+
+    result = run_postop(
+        workspace_root=sample_config_files,
+        run_id=run_id,
+        mode=ExecutionMode.DRY_RUN,
+        transfer_adapter=FakeFileTransferAdapter(),
+        scheduler_adapter=FakeSchedulerAdapter(),
+        remote_exec_adapter=FakeRemoteExecAdapter(),
+    )
+
+    script_text = result.local_job_script_path.read_text(encoding="utf-8")
+    # The corrected wall is reused verbatim instead of re-derived from the tuned 0D model.
+    assert '\\"elasticity_modulus\\": 810717.3883845098' in script_text
+    assert '\\"damping\\": 7694.9' in script_text
+    assert f"{root}/wall_correction/iter-03/calibration/results/calibrated_full_pa_zerod.json" in script_text
+    assert "/scratch/users/ndorn/svzt_runs/_checks/elaw/x/preop/svzerod_3Dcoupling.json" in script_text
+    # The handoff is not refreshed back to the iteration's own model.
+    selected = read_manifest(paths.manifest).converged_preop_iteration
+    assert selected.selection_kind == "wall_correction"
+    assert selected.remote_tuned_zerod_config.endswith("calibrated_full_pa_zerod.json")
+
+
+def test_preop_select_refuses_to_replace_a_wall_correction_handoff(sample_config_files):
+    run_id = "run-preop-select-deprecated"
+    paths = _prepare_selected_run(sample_config_files, run_id=run_id)
+    _use_wall_correction_handoff(paths, run_id)
+    with pytest.raises(ConfigError, match="svzt preop select is deprecated"):
+        select_converged_preop_iteration(
+            workspace_root=sample_config_files,
+            run_id=run_id,
+            iteration=3,
+            transfer_adapter=FakeFileTransferAdapter(),
+            scheduler_adapter=FakeSchedulerAdapter(),
+            remote_exec_adapter=FakeRemoteExecAdapter(),
+        )
+
+
+def test_adaptation_reads_tuned_trees_from_the_source_iteration_results(sample_config_files):
+    from svztagent.workflows.adapt import _selected_tuning_artifacts
+
+    run_id = "run-adapt-wallcorr"
+    paths = _prepare_selected_run(sample_config_files, run_id=run_id)
+    root = _use_wall_correction_handoff(paths, run_id)
+    artifacts = _selected_tuning_artifacts(read_manifest(paths.manifest))
+    assert artifacts["optimized_params_csv"] == f"{root}/iterations/iter-03/results/optimized_params.csv"
+    assert artifacts["outlet_cap_mapping"] == f"{root}/iterations/iter-03/results/outlet_cap_mapping.json"

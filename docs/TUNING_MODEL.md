@@ -358,3 +358,35 @@ doc):
 6. Bayesian calibration.
 7. A strain-stiffening wall law.
 8. Age-scaled morphometry and multi-patient validation.
+
+## 10. Wall-correction step after the last iteration
+
+The 0D tuning picks the stiffness multiplier s, and the 3D wall follows from it
+(`match_proximal_compliance`). On the TST-STAN cohort, the iteration-2 3D
+deformable wall gave only about 60–75% of the 0D proximal compliance, so the 3D
+pulse ran 4–8 mmHg wide. R-only calibration cannot change that.
+`svzt run wall-correction` corrects the wall once, without retuning the 0D model.
+
+**The rule.**
+- Across 3D runs at the same BCs, pulse pressure × effective 3D compliance stays
+  constant: within 2% for all five patients.
+- Compliance scales as E^−α.
+- So λ = (PP_target / PP_3D)^(1/α), and E = λ·E_source. α = 0.55 was fixed in
+  advance from TST-STAN-3.
+- Damping follows Rule A at the new wall: c₁·√(E / E₁).
+
+**What it achieved (protocol v1):**
+- **Pulse:** every 3D pulse pressure landed within −2.6 to +0.6 mmHg of target.
+- **α:** the measured exponent was 0.52–0.84, so the rule slightly over-corrected
+  the softer walls.
+- **Record:** `svz/docs/preop_protocol_v1/README.md` has the full results.
+
+**The matching 0D model.** The step then calibrates the iteration's tuned 0D
+model to the corrected 3D run:
+- R is fit first.
+- Then one multiplier on proximal C is fit, so that the 0D model reproduces the
+  3D pulse pressure (`proximal_compliance_scale` in svZeroDTrees).
+
+This is the only place proximal C is calibrated. In a tuning iteration the tied
+stiffness overwrites C at every evaluation, so calibrating it there has no effect.
+The outlet trees stay as tuned.

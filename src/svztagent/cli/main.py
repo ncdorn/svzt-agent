@@ -40,6 +40,10 @@ from svztagent.workflows.calibrate import (
     query_calibration_status,
     run_calibration,
 )
+from svztagent.workflows.wall_correction import (
+    query_wall_correction_status,
+    run_wall_correction,
+)
 from svztagent.workflows.tune_trees import (
     advance_tune_iteration,
     continue_tune_iteration,
@@ -165,6 +169,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_calibrate.set_defaults(handler=cmd_run_calibrate)
 
+    run_wall_correction_cmd = run_subparsers.add_parser(
+        "wall-correction",
+        help="Rerun the last iteration's 3D with the E-law wall and calibrate a matching 0D model",
+    )
+    run_wall_correction_cmd.add_argument("--run-id", required=True)
+    run_wall_correction_cmd.add_argument(
+        "--iteration", required=False, type=int, help="Source tuning iteration (default: current)"
+    )
+    run_wall_correction_cmd.add_argument(
+        "--adopt-threed-dir",
+        required=False,
+        help="Verify and adopt an existing wall-corrected 3D directory under runs_root instead of rerunning it",
+    )
+    mode_group_wall_correction = run_wall_correction_cmd.add_mutually_exclusive_group()
+    mode_group_wall_correction.add_argument(
+        "--dry-run", action="store_true", help="Preview commands only (default)"
+    )
+    mode_group_wall_correction.add_argument(
+        "--execute", action="store_true", help="Execute remote operations"
+    )
+    run_wall_correction_cmd.set_defaults(handler=cmd_run_wall_correction)
+
     run_postop_cmd = run_subparsers.add_parser(
         "postop", help="Run explicit postop simulation from converged preop iteration"
     )
@@ -196,7 +222,9 @@ def build_parser() -> argparse.ArgumentParser:
     preop = subparsers.add_parser("preop", help="Manage converged preop iteration handoff")
     preop_subparsers = preop.add_subparsers(dest="preop_command", required=True)
     preop_select = preop_subparsers.add_parser(
-        "select", help="Record the converged preop iteration for downstream postop"
+        "select",
+        help="DEPRECATED: the wall-correction step now sets the pre-op source "
+        "(svzt wall-correction-status); kept for legacy runs only",
     )
     preop_select.add_argument("--run-id", required=True)
     preop_select.add_argument("--iteration", required=True, type=int)
@@ -270,6 +298,13 @@ def build_parser() -> argparse.ArgumentParser:
     calibration_status.add_argument("run_id")
     calibration_status.add_argument("--iteration", type=int, required=False)
     calibration_status.set_defaults(handler=cmd_calibration_status)
+
+    wall_correction_status = subparsers.add_parser(
+        "wall-correction-status", help="Query the wall-correction step and fetch its calibration reports"
+    )
+    wall_correction_status.add_argument("run_id")
+    wall_correction_status.add_argument("--correction-id", required=False)
+    wall_correction_status.set_defaults(handler=cmd_wall_correction_status)
 
     fetch = subparsers.add_parser("fetch", help="Pull configured artifacts for a run")
     fetch.add_argument("run_id")
@@ -619,6 +654,58 @@ def cmd_run_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_wall_correction(args: argparse.Namespace) -> int:
+    workspace_root = detect_workspace_root(args.workspace_root)
+    result = run_wall_correction(
+        workspace_root=workspace_root,
+        run_id=args.run_id,
+        iteration=args.iteration,
+        adopt_threed_dir=args.adopt_threed_dir,
+        mode=_resolve_mode(args.execute),
+    )
+    rule = result.rule
+    print(f"Run ID: {result.run_id}")
+    print(f"Correction ID: {result.correction_id}")
+    print(f"Source iteration: {result.source_iteration}")
+    print(f"Mode: {result.mode.value} ({result.correction_mode})")
+    print(
+        f"Pulse pressure: 3D {rule.pulse_pressure_3d_mmhg:.2f} mmHg, target {rule.pulse_pressure_target_mmhg:.2f} mmHg"
+    )
+    print(
+        f"Wall: lambda {rule.lambda_applied:.4f}{' (floored)' if rule.floored else ''}, "
+        f"E {rule.elasticity_modulus_source:.6g} -> {rule.elasticity_modulus_corrected:.6g}, "
+        f"damping {rule.damping_source} -> {rule.damping_corrected}"
+    )
+    print(f"3D directory: {result.remote_threed_dir}")
+    print(f"Calibrated 0D model: {result.remote_calibrated_zerod_config}")
+    print(f"Plan: {result.plan_path}")
+    print(
+        "Jobs: "
+        f"solver {result.solver_job_id or '<none>'}, postprocess {result.postprocess_job_id or '<none>'}, "
+        f"calibration {result.calibration_job_id or '<none>'}"
+    )
+    for command in result.command_previews:
+        print(f"  - {' '.join(command)}")
+    return 0
+
+
+def cmd_wall_correction_status(args: argparse.Namespace) -> int:
+    workspace_root = detect_workspace_root(args.workspace_root)
+    result = query_wall_correction_status(
+        workspace_root=workspace_root,
+        run_id=args.run_id,
+        correction_id=args.correction_id,
+    )
+    print(f"Run ID: {result.run_id}")
+    print(f"Correction ID: {result.correction_id}")
+    print(f"Status: {result.status}")
+    for label, state in result.job_states.items():
+        print(f"  {label}: {state}")
+    for key, value in result.results.items():
+        print(f"  {key}: {value}")
+    return 0
+
+
 def cmd_run_postop(args: argparse.Namespace) -> int:
     workspace_root = detect_workspace_root(args.workspace_root)
     mode = _resolve_mode(args.execute)
@@ -667,6 +754,11 @@ def cmd_run_adapt(args: argparse.Namespace) -> int:
 
 
 def cmd_preop_select(args: argparse.Namespace) -> int:
+    print(
+        "WARNING: svzt preop select is deprecated. The wall-correction step records the pre-op "
+        "source (svzt run wall-correction, then svzt wall-correction-status).",
+        file=sys.stderr,
+    )
     workspace_root = detect_workspace_root(args.workspace_root)
     result = select_converged_preop_iteration(
         workspace_root=workspace_root,

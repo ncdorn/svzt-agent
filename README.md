@@ -41,7 +41,8 @@ svzt run tune --cluster sherlock --patient TST-STAN-x --run-id demo-run --execut
 svzt watch demo-run --fetch-on-complete --auto-advance
 svzt advance-iter --run-id demo-run --execute
 svzt run tune-iter --cluster sherlock --patient TST-STAN-x --run-id demo-run --iteration 1 --reuse-preop-3d --execute
-svzt preop select --run-id demo-run --iteration 3 --reason "best tuned preop"
+svzt run wall-correction --run-id demo-run --execute   # after the last tuning iteration
+svzt wall-correction-status demo-run                    # records the pre-op source for post-op
 svzt run postop --run-id demo-run --execute
 svzt postprocess cfd-results --run-id demo-run
 svzt campaign seed-sweep plan --cluster sherlock --campaign-id tst-stan-5-learned
@@ -115,6 +116,70 @@ calibration jobs itself (just as it regenerates the simplified RRI seed inline
 under the RRI policies), so `run tune` alone starts seed generation;
 `svzt status` shows those jobs. Switching to reduced RRI after iteration 1
 requires the explicit `legacy_rri_after_first` policy.
+
+### Wall-correction step
+
+After the last tuning iteration, `svzt run wall-correction` repeats that
+iteration's deformable-wall 3D run with the same 0D BCs and a corrected wall,
+then calibrates a 0D model to match it. This gives a tuned 3D run and a
+matching 0D model (protocol v1, steps 7–8). The step works as follows:
+
+- **Wall rule:** λ = (PP_target / PP_3D)^(1/α), with λ ≥ λ_min. Then
+  E = λ·E_source, and Rule A damping is c = c₁·√(E / E₁), using the
+  iteration-1 wall.
+- **Settings:** `defaults.tuning.wall_correction` (`alpha` 0.55, `lambda_min` 0.5,
+  `compliance_fit`) applies to the whole cohort, with no patient override.
+- **Jobs:** the 3D run, the standard postprocess and an R + proximal-compliance
+  calibration are chained with `afterok` dependencies. The calibration fits one
+  multiplier on proximal C so the 0D model reproduces the 3D pulse pressure.
+
+```bash
+svzt run wall-correction --run-id <run> [--iteration N] --dry-run
+svzt run wall-correction --run-id <run> --execute
+svzt run wall-correction --run-id <run> --adopt-threed-dir <runs_root>/.../preop --execute
+svzt wall-correction-status <run>
+```
+
+When the matched 0D model is published, `wall-correction-status` records the
+wall-corrected 3D run as the run's pre-op source (`converged_preop_iteration`,
+`selection_kind: wall_correction`):
+- **Post-op and adaptation reuse:**
+  - its 3D directory and BCs;
+  - its corrected E and damping;
+  - its matched 0D model.
+- **Tree parameters and outlet mapping** still come from the source iteration's
+  `results/`.
+- **`svzt preop select` is deprecated.** It now only serves legacy runs without
+  a wall correction, and it refuses to replace a wall-correction handoff.
+
+`--adopt-threed-dir` registers an existing wall-corrected 3D run instead of
+rerunning it, then submits only the calibration. The run must pass these checks:
+- its elasticity modulus and damping equal the rule's;
+- its 3D input matches the source iteration's apart from mesh paths and the wall;
+- its BCs are byte-identical to the source iteration's;
+- its postprocess descriptor names the iteration's tuned 0D model, by path and sha256.
+
+Inputs are fetched read-only even on `--dry-run`, so the plan
+(`runs/<run>/wall_correction/iter-XX/wall_correction_plan.json`) shows the
+real rule. Records go to `manifest.wall_correction_runs[]` and never replace the
+source iteration's own calibration or postprocess records.
+
+`wall-correction-status` records the **matched 0D model** for the corrected 3D run.
+This is the model to compare with the post-op 0D model when predicting
+adaptation, so it must reproduce this 3D run vessel by vessel.
+- **Calibration:** R is calibrated to every vessel's 3D pressure drop and flow,
+  then ρ matches the pulse.
+- **Gate:** the step runs it with the `report_only` gate policy
+  (`wall_correction.gate_policy`). Any replay-stable calibrated model is
+  published, and the MPA and split scores are recorded rather than enforced. An
+  improvement-over-tuned gate is the wrong test here, because the tuned model
+  never saw this 3D run.
+- **Integration damping:** the replays and the published model use
+  `wall_correction.rho_infty` (0.2) as the generalized-α spectral radius. At the
+  solver default of 0.5, TST-STAN-5's calibrated model diverged numerically.
+  The tuned model's MPA pressures move by at most 0.02 mmHg.
+- **If calibration publishes nothing:** there is no matched model, and the
+  tuned model is not substituted.
 
 The Python import package is `svztagent`:
 

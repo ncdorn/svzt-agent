@@ -20,6 +20,13 @@ This file is too central to remain the long-term implementation unit.
 Already extracted: split-driver handoff following lives in
 `src/svztagent/workflows/driver_handoff.py` (called from watch and status).
 
+The wall-correction step was added outside `tune_trees.py` from the start:
+- `src/svztagent/core/wall_correction.py` holds the pure rule and the svMultiPhysics
+  input checks.
+- `src/svztagent/workflows/wall_correction.py` holds staging, submission and status.
+
+It imports only the default-adapter builder from `tune_trees.py`.
+
 ## Proposed Package Layout
 - `src/svztagent/workflows/tune_trees/types.py`
   - workflow-local result objects such as execution, status, fetch, and auto-advance return types

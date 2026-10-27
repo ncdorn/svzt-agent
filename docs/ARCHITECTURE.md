@@ -88,7 +88,12 @@ counts memory as CPUs (32 GB is about 5 cores), so the driver's `mem` sets its
 footprint too.
 
 ## Explicit postop/adaptation workflows
-- `svzt preop select` records the selected converged preop iteration and stages
+- `svzt wall-correction-status` records the wall-corrected 3D run and its
+  matched 0D model as `converged_preop_iteration` once the matched model is
+  published. It carries the wall values (`threed_overrides`) and the source
+  iteration's tuning results, so no manual selection is needed.
+- `svzt preop select` is deprecated. It remains for legacy runs without a wall
+  correction: it records a tuning iteration by hand and stages the
   selected-preop postprocess.
 - `svzt run postop` is a sibling explicit workflow that consumes the selected
   preop iteration and records `postop_run`.
@@ -262,6 +267,36 @@ their returned paths and digests. It must not parse VTP, stack centerlines,
 validate scientific observations, or optimize calibrated branch parameters.
 See the [svZeroDTrees full-PA tuning and calibration guide](https://github.com/ncdorn/svZeroDTrees/blob/main/docs/full_pa_calibration.md)
 for the scientific artifact schema and acceptance gates.
+
+### Wall-correction step
+
+`svzt run wall-correction` is a sibling explicit workflow
+(`workflows/wall_correction.py`) that runs after the last tuning iteration:
+
+```text
+source iteration (3D completed)
+  -> fetch inputs read-only (decision, 3D inputs of iterations N and 1, BCs, tuned 0D)
+  -> rule (core/wall_correction.py): lambda, E, Rule A damping
+  -> rerun:   3D solver -> postprocess (afterok) -> calibration (afterok)
+     adopted: verify existing 3D + descriptor lineage -> calibration
+  -> calibration: R_poiseuille, then proximal_compliance_scale (svZeroDTrees)
+  -> wall_correction_runs[] record; wall-correction-status fetches reports
+```
+
+- **Configuration:** `defaults.tuning.wall_correction` (`WallCorrectionPolicyConfig`)
+  is cohort-wide and has no patient override.
+- **Inputs it reads:** the source iteration's own 3D input. Its mesh paths are
+  kept as read-only references, and only the elasticity modulus and damping
+  change.
+- **What it changes:** nothing in the source iteration; all writes go under
+  `<run>/wall_correction/`.
+- **Scheduler options:** the solver is submitted with a job name only, so
+  `run_solver.sh`'s own node and time header stays in force.
+- **Scientific checks:** the svZeroDTrees calibrator owns compliance fitting,
+  replay and gates. This step only passes
+  `calibration.parameters.proximal_compliance_scale` and the `report_only`
+  target gate policy (through the agent-only `svzt_target_gate_policy` request
+  key, which the job's target resolver strips before calling svZeroDTrees).
 
 ### Current TASK-016 integration status
 

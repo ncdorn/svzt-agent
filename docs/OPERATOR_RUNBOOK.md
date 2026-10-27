@@ -145,12 +145,17 @@ If the run hit the default 5-iteration cap but you want to keep going, raise it 
 svzt advance-iter --run-id <run-id> --max-iterations 8 --execute
 ```
 
-**If `converged`** — record the converged preop iteration, then submit postop explicitly:
+**After the last tuning iteration**, run the wall-correction step. Its status
+command records the pre-op source, and then post-op can be submitted:
 ```bash
-svzt preop select --run-id <run-id> --iteration <n> --reason "best tuned preop"
+svzt run wall-correction --run-id <run-id> --execute
+svzt wall-correction-status <run-id>       # once the calibration finishes
 svzt run postop --run-id <run-id>          # dry-run preview
 svzt run postop --run-id <run-id> --execute
 ```
+
+`svzt preop select` is deprecated and is kept for legacy runs without a wall
+correction. The text below describes that legacy path.
 
 `svzt preop select` now also submits a selected-preop postprocess job that
 generates `mpa_pressure_vs_time.csv/png`, flow-split comparison artifacts, and
@@ -439,7 +444,9 @@ last iteration, select that iteration with `svzt preop select`.
 | `svzt status R` | Check current state and decision |
 | `svzt fetch R` | Pull artifacts locally |
 | `svzt advance-iter --run-id R --execute` | Advance after `not_close` |
-| `svzt preop select --run-id R --iteration N` | Record converged preop iteration |
+| `svzt run wall-correction --run-id R --execute` | Wall-corrected 3D + matched 0D after the last iteration |
+| `svzt wall-correction-status R` | Fetch results; record the pre-op source for post-op |
+| `svzt preop select --run-id R --iteration N` | Deprecated: legacy manual pre-op selection |
 | `svzt run postop --run-id R` | Preview explicit postop submission |
 | `svzt run postop --run-id R --execute` | Submit explicit postop simulation |
 | `svzt postprocess tuning-progress --run-id R` | Build run-scoped 0D vs 3D tuning diagnostics |

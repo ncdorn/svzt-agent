@@ -96,6 +96,15 @@ class ConvergedPreopIteration(BaseModel):
     remote_tuned_zerod_config: str
     remote_canonical_coupler: str
     preop_job_id: str | None = None
+    # Set when the handoff comes from the wall-correction step (the default
+    # pre-op source since 2026-10-26; ``svzt preop select`` is deprecated).
+    wall_correction_id: str | None = None
+    # Tuning artifacts (optimized_params.csv, outlet_cap_mapping.json) of the
+    # source iteration; an adopted 3D directory has no sibling results/.
+    remote_tuning_results_dir: str | None = None
+    # Wall values of the pre-op 3D run that post-op/adaptation must reuse
+    # instead of re-deriving them: {"elasticity_modulus": E, "damping": c}.
+    threed_overrides: dict[str, float] = Field(default_factory=dict)
 
 
 class PostopRunRecord(BaseModel):
@@ -301,6 +310,42 @@ class ExecutionMetadata(BaseModel):
     retrieved_artifacts: list[str] = Field(default_factory=list)
 
 
+class WallCorrectionRecord(BaseModel):
+    """One wall-correction step: a 3D rerun with a corrected wall plus its 0D calibration.
+
+    Kept apart from ``calibration_runs`` and ``preop_postprocess_runs``, whose
+    lookups are keyed by iteration number only, so it can never replace the
+    source iteration's own calibrated seed or postprocess record.
+    """
+
+    correction_id: str
+    source_iteration: int
+    # "rerun": the agent built and submitted the corrected 3D run.
+    # "adopted": an existing 3D directory was verified against the rule.
+    mode: str
+    status: str = "planned"
+    created_at: str
+    updated_at: str
+    rule: dict[str, float | bool | None] = Field(default_factory=dict)
+    remote_dir: str
+    remote_threed_dir: str
+    remote_postprocess_dir: str
+    remote_descriptor_path: str
+    remote_tuned_zerod_config: str
+    remote_calibration_dir: str
+    remote_calibrated_zerod_config: str
+    local_dir: str
+    solver_job_id: str | None = None
+    postprocess_job_id: str | None = None
+    calibration_job_id: str | None = None
+    calibration_status: str = "not_submitted"
+    terminal_state: str | None = None
+    input_digests: dict[str, str] = Field(default_factory=dict)
+    verification: dict[str, object] = Field(default_factory=dict)
+    results: dict[str, object] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+
+
 class RunManifest(BaseModel):
     run_id: str
     created_at: str
@@ -332,6 +377,7 @@ class RunManifest(BaseModel):
     last_known_good_promotion: PromotionRecord | None = None
     adaptation_runs: list[AdaptationRunRecord] = Field(default_factory=list)
     paraview_viz_runs: list[ParaViewVizRecord] = Field(default_factory=list)
+    wall_correction_runs: list[WallCorrectionRecord] = Field(default_factory=list)
 
 
 def _utc_now_iso() -> str:
@@ -756,6 +802,10 @@ def record_converged_preop_iteration(
     remote_canonical_coupler: str,
     preop_job_id: str | None,
     at: str | None = None,
+    selected_by_command: str = "svzt preop select",
+    wall_correction_id: str | None = None,
+    remote_tuning_results_dir: str | None = None,
+    threed_overrides: dict[str, float] | None = None,
 ) -> RunManifest:
     timestamp = at or _utc_now_iso()
     updated = manifest.model_copy(deep=True)
@@ -772,6 +822,10 @@ def record_converged_preop_iteration(
         remote_tuned_zerod_config=remote_tuned_zerod_config,
         remote_canonical_coupler=remote_canonical_coupler,
         preop_job_id=preop_job_id,
+        selected_by_command=selected_by_command,
+        wall_correction_id=wall_correction_id,
+        remote_tuning_results_dir=remote_tuning_results_dir,
+        threed_overrides=dict(threed_overrides or {}),
     )
     updated.updated_at = timestamp
     return updated
@@ -1716,3 +1770,20 @@ def copy_config_snapshot(workspace_root: Path, config_snapshot_dir: Path) -> Non
         source = config_root / name
         if source.exists():
             shutil.copy2(source, config_snapshot_dir / name)
+
+
+def latest_wall_correction(manifest: RunManifest) -> WallCorrectionRecord | None:
+    return manifest.wall_correction_runs[-1] if manifest.wall_correction_runs else None
+
+
+def record_wall_correction(manifest: RunManifest, record: WallCorrectionRecord) -> RunManifest:
+    """Insert or replace a wall-correction record by ``correction_id`` (append-only otherwise)."""
+
+    record = record.model_copy(update={"updated_at": _utc_now_iso()})
+    runs = [item for item in manifest.wall_correction_runs if item.correction_id != record.correction_id]
+    position = next(
+        (index for index, item in enumerate(manifest.wall_correction_runs) if item.correction_id == record.correction_id),
+        len(runs),
+    )
+    runs.insert(position, record)
+    return manifest.model_copy(update={"wall_correction_runs": runs, "updated_at": _utc_now_iso()})
