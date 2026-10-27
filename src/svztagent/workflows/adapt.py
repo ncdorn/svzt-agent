@@ -351,9 +351,9 @@ def _build_adapt_plan(
             name="record_adaptation_submission",
             category=StepCategory.FINALIZE_MANIFEST,
             description="Record adaptation plan/submission metadata in the run manifest.",
-            outputs={"manifest_path": manifest.local_paths.manifest},
+            outputs={"manifest_path": str(local_paths.manifest)},
             dependencies=["a07_submit_adaptation_job"],
-            local_paths={"manifest": manifest.local_paths.manifest},
+            local_paths={"manifest": str(local_paths.manifest)},
             command_preview=["svzt", "run", "adapt", "--run-id", manifest.run_id, "--model", model],
         ),
     ]

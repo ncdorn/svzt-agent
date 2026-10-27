@@ -2504,8 +2504,8 @@ def watch_run_lifecycle(
         terminal_reason=manifest.execution.terminal_reason,
         poll_count=manifest.execution.poll_count,
         remote_run_dir=remote_run_dir,
-        local_run_dir=manifest.local_paths.run_dir,
-        local_logs_dir=manifest.local_paths.logs,
+        local_run_dir=str(local_paths.run_dir),
+        local_logs_dir=str(local_paths.logs),
         remote_logs_dir=remote_logs_dir,
         job_script_path=manifest.execution.job_script_path,
         fetch_attempted=fetch_attempted or manifest.execution.fetch_attempted,
@@ -2827,7 +2827,7 @@ def fetch_run_artifacts(
             mode=mode,
         )
 
-    local_pull_root = Path(manifest.local_paths.pulled_outputs)
+    local_pull_root = local_paths.pulled_outputs
     local_pull_root.mkdir(parents=True, exist_ok=True)
 
     sync_results = []
@@ -2938,7 +2938,7 @@ def fetch_run_artifacts(
     return FetchResult(
         run_id=validated_run_id,
         remote_run_dir=remote_run_dir,
-        local_output_dir=manifest.local_paths.pulled_outputs,
+        local_output_dir=str(local_paths.pulled_outputs),
         pull_patterns=pull_patterns,
         command_preview=command_preview,
     )

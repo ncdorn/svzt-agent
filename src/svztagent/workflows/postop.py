@@ -555,9 +555,9 @@ def _build_postop_plan(
             name="record_postop_submission",
             category=StepCategory.FINALIZE_MANIFEST,
             description="Record postop plan/submission metadata in the run manifest.",
-            outputs={"manifest_path": manifest.local_paths.manifest},
+            outputs={"manifest_path": str(local_paths.manifest)},
             dependencies=["p05_submit_postop_job"],
-            local_paths={"manifest": manifest.local_paths.manifest},
+            local_paths={"manifest": str(local_paths.manifest)},
             command_preview=["svzt", "record-postop", "--run-id", manifest.run_id],
         ),
     ]
@@ -568,8 +568,8 @@ def _build_postop_plan(
         cluster=cluster.name,
         patient=str(manifest.patient.get("alias")),
         created_at=utc_now_iso(),
-        manifest_path=manifest.local_paths.manifest,
-        local_run_dir=manifest.local_paths.run_dir,
+        manifest_path=str(local_paths.manifest),
+        local_run_dir=str(local_paths.run_dir),
         remote_run_dir=str(remote_run_dir),
         steps=steps,
         summary={
@@ -589,6 +589,7 @@ def _build_postop_plan(
 
 def _render_postop_job_script(
     *,
+    workspace_root: Path,
     manifest,
     selected,
     remote_layout: dict[str, str],
@@ -602,7 +603,6 @@ def _render_postop_job_script(
     mesh_scale_factor = manifest.patient.get("mesh_scale_factor") or 1.0
     patient_alias = str(manifest.patient.get("alias"))
     cluster_name = str(manifest.cluster.get("name"))
-    workspace_root = detect_workspace_root(Path(manifest.local_paths.run_dir).parents[1])
     config = load_workspace_config(workspace_root)
     cluster = resolve_cluster(config, cluster_name)
     clinical_targets_payload = _load_stage_target_payload(workspace_root, patient_alias=patient_alias, stage="postop")
@@ -1406,6 +1406,7 @@ def run_postop(
             source_iteration=selected.iteration,
         )
     script_body = _render_postop_job_script(
+        workspace_root=root,
         manifest=manifest,
         selected=selected,
         remote_layout=remote_layout,

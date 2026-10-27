@@ -268,6 +268,7 @@ def record_driver_submitted_calibration(workspace_root: Path, run_id: str, itera
     ).name
     descriptor_local, descriptor_remote = _resolve_postprocess_artifacts(
         manifest=manifest,
+        local_paths=local_paths,
         iteration=iteration,
         postprocess_record=postprocess_record,
         suite_descriptor_path=None,

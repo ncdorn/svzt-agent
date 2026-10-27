@@ -38,6 +38,7 @@ from svztagent.core.paths import (
     build_iteration_local_paths,
     build_local_run_paths,
     iteration_dir_name,
+    relocate_recorded_local_path,
     validate_remote_write_path,
     validate_run_id,
 )
@@ -165,6 +166,7 @@ def _remote_or_local_path(
 def _resolve_postprocess_artifacts(
     *,
     manifest,
+    local_paths,
     iteration: int,
     postprocess_record,
     suite_descriptor_path: str | Path | None,
@@ -172,7 +174,17 @@ def _resolve_postprocess_artifacts(
     if suite_descriptor_path is not None and str(suite_descriptor_path).strip():
         local = Path(str(suite_descriptor_path)).expanduser()
     else:
-        local = Path(str(postprocess_record.local_dir)) / "postprocess_suite_metadata.json"
+        # The record holds the absolute path written at submission; re-root it
+        # on the run dir being operated on so a copied run never pulls into
+        # (or reads from) the original.
+        local = (
+            relocate_recorded_local_path(
+                str(postprocess_record.local_dir),
+                recorded_run_dir=manifest.local_paths.run_dir,
+                active_run_dir=local_paths.run_dir,
+            )
+            / "postprocess_suite_metadata.json"
+        )
         if not local.exists():
             local = local.parent.parent / "results" / "postprocess" / "postprocess_suite_metadata.json"
     remote_dir = str(postprocess_record.remote_dir or "").strip()
@@ -537,6 +549,7 @@ def run_calibration(
     )
     descriptor_local, descriptor_remote = _resolve_postprocess_artifacts(
         manifest=manifest,
+        local_paths=local_paths,
         iteration=resolved_iteration,
         postprocess_record=postprocess_record,
         suite_descriptor_path=suite_descriptor_path,
@@ -689,11 +702,17 @@ def promote_calibrated_full_pa_seed(
     candidate_path: str | Path | None = None,
     validated_lineage: bool | None = None,
     at: str | None = None,
+    local_run_dir: Path | None = None,
 ):
     """Compare-and-set promotion of one terminal, validated calibration.
 
     Rejected candidates append a promotion record but never replace the
     successful promotion pointer or the previous iteration's seed.
+
+    ``local_run_dir`` is the run dir being operated on.  When given, the
+    promoted copy is written under it rather than under the absolute
+    ``record.local_dir`` recorded at submission, which still points at the
+    original run when the run dir has been copied or moved.
     """
 
     record = _record_for_iteration(manifest, iteration)
@@ -736,7 +755,14 @@ def promote_calibrated_full_pa_seed(
 
     # A stable copy under the current iteration makes the promoted seed
     # independent of temporary output locations while retaining source data.
-    destination = Path(record.local_dir) / "results" / "calibrated_full_pa_zerod.promoted.json"
+    record_dir = Path(record.local_dir)
+    if local_run_dir is not None:
+        record_dir = relocate_recorded_local_path(
+            record.local_dir,
+            recorded_run_dir=manifest.local_paths.run_dir,
+            active_run_dir=local_run_dir,
+        )
+    destination = record_dir / "results" / "calibrated_full_pa_zerod.promoted.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     if candidate.resolve() != destination.resolve():
         shutil.copyfile(candidate, destination)
@@ -781,6 +807,7 @@ def complete_calibration(
     validated_lineage: bool = False,
     reason: str | None = None,
     at: str | None = None,
+    local_run_dir: Path | None = None,
 ):
     """Record upstream terminal evidence and attempt guarded promotion."""
 
@@ -801,12 +828,14 @@ def complete_calibration(
             iteration=iteration,
             validated_lineage=validated_lineage,
             at=at,
+            local_run_dir=local_run_dir,
         )
     return promote_calibrated_full_pa_seed(
         updated,
         iteration=iteration,
         validated_lineage=validated_lineage,
         at=at,
+        local_run_dir=local_run_dir,
     )
 
 
@@ -862,6 +891,7 @@ def finalize_calibration_if_ready(
             terminal_state=state,
             validated_lineage=False,
             reason=f"calibration scheduler terminal state: {state}",
+            local_run_dir=local_paths.run_dir,
         )
         write_manifest(manifest, local_paths.manifest)
         return query_calibration_status(root, validated_run_id, iteration=iteration)
@@ -883,6 +913,7 @@ def finalize_calibration_if_ready(
     )
     descriptor_local, _ = _resolve_postprocess_artifacts(
         manifest=manifest,
+        local_paths=local_paths,
         iteration=iteration,
         postprocess_record=postprocess_record,
         suite_descriptor_path=None,
@@ -928,6 +959,7 @@ def finalize_calibration_if_ready(
             terminal_state="completed",
             validated_lineage=False,
             reason=reason,
+            local_run_dir=local_paths.run_dir,
         )
     else:
         output_artifacts = {
@@ -949,6 +981,7 @@ def finalize_calibration_if_ready(
             output_digests=output_digests,
             validated_lineage=True,
             reason="upstream calibration published a validated full-PA model",
+            local_run_dir=local_paths.run_dir,
         )
     write_manifest(manifest, local_paths.manifest)
     return query_calibration_status(root, validated_run_id, iteration=iteration)

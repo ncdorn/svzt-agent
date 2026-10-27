@@ -46,6 +46,30 @@ def build_iteration_local_paths(paths: LocalRunPaths, iteration: int) -> dict[st
     }
 
 
+def relocate_recorded_local_path(
+    recorded: str | Path,
+    *,
+    recorded_run_dir: str | Path,
+    active_run_dir: Path,
+) -> Path:
+    """Map an absolute local path recorded in a manifest onto the active run dir.
+
+    Manifests record absolute local paths at the time they were written.  When
+    the run directory has since been copied or moved (a shadow workspace, a
+    relocated run), a recorded path under ``recorded_run_dir`` still points at
+    the original run.  Writes must land in ``active_run_dir`` instead, so the
+    recorded path is re-rooted there.  Paths outside the recorded run dir are
+    returned unchanged.
+    """
+
+    path = Path(recorded).expanduser()
+    try:
+        relative = path.relative_to(Path(recorded_run_dir).expanduser())
+    except ValueError:
+        return path
+    return active_run_dir / relative
+
+
 def validate_run_id(run_id: str) -> str:
     if not run_id:
         raise PathPolicyError("run_id is required")

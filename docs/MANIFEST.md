@@ -11,6 +11,15 @@ paths recorded when the run was initialized and is informational only: a
 copied or moved run directory (for example a shadow workspace for golden dry
 runs) writes its own tracker and never the original run's.
 
+The same holds for every other absolute local path the manifest records
+(`local_paths.*`, and per-record fields such as a calibration or postprocess
+record's `local_dir`). Workflow steps resolve local write destinations,
+workspace config, and plan paths from the workspace they were invoked on
+(`build_local_run_paths(workspace_root, run_id)`), never from recorded paths.
+Where a step must use a recorded record path, it re-roots it onto the active
+run dir first (`relocate_recorded_local_path`). Recorded paths may still be
+read as provenance, and newly written records carry the active run's paths.
+
 ## Patient fields
 `patient` records the alias, `permanent_remote_path`, the resolved
 `patient_assets` (geometry paths point at the staged scaled copies when the
