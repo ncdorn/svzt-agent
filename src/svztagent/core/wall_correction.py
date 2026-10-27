@@ -152,28 +152,3 @@ def wall_only_differences(source_xml: str, candidate_xml: str) -> list[str]:
 def relative_mismatch(expected: float, actual: float) -> float:
     return abs(float(actual) - float(expected)) / max(abs(float(expected)), 1e-300)
 
-
-PREOP_SOURCE_HINT = (
-    "run svzt run wall-correction, svzt wall-correction-status until it completes, "
-    "then svzt preop finalize (svzt preop select is deprecated)"
-)
-
-
-def apply_preop_threed_overrides(threed_config: dict, selected) -> dict:
-    """Return ``threed_config`` with the pre-op 3D run's wall values applied.
-
-    A wall-correction handoff carries the corrected elasticity modulus and
-    tissue damping; downstream 3D runs must reuse them rather than re-derive E
-    from the tuned 0D model (``match_proximal_compliance``) or fall back to
-    the run's iteration-1 damping.
-    """
-
-    overrides = dict(getattr(selected, "threed_overrides", None) or {})
-    updated = dict(threed_config)
-    if "elasticity_modulus" in overrides:
-        updated["elasticity_modulus"] = float(overrides["elasticity_modulus"])
-    if "damping" in overrides:
-        tissue_support = dict(updated.get("tissue_support") or {})
-        tissue_support["damping"] = float(overrides["damping"])
-        updated["tissue_support"] = tissue_support
-    return updated

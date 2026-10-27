@@ -10,7 +10,7 @@ import yaml
 
 from svztagent.config.load import detect_workspace_root, load_workspace_config, resolve_cluster
 from svztagent.core.errors import ConfigError
-from svztagent.core.wall_correction import PREOP_SOURCE_HINT, apply_preop_threed_overrides
+from svztagent.core.preop_source import WALL_CORRECTION_SELECTION, PreopSource, resolve_preop_source
 from svztagent.core.manifest import (
     read_manifest,
     record_paraview_viz_submission,
@@ -298,7 +298,7 @@ def _refresh_selected_reduced_config_from_local_iteration(
     selected = manifest.converged_preop_iteration
     if selected is None:
         return manifest, None
-    if selected.selection_kind == "wall_correction":
+    if selected.selection_kind == WALL_CORRECTION_SELECTION:
         # The matched 0D model of the wall-corrected 3D run is final; never
         # replace it with the source iteration's promoted seed.
         return manifest, selected
@@ -478,11 +478,7 @@ def _build_postop_plan(
     postop_paths: dict[str, Path],
     remote_layout: dict[str, str],
 ) -> ExecutionPlan:
-    selected = manifest.converged_preop_iteration
-    if selected is None:
-        raise ConfigError(
-            f"run '{manifest.run_id}' has no pre-op source; {PREOP_SOURCE_HINT}"
-        )
+    source = resolve_preop_source(manifest)
     postop_mesh = manifest.remote.get("svzerodtrees_paths", {}).get("postop_mesh_complete")
     if not postop_mesh:
         raise ConfigError("postop mesh-complete path is not configured for this patient")
@@ -494,21 +490,21 @@ def _build_postop_plan(
             name="validate_converged_preop_iteration",
             category=StepCategory.RESOLVE_PATHS,
             description="Validate the manifest-selected converged preop iteration.",
-            inputs={"iteration": str(selected.iteration)},
+            inputs={"iteration": str(source.iteration)},
             outputs={
-                "tuned_zerod_config": selected.remote_tuned_zerod_config,
-                "canonical_coupler": selected.remote_canonical_coupler,
+                "tuned_zerod_config": source.remote_zerod_model,
+                "canonical_coupler": source.remote_coupler,
             },
             remote_paths={
                 "read": [
-                    selected.remote_tuned_zerod_config,
-                    selected.remote_canonical_coupler,
-                    selected.remote_preop_dir,
+                    source.remote_zerod_model,
+                    source.remote_coupler,
+                    source.remote_threed_dir,
                 ],
                 "write": [],
             },
             safety_notes=["Preop artifacts are read-only inputs to postop generation."],
-            command_preview=["svzt", "preop", "select", "--run-id", manifest.run_id, "--iteration", str(selected.iteration)],
+            command_preview=list(source.handoff_command),
         ),
         PlanStep(
             step_id="p02_stage_postop_inputs",
@@ -548,8 +544,8 @@ def _build_postop_plan(
             dependencies=["p03_define_remote_postop_destination"],
             remote_paths={
                 "read": [
-                    selected.remote_tuned_zerod_config,
-                    selected.remote_canonical_coupler,
+                    source.remote_zerod_model,
+                    source.remote_coupler,
                     postop_mesh,
                 ],
                 "write": [remote_layout["remote_job_script_path"]],
@@ -579,7 +575,7 @@ def _build_postop_plan(
         ),
     ]
     plan = ExecutionPlan(
-        plan_id=f"plan-{manifest.run_id}-postop-from-{iteration_dir_name(selected.iteration)}",
+        plan_id=f"plan-{manifest.run_id}-postop-from-{iteration_dir_name(source.iteration)}",
         workflow_name="postop",
         run_id=manifest.run_id,
         cluster=cluster.name,
@@ -590,9 +586,9 @@ def _build_postop_plan(
         remote_run_dir=str(remote_run_dir),
         steps=steps,
         summary={
-            "source_preop_iteration": selected.iteration,
-            "selection_kind": selected.selection_kind,
-            "remote_canonical_coupler": selected.remote_canonical_coupler,
+            "source_preop_iteration": source.iteration,
+            "selection_kind": source.selection_kind,
+            "remote_canonical_coupler": source.remote_coupler,
             "postop_mesh_complete": postop_mesh,
             "remote_postop_dir": remote_layout["remote_postop_dir"],
         },
@@ -608,7 +604,7 @@ def _render_postop_job_script(
     *,
     workspace_root: Path,
     manifest,
-    selected,
+    source: PreopSource,
     remote_layout: dict[str, str],
     paraview_job=None,
     paraview_skip_reason: str | None = None,
@@ -616,7 +612,7 @@ def _render_postop_job_script(
     svzerodtrees_paths = manifest.remote.get("svzerodtrees_paths", {})
     postop_mesh = svzerodtrees_paths.get("postop_mesh_complete")
     clinical_targets = svzerodtrees_paths.get("clinical_targets")
-    threed_config = apply_preop_threed_overrides(manifest.remote.get("threed_defaults", {}), selected)
+    threed_config = source.threed_config
     mesh_scale_factor = manifest.patient.get("mesh_scale_factor") or 1.0
     patient_alias = str(manifest.patient.get("alias"))
     cluster_name = str(manifest.cluster.get("name"))
@@ -745,8 +741,8 @@ remote_postop_dir = Path({json.dumps(remote_layout["remote_postop_dir"])})
 remote_results_dir = Path({json.dumps(remote_layout["remote_results_dir"])})
 mesh_complete = Path({json.dumps(str(postop_mesh))})
 tuned_clinical_targets = Path({json.dumps(str(clinical_targets))})
-tuned_zerod = Path({json.dumps(selected.remote_tuned_zerod_config)})
-canonical_coupler = Path({json.dumps(selected.remote_canonical_coupler)})
+tuned_zerod = Path({json.dumps(source.remote_zerod_model)})
+canonical_coupler = Path({json.dumps(source.remote_coupler)})
 threed_config = json.loads({json.dumps(json.dumps(threed_config, sort_keys=True))})
 if threed_config.get("elasticity_modulus") == "match_proximal_compliance":
     # Same E as the selected preop iteration: its tuned seed's matched wall.
@@ -1297,7 +1293,7 @@ if paraview_enabled:
         json.dumps(
             {{
                 "stage": paraview_stage,
-                "source_preop_iteration": {selected.iteration},
+                "source_preop_iteration": {source.iteration},
                 "owner_scheduler_job_id": os.environ.get("SLURM_JOB_ID"),
                 "scheduler_job_id": paraview_job_id,
                 "slurm_script": str(paraview_slurm_path),
@@ -1314,7 +1310,7 @@ else:
     print(f"[svzt] ParaView visualization skipped: {{paraview_skip_reason}}", flush=True)
 
 payload = {{
-    "source_preop_iteration": {selected.iteration},
+    "source_preop_iteration": {source.iteration},
     "source_tuned_zerod_config": str(tuned_zerod),
     "source_canonical_coupler": str(canonical_coupler),
     "postop_mesh_complete": str(mesh_complete),
@@ -1345,18 +1341,12 @@ def run_postop(
     validated_run_id = validate_run_id(run_id)
     local_paths = build_local_run_paths(root, validated_run_id)
     manifest = read_manifest(local_paths.manifest)
-    if manifest.converged_preop_iteration is None:
-        raise ConfigError(
-            f"run '{validated_run_id}' has no pre-op source; {PREOP_SOURCE_HINT}"
-        )
+    resolve_preop_source(manifest)
     manifest, selected = _refresh_selected_reduced_config_from_local_iteration(
         manifest=manifest,
         local_paths=local_paths,
     )
-    if selected is None:
-        raise ConfigError(
-            f"run '{validated_run_id}' has no pre-op source; {PREOP_SOURCE_HINT}"
-        )
+    source = resolve_preop_source(manifest)
     config, cluster = _resolve_cluster_for_manifest(root, manifest)
     remote_run_dir = manifest.execution.remote_run_dir or manifest.remote.get("remote_run_dir")
     if not remote_run_dir:
@@ -1425,7 +1415,7 @@ def run_postop(
     script_body = _render_postop_job_script(
         workspace_root=root,
         manifest=manifest,
-        selected=selected,
+        source=source,
         remote_layout=remote_layout,
         paraview_job=prepared_paraview_job,
         paraview_skip_reason=resolved_paraview_skip_reason,

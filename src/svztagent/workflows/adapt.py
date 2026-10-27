@@ -11,7 +11,7 @@ import yaml
 
 from svztagent.config.load import detect_workspace_root, load_workspace_config, resolve_cluster
 from svztagent.core.errors import ConfigError
-from svztagent.core.wall_correction import PREOP_SOURCE_HINT, apply_preop_threed_overrides
+from svztagent.core.preop_source import resolve_preop_source
 from svztagent.core.manifest import (
     read_manifest,
     record_adaptation_submission,
@@ -143,15 +143,9 @@ def _selected_tuning_artifacts(manifest) -> dict[str, str | bool]:
     Full-PA tuning pairs caps to BCs geometrically and records the pairing in
     ``outlet_cap_mapping.json``; adaptation must use that file.
     """
-    selected = manifest.converged_preop_iteration
-    # A wall-correction handoff names the source iteration's results directly
-    # (an adopted 3D directory has no sibling results/ with the tuned trees).
-    results_dir = (
-        PurePosixPath(selected.remote_tuning_results_dir)
-        if selected.remote_tuning_results_dir
-        else PurePosixPath(selected.remote_preop_dir).parent / "results"
-    )
-    tuning_model = manifest_effective_tuning_model(manifest, selected.iteration)
+    source = resolve_preop_source(manifest)
+    results_dir = PurePosixPath(source.remote_tuning_results_dir)
+    tuning_model = manifest_effective_tuning_model(manifest, source.iteration)
     return {
         "tuning_model": tuning_model,
         "optimized_params_csv": str(results_dir / "optimized_params.csv"),
@@ -231,10 +225,8 @@ def _build_adapt_plan(
     inflow_source_path: str,
     inflow_fingerprint: str | None,
 ) -> ExecutionPlan:
-    selected = manifest.converged_preop_iteration
+    source = resolve_preop_source(manifest)
     postop_run = manifest.postop_run
-    if selected is None:
-        raise ConfigError("converged_preop_iteration is required for adaptation workflow")
     if postop_run is None or not postop_run.remote_dir:
         raise ConfigError("completed postop_run is required for adaptation workflow")
     tuning_artifacts = _selected_tuning_artifacts(manifest)
@@ -252,15 +244,15 @@ def _build_adapt_plan(
             category=StepCategory.RESOLVE_PATHS,
             description="Validate selected converged preop iteration and explicit postop submission.",
             outputs={
-                "source_preop_iteration": str(selected.iteration),
+                "source_preop_iteration": str(source.iteration),
                 "source_postop_dir": postop_run.remote_dir,
                 "tuned_config": str(tuning_artifacts["tuned_config"]),
             },
             remote_paths={
                 "read": [
-                    selected.remote_preop_dir,
-                    selected.remote_tuned_zerod_config,
-                    selected.remote_canonical_coupler,
+                    source.remote_threed_dir,
+                    source.remote_zerod_model,
+                    source.remote_coupler,
                     postop_run.remote_dir,
                     *tuning_reads,
                 ],
@@ -331,8 +323,8 @@ def _build_adapt_plan(
             dependencies=["a05_define_remote_adaptation_destination"],
             remote_paths={
                 "read": [
-                    selected.remote_preop_dir,
-                    selected.remote_tuned_zerod_config,
+                    source.remote_threed_dir,
+                    source.remote_zerod_model,
                     postop_run.remote_dir,
                     inflow_source_path,
                 ],
@@ -366,7 +358,7 @@ def _build_adapt_plan(
     ]
 
     plan = ExecutionPlan(
-        plan_id=f"plan-{manifest.run_id}-adapt-{model.lower()}-{iteration_dir_name(selected.iteration)}",
+        plan_id=f"plan-{manifest.run_id}-adapt-{model.lower()}-{iteration_dir_name(source.iteration)}",
         workflow_name="adapt",
         run_id=manifest.run_id,
         cluster=cluster.name,
@@ -377,7 +369,7 @@ def _build_adapt_plan(
         remote_run_dir=str(manifest.execution.remote_run_dir or manifest.remote.get("remote_run_dir")),
         steps=steps,
         summary={
-            "source_preop_iteration": selected.iteration,
+            "source_preop_iteration": source.iteration,
             "source_postop_job_id": postop_run.postop_job_id,
             "model": model,
             "parameter_set": parameter_set,
@@ -409,13 +401,13 @@ def _render_adapt_job_script(
     paraview_job=None,
     paraview_skip_reason: str | None = None,
 ) -> str:
-    selected = manifest.converged_preop_iteration
+    source = resolve_preop_source(manifest)
     postop_run = manifest.postop_run
-    if selected is None or postop_run is None:
+    if postop_run is None:
         raise ConfigError("adaptation job script requires selected preop and postop run")
 
     svzerodtrees_paths = manifest.remote.get("svzerodtrees_paths", {})
-    threed_config = apply_preop_threed_overrides(dict(manifest.remote.get("threed_defaults", {})), selected)
+    threed_config = source.threed_config
     adaptation_defaults = _resolve_adaptation_defaults(manifest)
     territory_scheme = str(adaptation_defaults.get("territory_scheme") or "lpa_rpa")
     target_stage = str(adaptation_defaults.get("target_stage") or "postop")
@@ -520,7 +512,7 @@ from svzerodtrees.tune_bcs.clinical_targets import ClinicalTargets
 remote_adaptation_dir = Path({json.dumps(remote_layout["remote_adaptation_dir"])})
 remote_results_dir = Path({json.dumps(remote_layout["remote_results_dir"])})
 simulation_dir = Path({json.dumps(remote_layout["remote_simulation_dir"])})
-preop_dir = Path({json.dumps(selected.remote_preop_dir)})
+preop_dir = Path({json.dumps(source.remote_threed_dir)})
 postop_root = Path({json.dumps(postop_run.remote_dir)})
 postop_simulation_dir = postop_root / "simulation"
 postop_results_dir = postop_root / "results"
@@ -530,7 +522,7 @@ clinical_targets_csv = Path({json.dumps(str(clinical_targets))})
 centerline = Path({json.dumps(str(centerline))})
 svslicer_path = Path({json.dumps(str(svslicer_path))})
 postop_mesh_complete = Path({json.dumps(str(postop_mesh))})
-reduced_order_pa = Path({json.dumps(selected.remote_tuned_zerod_config)})
+reduced_order_pa = Path({json.dumps(source.remote_zerod_model)})
 tree_params_csv = Path({json.dumps(str(tuning_artifacts["optimized_params_csv"]))})
 tuned_config_path = Path({json.dumps(str(tuning_artifacts["tuned_config"]))})
 outlet_cap_mapping_path = Path({json.dumps(str(tuning_artifacts["outlet_cap_mapping"]))})
@@ -917,7 +909,7 @@ try:
         model=model,
         parameter_set=parameter_set,
         adaptation_mode=adaptation_mode,
-        source_preop_iteration={selected.iteration},
+        source_preop_iteration={source.iteration},
     )
     postop_submission_path = postop_results_dir / "postop_submission.json"
     prestress_source = None
@@ -1100,7 +1092,7 @@ try:
             json.dumps(
                 {{
                     "stage": paraview_stage,
-                    "source_preop_iteration": {selected.iteration},
+                    "source_preop_iteration": {source.iteration},
                     "owner_scheduler_job_id": os.environ.get("SLURM_JOB_ID"),
                     "scheduler_job_id": paraview_job_id,
                     "slurm_script": str(paraview_slurm_path),
@@ -1268,11 +1260,7 @@ def run_adapt(
     validated_run_id = validate_run_id(run_id)
     local_paths = build_local_run_paths(root, validated_run_id)
     manifest = read_manifest(local_paths.manifest)
-    selected = manifest.converged_preop_iteration
-    if selected is None:
-        raise ConfigError(
-            f"run '{validated_run_id}' has no pre-op source; {PREOP_SOURCE_HINT}"
-        )
+    selected = resolve_preop_source(manifest)
     if manifest.postop_run is None or not manifest.postop_run.postop_job_id:
         raise ConfigError(
             f"run '{validated_run_id}' has no completed postop_run; run svzt run postop first"
