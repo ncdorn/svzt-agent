@@ -253,7 +253,9 @@ def test_adopt_dry_run_plans_only_the_calibration(full_pa_run):
     request = yaml.safe_load((staged / "inputs" / "calibrate_0d_from_3d.yaml").read_text())
     params = request["calibration"]["parameters"]
     assert params["vessels"]["default"] == ["R_poiseuille"]
-    assert request["calibration"]["svzt_target_gate_policy"] == "report_only"
+    # The gate policy is a resolver argument, not a key in the upstream request.
+    assert "svzt_target_gate_policy" not in request["calibration"]
+    assert "calibrate_0d_from_3d.resolved.yaml report_only <<'PY'" in (staged / "run_calibration.sh").read_text()
     assert request["calibration"]["solver"] == {"rho_infty": 0.2}
     assert params["proximal_compliance_scale"] == {
         "enabled": True,
@@ -488,28 +490,78 @@ def test_an_unpublished_calibration_has_no_matched_model(full_pa_run):
     assert read_manifest(root / "runs" / RUN_ID / "manifest.yaml").converged_preop_iteration is None
 
 
-def test_calibration_resolver_strips_the_agent_gate_key(tmp_path, monkeypatch):
+def _run_resolver(tmp_path, calibration: dict, *args: str):
+    """Run the job's target resolver against a stub svzerodtrees target-role builder."""
+
     import subprocess
     import sys
 
     from svztagent.workflows.calibrate import _RESOLVE_TARGETS_PY
 
+    stub = tmp_path / "stub" / "svzerodtrees" / "calibration"
+    stub.mkdir(parents=True)
+    for package in (stub.parent, stub):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (stub / "target_roles.py").write_text(
+        "def full_pa_calibration_targets(model, mapping, gate_policy):\n"
+        "    return {'gate_policy': gate_policy, 'mapping': mapping.name}\n",
+        encoding="utf-8",
+    )
     request = tmp_path / "calibrate.yaml"
     resolved = tmp_path / "calibrate.resolved.yaml"
     request.write_text(
-        yaml.safe_dump(
-            {
-                "paths": {"zerod_config": str(tmp_path / "model.json")},
-                "calibration": {
-                    "svzt_target_gate_policy": "report_only",
-                    "observation_qc": {"enforcement": "target_focused"},
-                    "targets": {"mpa_pressure": {"vessel": "v0"}},
-                },
-            }
-        ),
+        yaml.safe_dump({"paths": {"zerod_config": str(tmp_path / "model.json")}, "calibration": calibration}),
         encoding="utf-8",
     )
-    subprocess.run([sys.executable, "-c", _RESOLVE_TARGETS_PY, str(request), str(resolved)], check=True)
-    payload = json.loads(resolved.read_text(encoding="utf-8"))
-    assert "svzt_target_gate_policy" not in payload["calibration"]
-    assert payload["calibration"]["targets"] == {"mpa_pressure": {"vessel": "v0"}}
+    proc = subprocess.run(
+        [sys.executable, "-c", _RESOLVE_TARGETS_PY, str(request), str(resolved), *args],
+        env={"PYTHONPATH": str(stub.parent.parent)},
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(resolved.read_text(encoding="utf-8")) if resolved.is_file() else None
+    return proc, payload
+
+
+@pytest.mark.parametrize("gate_policy", ["report_only", "improvement_only"])
+def test_calibration_resolver_passes_the_gate_policy_argument_upstream(tmp_path, gate_policy):
+    proc, payload = _run_resolver(tmp_path, {"observation_qc": {"enforcement": "target_focused"}}, gate_policy)
+    assert proc.returncode == 0, proc.stderr
+    assert payload["calibration"]["targets"] == {"gate_policy": gate_policy, "mapping": "outlet_cap_mapping.json"}
+
+
+def test_calibration_resolver_keeps_explicit_targets(tmp_path):
+    targets = {"mpa_pressure": {"vessel": "v0"}}
+    proc, payload = _run_resolver(
+        tmp_path, {"observation_qc": {"enforcement": "target_focused"}, "targets": targets}, "report_only"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert payload["calibration"]["targets"] == targets
+
+
+@pytest.mark.parametrize(
+    "calibration, args, message",
+    [
+        ({"svzt_target_gate_policy": "report_only"}, ("report_only",), "retired svzt_target_gate_policy"),
+        ({}, ("anything_goes",), "unknown calibration gate policy"),
+    ],
+)
+def test_calibration_resolver_refuses_bad_gate_inputs(tmp_path, calibration, args, message):
+    proc, payload = _run_resolver(tmp_path, calibration, *args)
+    assert proc.returncode != 0 and message in proc.stderr
+    assert payload is None
+
+
+def test_calibration_scripts_name_their_gate_policy():
+    from svztagent.workflows.calibrate import render_calibration_script
+
+    kwargs = dict(remote_root="/r", remote_logs_dir="/r/logs", remote_config_path="/r/inputs/c.yaml", postprocess_job_id="7")
+    # Tuning-iteration calibrations keep the improvement gate.
+    assert "c.resolved.yaml improvement_only <<'PY'" not in render_calibration_script(**kwargs)
+    assert "calibrate_0d_from_3d.resolved.yaml improvement_only <<'PY'" in render_calibration_script(**kwargs)
+    assert "calibrate_0d_from_3d.resolved.yaml report_only <<'PY'" in render_calibration_script(
+        **kwargs, gate_policy="report_only"
+    )
+    with pytest.raises(ConfigError, match="gate_policy"):
+        render_calibration_script(**kwargs, gate_policy="lenient")
+

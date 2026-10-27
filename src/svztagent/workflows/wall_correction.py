@@ -478,7 +478,6 @@ def run_wall_correction(
         remote_output_config=f"{layout['calibration_results']}/{CALIBRATED_MODEL}",
         remote_root=layout["calibration"],
     )
-    calibration_payload["calibration"]["svzt_target_gate_policy"] = policy.gate_policy
     calibration_payload["calibration"]["parameters"]["proximal_compliance_scale"] = {
         "enabled": True,
         "bounds": [float(fit.bounds[0]), float(fit.bounds[1])],
@@ -502,6 +501,7 @@ def run_wall_correction(
         cpus=config.defaults.scheduler.cpus,
         # An adopted run's postprocess has already completed.
         dependency_via_submit=postprocess_job_id is None,
+        gate_policy=policy.gate_policy,
     )
     (staged_calibration / "run_calibration.sh").write_text(calibration_script, encoding="utf-8")
     for path in (layout["calibration"], layout["calibration_inputs"], layout["calibration_results"], layout["calibration_logs"]):

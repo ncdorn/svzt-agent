@@ -899,6 +899,8 @@ def test_calibration_job_requests_r_only_target_focused_and_resolves_targets(tmp
     )
     resolved_path = config_path.with_name("calibrate_0d_from_3d.resolved.yaml")
     assert f"-m svzerodtrees.cli calibrate-0d-from-3d {resolved_path}" in script
+    # Tuning-iteration calibrations resolve their targets with the improvement gate.
+    assert f"{config_path} {resolved_path} improvement_only <<'PY'" in script
 
     config_path.parent.mkdir(parents=True)
     step = tmp_path / "resolve.py"
@@ -908,7 +910,7 @@ def test_calibration_job_requests_r_only_target_focused_and_resolves_targets(tmp
     explicit = json.loads(json.dumps(request))
     explicit["calibration"]["targets"] = {"mpa_pressure": {"vessel": "x"}}
     config_path.write_text(json.dumps(explicit), encoding="utf-8")
-    subprocess.run([sys.executable, str(step), str(config_path), str(resolved_path)], check=True)
+    subprocess.run([sys.executable, str(step), str(config_path), str(resolved_path), "improvement_only"], check=True)
     assert json.loads(resolved_path.read_text())["calibration"]["targets"] == {"mpa_pressure": {"vessel": "x"}}
     assert json.loads(config_path.read_text()) == explicit
 
@@ -934,7 +936,7 @@ def test_calibration_job_requests_r_only_target_focused_and_resolves_targets(tmp
         encoding="utf-8",
     )
     config_path.write_text(json.dumps(request), encoding="utf-8")
-    subprocess.run([sys.executable, str(step), str(config_path), str(resolved_path)], check=True)
+    subprocess.run([sys.executable, str(step), str(config_path), str(resolved_path), "improvement_only"], check=True)
     targets = json.loads(resolved_path.read_text())["calibration"]["targets"]
     assert targets["rpa_flow_split"] == {
         "rpa_vessel": "branch1_seg0",

@@ -1258,6 +1258,14 @@ class PatientImpedanceOverrides(BaseModel):
     tune_space: TuneSpaceConfig | None = None
 
 
+# svZeroDTrees ``full_pa_calibration_targets`` gate policies.  improvement_only:
+# the calibrated model must beat the tuned model on the MPA pressure / RPA split
+# targets (tuning iterations).  report_only: target scores are recorded but do
+# not block publication (the wall-correction step's matched 0D model).
+TargetGatePolicy = Literal["report_only", "improvement_only"]
+TARGET_GATE_POLICIES: tuple[str, ...] = ("report_only", "improvement_only")
+
+
 class WallCorrectionComplianceFitConfig(BaseModel):
     """Proximal-compliance multiplier fit for the wall-correction 0D calibration.
 
@@ -1298,7 +1306,7 @@ class WallCorrectionPolicyConfig(BaseModel):
     # The matched 0D model must reproduce the corrected 3D run (it is later
     # compared with the post-op 0D model), not beat the tuned 0D model, so its
     # target gates are reported but do not block publication.
-    gate_policy: Literal["report_only", "improvement_only"] = "report_only"
+    gate_policy: TargetGatePolicy = "report_only"
     compliance_fit: WallCorrectionComplianceFitConfig = Field(
         default_factory=WallCorrectionComplianceFitConfig
     )

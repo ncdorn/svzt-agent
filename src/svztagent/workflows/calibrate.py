@@ -21,6 +21,7 @@ from typing import Any, Callable
 import yaml
 
 from svztagent.config.load import detect_workspace_root, load_workspace_config, resolve_cluster
+from svztagent.config.models import TARGET_GATE_POLICIES, TargetGatePolicy
 from svztagent.core.errors import ConfigError
 from svztagent.core.monitor import poll_scheduler_state
 from svztagent.core.manifest import (
@@ -289,6 +290,7 @@ def _render_calibration_script(
     mem: str | None = None,
     cpus: str | None = None,
     dependency_via_submit: bool = False,
+    gate_policy: TargetGatePolicy = "improvement_only",
 ) -> str:
     """Render an upstream public calibration invocation.
 
@@ -298,8 +300,17 @@ def _render_calibration_script(
     rather than arbitrary sbatch flags.  The tune driver renders the script
     before the postprocess job exists, so with ``dependency_via_submit`` the
     driver supplies ``--dependency=afterok:<postprocess-job>`` at submission.
+
+    ``gate_policy`` is the svZeroDTrees target gate the job resolves the
+    MPA/LPA/RPA targets with: ``improvement_only`` for tuning iterations,
+    ``report_only`` for the wall-correction step's matched 0D model.  It is a
+    resolver argument, never a key in the staged upstream request.
     """
 
+    if gate_policy not in TARGET_GATE_POLICIES:
+        raise ConfigError(
+            f"calibration gate_policy must be one of {', '.join(TARGET_GATE_POLICIES)}; got {gate_policy!r}"
+        )
     header = [
         f"#SBATCH --chdir={remote_root}",
         f"#SBATCH --output={remote_logs_dir}/slurm-%j.out",
@@ -334,7 +345,7 @@ def _render_calibration_script(
             hooks,
             # target_focused QC needs MPA/LPA/RPA roles, which only exist once the
             # tuned model and its outlet mapping are on disk; resolve them here.
-            f"{quoted_python} - {quoted_config} {quoted_resolved} <<'PY'",
+            f"{quoted_python} - {quoted_config} {quoted_resolved} {shlex.quote(gate_policy)} <<'PY'",
             _RESOLVE_TARGETS_PY,
             "PY",
             f"{quoted_python} -m svzerodtrees.cli calibrate-0d-from-3d {quoted_resolved}",
@@ -355,12 +366,15 @@ from pathlib import Path
 
 import yaml
 
-config_path, resolved_path = Path(sys.argv[1]), Path(sys.argv[2])
+config_path, resolved_path, gate_policy = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+if gate_policy not in ("report_only", "improvement_only"):
+    raise SystemExit(f"[svzt] unknown calibration gate policy {gate_policy!r}")
 config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 calibration = config.setdefault("calibration", {})
-# Agent-only key (never passed upstream): the wall-correction step asks for
-# report_only; tuning-iteration calibrations keep improvement_only.
-gate_policy = calibration.pop("svzt_target_gate_policy", "improvement_only")
+if "svzt_target_gate_policy" in calibration:
+    # Requests staged before 2026-10-26 carried the gate in this key; the
+    # policy is now a job argument and the request is passed upstream as is.
+    raise SystemExit("[svzt] calibration request carries the retired svzt_target_gate_policy key; restage it")
 enforcement = str((calibration.get("observation_qc") or {}).get("enforcement", "")).lower()
 if enforcement == "target_focused" and not calibration.get("targets"):
     from svzerodtrees.calibration.target_roles import full_pa_calibration_targets
