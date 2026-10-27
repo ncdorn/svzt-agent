@@ -154,8 +154,8 @@ def relative_mismatch(expected: float, actual: float) -> float:
 
 
 PREOP_SOURCE_HINT = (
-    "run svzt run wall-correction and then svzt wall-correction-status "
-    "(svzt preop select is deprecated)"
+    "run svzt run wall-correction, svzt wall-correction-status until it completes, "
+    "then svzt preop finalize (svzt preop select is deprecated)"
 )
 
 

@@ -30,6 +30,7 @@ from typing import Any
 from svztagent.config.load import detect_workspace_root, load_workspace_config, resolve_cluster
 from svztagent.core.errors import ConfigError
 from svztagent.core.manifest import (
+    ConvergedPreopIteration,
     WallCorrectionRecord,
     _utc_now_iso,
     latest_wall_correction,
@@ -88,6 +89,7 @@ INFLOW = "inflow.flow"
 SOLVER_SCRIPT = "run_solver.sh"
 DESCRIPTOR = "postprocess_suite_metadata.json"
 CALIBRATED_MODEL = "calibrated_full_pa_zerod.json"
+FINALIZE_COMMAND = "svzt preop finalize"
 CALIBRATION_REPORTS = (
     CALIBRATED_MODEL,
     "calibration_summary.json",
@@ -125,6 +127,21 @@ class WallCorrectionStatus:
     status: str
     job_states: dict[str, str]
     results: dict[str, object]
+    # The correction published its matched 0D model, so ``svzt preop finalize``
+    # can record it as the pre-op source; ``finalized``: it already is.
+    finalizable: bool = False
+    finalized: bool = False
+
+
+@dataclass(frozen=True)
+class PreopFinalizeResult:
+    run_id: str
+    correction_id: str
+    # "written": first pre-op source; "replaced": a different source was
+    # replaced (``previous``); "unchanged": already recorded, nothing written.
+    action: str
+    handoff: ConvergedPreopIteration
+    previous: ConvergedPreopIteration | None
 
 
 def _sha256(path: Path) -> str:
@@ -618,22 +635,23 @@ def _summarize_calibration(local_results: Path) -> dict[str, object]:
     }
 
 
-def _record_preop_handoff(manifest, record: WallCorrectionRecord):
-    """Make the wall-corrected 3D run and its matched 0D model the pre-op source.
+def _wall_correction_handoff(record: WallCorrectionRecord) -> ConvergedPreopIteration:
+    """The pre-op source for a completed wall correction.
 
-    Post-op and adaptation read ``converged_preop_iteration``; this replaces the
-    deprecated ``svzt preop select``.  The tuned trees and outlet mapping stay in
-    the source iteration's results; the wall values are carried explicitly so
-    downstream stages reuse them instead of re-deriving E and damping.
+    Post-op and adaptation read ``converged_preop_iteration``: the
+    wall-corrected 3D directory and its BCs, the matched 0D model, the wall
+    values to reuse instead of re-deriving E and damping, and the source
+    iteration's results (tuned trees and outlet mapping).
     """
 
     tuning_results = str(PurePosixPath(record.remote_tuned_zerod_config).parent)
-    return record_converged_preop_iteration(
-        manifest,
+    return ConvergedPreopIteration(
         iteration=record.source_iteration,
         source_decision=None,
         selection_kind="wall_correction",
         reason=f"wall-corrected 3D run ({record.mode}) with its matched 0D model",
+        selected_at=_utc_now_iso(),
+        selected_by_command=FINALIZE_COMMAND,
         metrics=None,
         deltas=None,
         remote_iteration_dir=str(PurePosixPath(tuning_results).parent),
@@ -641,13 +659,21 @@ def _record_preop_handoff(manifest, record: WallCorrectionRecord):
         remote_tuned_zerod_config=str(record.results["matched_zerod_model"]),
         remote_canonical_coupler=f"{record.remote_threed_dir}/{COUPLER}",
         preop_job_id=record.solver_job_id,
-        selected_by_command="svzt wall-correction-status",
         wall_correction_id=record.correction_id,
         remote_tuning_results_dir=tuning_results,
         threed_overrides={
             "elasticity_modulus": float(record.rule["elasticity_modulus_corrected"]),
             "damping": float(record.rule["damping_corrected"]),
         },
+    )
+
+
+def _record_preop_handoff(manifest, record: WallCorrectionRecord):
+    handoff = _wall_correction_handoff(record)
+    return record_converged_preop_iteration(
+        manifest,
+        **handoff.model_dump(exclude={"selected_at"}),
+        at=handoff.selected_at,
     )
 
 
@@ -665,13 +691,7 @@ def query_wall_correction_status(
     root = detect_workspace_root(workspace_root)
     local_paths = build_local_run_paths(root, validated_run_id)
     manifest = read_manifest(local_paths.manifest)
-    record = (
-        next((item for item in manifest.wall_correction_runs if item.correction_id == correction_id), None)
-        if correction_id
-        else latest_wall_correction(manifest)
-    )
-    if record is None:
-        raise ConfigError(f"run '{validated_run_id}' has no wall-correction record")
+    record = _select_record(manifest, validated_run_id, correction_id)
     if transfer_adapter is None or scheduler_adapter is None:
         config = load_workspace_config(root)
         cluster = resolve_cluster(config, str(manifest.cluster.get("name")))
@@ -734,9 +754,9 @@ def query_wall_correction_status(
             "results": results,
         }
     )
+    # Only this wall-correction record changes; the pre-op source is written
+    # by the explicit ``svzt preop finalize`` (finalize_preop_source).
     manifest = record_wall_correction(manifest, updated)
-    if status == "completed" and results.get("matched_zerod_model"):
-        manifest = _record_preop_handoff(manifest, updated)
     write_manifest(manifest, local_paths.manifest)
     return WallCorrectionStatus(
         run_id=validated_run_id,
@@ -744,4 +764,92 @@ def query_wall_correction_status(
         status=status,
         job_states=states,
         results=results,
+        finalizable=status == "completed" and bool(results.get("matched_zerod_model")),
+        finalized=_handoff_matches(manifest.converged_preop_iteration, updated),
+    )
+
+
+# Handoff fields that record when and by which command it was written; every
+# other field is the pre-op source itself and must match for a no-op finalize.
+_HANDOFF_PROVENANCE_FIELDS = frozenset({"selected_at", "selected_by_command"})
+
+
+def _handoff_content(handoff: ConvergedPreopIteration | None) -> dict[str, object] | None:
+    if handoff is None:
+        return None
+    return {key: value for key, value in handoff.model_dump(mode="json").items() if key not in _HANDOFF_PROVENANCE_FIELDS}
+
+
+def _handoff_matches(current: ConvergedPreopIteration | None, record: WallCorrectionRecord) -> bool:
+    if current is None or current.wall_correction_id != record.correction_id:
+        return False
+    if record.status != "completed" or not record.results.get("matched_zerod_model"):
+        return False
+    return _handoff_content(current) == _handoff_content(_wall_correction_handoff(record))
+
+
+def _select_record(manifest, run_id: str, correction_id: str | None) -> WallCorrectionRecord:
+    record = (
+        next((item for item in manifest.wall_correction_runs if item.correction_id == correction_id), None)
+        if correction_id
+        else latest_wall_correction(manifest)
+    )
+    if record is None:
+        target = f"wall-correction record {correction_id!r}" if correction_id else "wall-correction record"
+        raise ConfigError(f"run '{run_id}' has no {target}")
+    return record
+
+
+def finalize_preop_source(
+    workspace_root: str | Path,
+    run_id: str,
+    *,
+    correction_id: str | None = None,
+) -> PreopFinalizeResult:
+    """Record a completed wall correction as the run's pre-op source (``svzt preop finalize``).
+
+    Local only (no remote calls).  Idempotent: if ``converged_preop_iteration``
+    already names this correction with the same content, nothing is written.
+    Refuses an unfinished or unpublished correction, and refuses to replace a
+    different pre-op source once post-op has been submitted from it.
+    """
+
+    validated_run_id = validate_run_id(run_id)
+    root = detect_workspace_root(workspace_root)
+    local_paths = build_local_run_paths(root, validated_run_id)
+    manifest = read_manifest(local_paths.manifest)
+    record = _select_record(manifest, validated_run_id, correction_id)
+    if record.status != "completed":
+        raise ConfigError(
+            f"wall correction {record.correction_id} is {record.status}; "
+            f"run svzt wall-correction-status {validated_run_id} until it completes"
+        )
+    if not record.results.get("matched_zerod_model"):
+        raise ConfigError(
+            f"wall correction {record.correction_id} published no matched 0D model "
+            f"({record.results.get('matched_zerod_reason') or 'no reason recorded'}); nothing to finalize"
+        )
+    current = manifest.converged_preop_iteration
+    if _handoff_matches(current, record):
+        return PreopFinalizeResult(
+            run_id=validated_run_id,
+            correction_id=record.correction_id,
+            action="unchanged",
+            handoff=current,
+            previous=None,
+        )
+    if current is not None and manifest.postop_run is not None:
+        raise ConfigError(
+            f"run '{validated_run_id}' already submitted post-op from its current pre-op source "
+            f"({current.selection_kind}, {current.wall_correction_id or iteration_dir_name(current.iteration)}); "
+            "start a new run instead of replacing it"
+        )
+    updated = _record_preop_handoff(manifest, record)
+    write_manifest(updated, local_paths.manifest)
+    return PreopFinalizeResult(
+        run_id=validated_run_id,
+        correction_id=record.correction_id,
+        action="written" if current is None else "replaced",
+        handoff=updated.converged_preop_iteration,
+        previous=current,
     )

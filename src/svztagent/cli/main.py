@@ -41,6 +41,7 @@ from svztagent.workflows.calibrate import (
     run_calibration,
 )
 from svztagent.workflows.wall_correction import (
+    finalize_preop_source,
     query_wall_correction_status,
     run_wall_correction,
 )
@@ -235,6 +236,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record the selected preop iteration without submitting selected-preop postprocess",
     )
     preop_select.set_defaults(handler=cmd_preop_select)
+
+    preop_finalize = preop_subparsers.add_parser(
+        "finalize",
+        help="Record a completed wall correction (3D run + matched 0D model) as the pre-op source; idempotent",
+    )
+    preop_finalize.add_argument("--run-id", required=True)
+    preop_finalize.add_argument(
+        "--correction-id", required=False, help="Wall-correction record to use (default: the latest)"
+    )
+    preop_finalize.set_defaults(handler=cmd_preop_finalize)
 
     config_cmd = subparsers.add_parser("config", help="Validate workspace configuration")
     config_subparsers = config_cmd.add_subparsers(dest="config_command", required=True)
@@ -703,6 +714,10 @@ def cmd_wall_correction_status(args: argparse.Namespace) -> int:
         print(f"  {label}: {state}")
     for key, value in result.results.items():
         print(f"  {key}: {value}")
+    if result.finalized:
+        print("Pre-op source: this correction (finalized)")
+    elif result.finalizable:
+        print(f"Next: svzt preop finalize --run-id {result.run_id} --correction-id {result.correction_id}")
     return 0
 
 
@@ -775,6 +790,35 @@ def cmd_preop_select(args: argparse.Namespace) -> int:
     print(f"Canonical coupler: {result.remote_canonical_coupler}")
     if result.postprocess_job_id:
         print(f"Selected-preop postprocess job ID: {result.postprocess_job_id}")
+    return 0
+
+
+def cmd_preop_finalize(args: argparse.Namespace) -> int:
+    workspace_root = detect_workspace_root(args.workspace_root)
+    result = finalize_preop_source(
+        workspace_root=workspace_root,
+        run_id=args.run_id,
+        correction_id=args.correction_id,
+    )
+    handoff = result.handoff
+    print(f"Run ID: {result.run_id}")
+    print(f"Correction ID: {result.correction_id}")
+    print(f"Pre-op source: {result.action}")
+    if result.previous is not None:
+        print(
+            f"  replaced: {result.previous.selection_kind} "
+            f"({result.previous.wall_correction_id or 'iteration ' + str(result.previous.iteration)})"
+        )
+    print(f"Source iteration: {handoff.iteration}")
+    print(f"Preop 3D dir: {handoff.remote_preop_dir}")
+    print(f"Coupler: {handoff.remote_canonical_coupler}")
+    print(f"Matched 0D model: {handoff.remote_tuned_zerod_config}")
+    print(f"Tuning results: {handoff.remote_tuning_results_dir}")
+    print(
+        "Wall: E {elasticity_modulus:.6g}, damping {damping}".format(**handoff.threed_overrides)
+        if handoff.threed_overrides
+        else "Wall: <no overrides>"
+    )
     return 0
 
 

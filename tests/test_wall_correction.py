@@ -24,7 +24,11 @@ from svztagent.hpc.interfaces import (
     SyncDirection,
 )
 from svztagent.workflows.tune_trees import init_run_workspace
-from svztagent.workflows.wall_correction import query_wall_correction_status, run_wall_correction
+from svztagent.workflows.wall_correction import (
+    finalize_preop_source,
+    query_wall_correction_status,
+    run_wall_correction,
+)
 
 
 PATIENT_ALIAS = "TST-STAN-x"
@@ -409,9 +413,15 @@ def test_status_fetches_reports_and_records_the_matched_0d_model(full_pa_run):
     assert record.status == "completed" and record.results["fitted_pulse_pressure_mmhg"] == 58.61
     assert record.results["matched_zerod_model"] == record.remote_calibrated_zerod_config
     assert record.results["matched_zerod_composite"] == 1.2
-    # The wall-corrected run becomes the pre-op source for post-op and adaptation.
+    # Status only records the correction; the pre-op source is an explicit finalize.
+    assert status.finalizable and not status.finalized
+    assert read_manifest(root / "runs" / RUN_ID / "manifest.yaml").converged_preop_iteration is None
+
+    finalized = finalize_preop_source(root, RUN_ID)
+    assert finalized.action == "written" and finalized.correction_id == record.correction_id
     handoff = read_manifest(root / "runs" / RUN_ID / "manifest.yaml").converged_preop_iteration
     assert handoff.selection_kind == "wall_correction" and handoff.wall_correction_id == record.correction_id
+    assert handoff.selected_by_command == "svzt preop finalize"
     assert handoff.remote_preop_dir == record.remote_threed_dir
     assert handoff.remote_tuned_zerod_config == record.remote_calibrated_zerod_config
     assert handoff.remote_tuning_results_dir == f"{remote_run}/iterations/iter-02/results"
@@ -419,6 +429,91 @@ def test_status_fetches_reports_and_records_the_matched_0d_model(full_pa_run):
         "elasticity_modulus": pytest.approx(810717.3883845098, rel=1e-12),
         "damping": 7694.9,
     }
+
+    # Idempotent: a second finalize, or a later status poll, rewrites nothing.
+    manifest_path = root / "runs" / RUN_ID / "manifest.yaml"
+    before = manifest_path.read_bytes()
+    again = finalize_preop_source(root, RUN_ID, correction_id=record.correction_id)
+    assert again.action == "unchanged" and manifest_path.read_bytes() == before
+    polled = query_wall_correction_status(
+        root, RUN_ID, transfer_adapter=transfer, scheduler_adapter=CountingScheduler("COMPLETED")
+    )
+    assert polled.finalized
+    assert read_manifest(manifest_path).converged_preop_iteration == handoff
+
+
+def _completed_correction(full_pa_run):
+    root, remote_run, files, _tuned_sha = full_pa_run
+    reports = {
+        "calibrated_full_pa_zerod.json": {"vessels": []},
+        "calibration_targets.json": {"status": "pass", "candidate": {"composite_score": 1.2}},
+        "calibration_compliance_fit.json": {"status": "pass", "scale": 0.91},
+    }
+    transfer = RemoteFiles(files, reports)
+    run_wall_correction(
+        root,
+        RUN_ID,
+        iteration=2,
+        mode=ExecutionMode.EXECUTE,
+        transfer_adapter=transfer,
+        scheduler_adapter=CountingScheduler(),
+        remote_exec_adapter=FakeRemoteExecAdapter(),
+        fetch_adapter=transfer,
+    )
+    query_wall_correction_status(root, RUN_ID, transfer_adapter=transfer, scheduler_adapter=CountingScheduler())
+    return root
+
+
+def test_finalize_refuses_an_unfinished_or_unknown_correction(full_pa_run):
+    root, _remote_run, files, _tuned_sha = full_pa_run
+    with pytest.raises(ConfigError, match="no wall-correction record"):
+        finalize_preop_source(root, RUN_ID)
+    transfer = RemoteFiles(files)
+    run_wall_correction(
+        root,
+        RUN_ID,
+        iteration=2,
+        mode=ExecutionMode.EXECUTE,
+        transfer_adapter=transfer,
+        scheduler_adapter=CountingScheduler(),
+        remote_exec_adapter=FakeRemoteExecAdapter(),
+        fetch_adapter=transfer,
+    )
+    with pytest.raises(ConfigError, match="is submitted"):
+        finalize_preop_source(root, RUN_ID)
+    with pytest.raises(ConfigError, match="no wall-correction record 'wallcorr-other'"):
+        finalize_preop_source(root, RUN_ID, correction_id="wallcorr-other")
+    assert read_manifest(root / "runs" / RUN_ID / "manifest.yaml").converged_preop_iteration is None
+
+
+def test_finalize_replaces_a_legacy_source_only_before_postop(full_pa_run):
+    from svztagent.core.manifest import PostopRunRecord, record_converged_preop_iteration, write_manifest
+
+    root = _completed_correction(full_pa_run)
+    path = root / "runs" / RUN_ID / "manifest.yaml"
+    legacy = record_converged_preop_iteration(
+        read_manifest(path),
+        iteration=2,
+        source_decision="accept",
+        selection_kind="manual",
+        reason="legacy selection",
+        metrics=None,
+        deltas=None,
+        remote_iteration_dir="/r/iter-02",
+        remote_preop_dir="/r/iter-02/preop",
+        remote_tuned_zerod_config="/r/iter-02/results/tuned.json",
+        remote_canonical_coupler="/r/iter-02/preop/svzerod_3Dcoupling.json",
+        preop_job_id="11",
+    )
+    write_manifest(legacy.model_copy(update={"postop_run": PostopRunRecord(source_preop_iteration=2, local_dir="/l", remote_dir="/r")}), path)
+    with pytest.raises(ConfigError, match="already submitted post-op"):
+        finalize_preop_source(root, RUN_ID)
+    assert read_manifest(path).converged_preop_iteration.selection_kind == "manual"
+
+    write_manifest(legacy, path)
+    result = finalize_preop_source(root, RUN_ID)
+    assert result.action == "replaced" and result.previous.selection_kind == "manual"
+    assert read_manifest(path).converged_preop_iteration.selection_kind == "wall_correction"
 
 
 def test_status_reports_a_failed_calibration_gate(full_pa_run):
@@ -488,6 +583,9 @@ def test_an_unpublished_calibration_has_no_matched_model(full_pa_run):
     assert status.results["matched_zerod_model"] is None
     assert status.results["composite_baseline"] == 1.4
     assert read_manifest(root / "runs" / RUN_ID / "manifest.yaml").converged_preop_iteration is None
+    assert not status.finalizable
+    with pytest.raises(ConfigError, match="is calibration_failed"):
+        finalize_preop_source(root, RUN_ID)
 
 
 def _run_resolver(tmp_path, calibration: dict, *args: str):
@@ -564,4 +662,15 @@ def test_calibration_scripts_name_their_gate_policy():
     )
     with pytest.raises(ConfigError, match="gate_policy"):
         render_calibration_script(**kwargs, gate_policy="lenient")
+
+
+def test_cli_preop_finalize_is_idempotent(full_pa_run, capsys):
+    from svztagent.cli.main import main
+
+    root = _completed_correction(full_pa_run)
+    assert main(["--workspace-root", str(root), "preop", "finalize", "--run-id", RUN_ID]) == 0
+    first = capsys.readouterr().out
+    assert "Pre-op source: written" in first and "Wall: E 810717, damping 7694.9" in first
+    assert main(["--workspace-root", str(root), "preop", "finalize", "--run-id", RUN_ID]) == 0
+    assert "Pre-op source: unchanged" in capsys.readouterr().out
 
